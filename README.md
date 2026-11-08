@@ -1,5 +1,8 @@
 # Residue
 
+[![CI](https://github.com/gztcode/residue/actions/workflows/ci.yml/badge.svg)](https://github.com/gztcode/residue/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/gztcode/residue?label=release)](https://github.com/gztcode/residue/releases/latest)
+
 **看清 AI 工具在你自己机器上留下的缓存，然后安全地收回它。**
 
 `uv`、`npm/npx`、`pipx` 这些临时包管理器会在你不知情的时候攒下几十 GB 缓存。Residue 做三件事：
