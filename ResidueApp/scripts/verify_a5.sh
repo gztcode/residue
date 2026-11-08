@@ -16,6 +16,31 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
+# ---------------------------------------------------------------------------
+# 【跨版本健壮性】从 Info.plist 取一个键的值；**键不存在时输出空串**
+#
+# ⚠️ **不能用 `plutil -extract <key> ... || echo ""`**：
+#   macOS 15 上 `plutil -extract` 在键不存在时**把错误信息写进 stdout**（不是 stderr），
+#   于是 `||` 兜底分支不会触发，错误文本被当成键值。
+#   实测（GitHub macOS-15 runner）：
+#     LSUI = "build/Residue.app/Contents/Info.plist: Could not extract value, error: ..."
+#   结果断言把「键不存在」判成「设了错值」→ **误报**。
+#   同一脚本在本机 macOS 27 上是「空串 + 非零退出码」，所以本地永远绿。
+#
+#   这与本项目此前 4 次「校验脚本自己说谎」同类，但方向相反：
+#   前几次是**漏报**（该红的时候绿），这次是**误报**（该绿的时候红）。
+#   **判据不可靠，两个方向都会出错。**
+#
+# 用 PlistBuddy 先判存在性再取值，行为跨版本一致。
+plist_get() {
+  local key="$1" plist="$2"
+  if /usr/libexec/PlistBuddy -c "Print :$key" "$plist" >/dev/null 2>&1; then
+    /usr/libexec/PlistBuddy -c "Print :$key" "$plist" 2>/dev/null
+  else
+    echo ""
+  fi
+}
+
 APP="${1:-build/Residue.app}"
 PASS=0; FAIL=0; SKIP=0; SKIPPED_ITEMS=()
 
@@ -56,7 +81,7 @@ if plutil -lint "$PLIST" > /dev/null 2>&1; then ok "Info.plist 是合法 plist";
 check_key() {
   local key="$1" want="$2"
   local got
-  got="$(plutil -extract "$key" raw -o - "$PLIST" 2>/dev/null || echo "")"
+  got="$(plist_get "$key" "$PLIST")"
   if [ "$got" = "$want" ]; then
     ok "$key = $want"
   else
@@ -68,14 +93,14 @@ check_key "CFBundleIdentifier" "com.residue.app"
 check_key "LSMinimumSystemVersion" "14.0"
 
 for k in CFBundleShortVersionString CFBundleVersion NSHumanReadableCopyright; do
-  v="$(plutil -extract "$k" raw -o - "$PLIST" 2>/dev/null || echo "")"
+  v="$(plist_get "$k" "$PLIST")"
   if [ -n "$v" ]; then ok "$k 有值（${v}）"; else bad "$k 缺失或为空"; fi
 done
 
 # 菜单栏形态（**ADR-02 原文：不设 LSUIElement** —— 需要主窗口与常规激活行为）
 # ⚠️ 本检查曾写成「必须为 true」，把断言钉在了错的一侧；ADR-02 从未如此要求。
-LSUI=$(plutil -extract LSUIElement raw -o - "$PLIST" 2>/dev/null || echo "absent")
-if [ "$LSUI" = "absent" ] || [ -z "$LSUI" ]; then
+LSUI=$(plist_get LSUIElement "$PLIST")
+if [ -z "$LSUI" ]; then
   ok "未设 LSUIElement（符合 ADR-02：需要主窗口与 Dock 激活行为）"
 else
   bad "设了 LSUIElement = $LSUI → 失去 Dock 与常规激活（ADR-02 明确要求不设）"
@@ -87,7 +112,7 @@ if [ -f "$APP/Contents/Resources/Residue.icns" ]; then
 else
   bad "bundle 内缺 Residue.icns → Finder/登录项/TCC 显示通用白纸图标"
 fi
-if [ "$(plutil -extract CFBundleIconFile raw -o - "$PLIST" 2>/dev/null || echo "")" = "Residue" ]; then
+if [ "$(plist_get CFBundleIconFile "$PLIST")" = "Residue" ]; then
   ok "Info.plist 声明 CFBundleIconFile = Residue"
 else
   bad "Info.plist 未声明 CFBundleIconFile"
