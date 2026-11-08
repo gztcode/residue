@@ -315,14 +315,47 @@ final class L0ProbeTests: XCTestCase {
     }
 
     /// 目录候选：若某进程的 cwd 在该目录下 → 判定为被持有。
-    func testDirectoryCandidateHeldWhenProcessCwdInside() {
-        var snapshot = L0Snapshot()
-        snapshot.cwdPaths = ["/tmp/some/workdir"]
-        let dirPath = "/tmp/some/workdir/sub"
+    /// **候选（目录）是某进程 cwd 的祖先 → 判为被持有。**
+    ///
+    /// ## 这条测试曾经把 bug 当成了规格
+    ///
+    /// 原版是：
+    /// ```swift
+    /// snapshot.cwdPaths = ["/tmp/some/workdir"]      // cwd
+    /// let dirPath = "/tmp/some/workdir/sub"          // 候选在 cwd 之下
+    /// ```
+    /// 并断言「判定为被持有」—— 那是**反的**。
+    ///
+    /// 契约原文（V6 定稿 · K2 裁定）：
+    /// 「候选（目录）**是**任一同 uid 进程 cwd 的祖先路径」。
+    /// 也就是 cwd 在候选**里面**，不是候选在 cwd 里面。
+    ///
+    /// 两个方向的实际差别：
+    /// - 进程在 `/a/b/c` 工作，候选 `/a/b` → 契约判在用（**原实现漏了 → 会误删**）
+    /// - 进程在 `/a/b` 工作，候选 `/a/b/c` → 契约不判（原实现判 → 过度保守）
+    ///
+    /// 第一行是灾难。**测试写反了方向，就永远抓不到它。**
+    func testDirectoryCandidateIsAncestorOfCwd() {
+        // ① 契约方向：进程 cwd 在候选**里面** → 候选在用
+        var inside = L0Snapshot()
+        inside.cwdPaths = ["/tmp/some/workdir/sub/deep"]
         XCTAssertTrue(
             L0Probe.isHeld(identity: FileIdentity(dev: 1, ino: 2),
-                           isDirectory: true, path: dirPath, by: snapshot),
-            "进程 cwd 是候选目录的祖先 → 判定为被持有"
+                           isDirectory: true, path: "/tmp/some/workdir", by: inside),
+            "cwd 在候选目录之下 → 候选正在被使用"
+        )
+
+        // ② 反方向：候选在 cwd 之下 → **契约不判在用**
+        //
+        // 这不是遗漏，是刻意取舍：若「候选在 cwd 之下」也判在用，
+        // 那么任何进程只要 cwd 是 `/Users/<user>`，家目录下**所有**缓存都不可删
+        // —— 产品直接失效。契约选了「宁可少删一点，也不要一片全锁」。
+        var outside = L0Snapshot()
+        outside.cwdPaths = ["/tmp/some/workdir"]
+        XCTAssertFalse(
+            L0Probe.isHeld(identity: FileIdentity(dev: 1, ino: 3),
+                           isDirectory: true, path: "/tmp/some/workdir/sub", by: outside),
+            "候选在 cwd 之下**不**判在用（否则家目录里的一切都不可删）"
         )
     }
 

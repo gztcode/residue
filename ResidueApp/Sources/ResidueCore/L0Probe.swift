@@ -149,6 +149,12 @@ public enum L0Probe {
         /// **不能看返回值**，只能看 `errno`（实测约束 4）。
         public let errno: Int32
 
+        /// 公开构造：**测试要能造出「枚举失败」这一态**（真机不可确定性构造）。
+        public init(fds: [Int32], errno: Int32) {
+            self.fds = fds
+            self.errno = errno
+        }
+
         public var success: Bool { errno == 0 }
     }
 
@@ -200,9 +206,116 @@ public enum L0Probe {
     /// - Parameter excludePIDs: **必须排除的 pid**（含产品自身）。
     ///   产品自己 `open()` 候选做 lock 探测时，若不排除自身就会**把自己判成活引用**
     ///   → `a` / `b` 失真（IF-03「自污染防护」）。
+    /// 进程表的一项（**可注入的最小信息**）。
+    ///
+    /// 只带 pid 与 uid —— 判定只需要这两样就能决定「跨 uid 跳过」还是「同 uid 深查」。
+    /// 其余（fd 列表 / 文件身份 / cwd）全部走 `ProcessProbe`，这样测试可以只替换其中一环。
+    public struct ProcessEntry: Sendable, Equatable {
+        public let pid: pid_t
+        public let uid: uid_t
+        public init(pid: pid_t, uid: uid_t) {
+            self.pid = pid
+            self.uid = uid
+        }
+    }
+
+    /// 进程探针（**依赖注入点**）。
+    ///
+    /// ## 为什么需要这个协议
+    ///
+    /// `degraded = true` 是 AC-14 第一类（来源/进程不可读 → 权限受阻）的**唯一入口**。
+    /// 而「同 uid 进程 fd 枚举失败」在真机上**不可确定性构造**
+    /// （架构裁定 CR 里已确认：`chmod 000` 只会撞 `E-101`、`PT_DENY_ATTACH` 不产生 EPERM、
+    /// 自然态实测 EPERM 计数恒 0）。
+    ///
+    /// 于是此前 `degraded` 那条路径**一条测试都没有** —— 只有
+    /// 「本机枚举成功 → degraded 应为 false」这种同义反复。
+    /// **一条永远不为真的分支，等于没实现。**
+    ///
+    /// 注入之后可以构造：假 probe 对同 uid 进程返回 `errno = EPERM` → 断言 degraded == true。
+    /// 这不改判定逻辑，只换数据来源。
+    public protocol ProcessProbe: Sendable {
+        /// 枚举该进程的 vnode 类 fd。
+        func fdList(pid: pid_t) -> FDList
+        /// 某个 fd 指向的文件身份（`dev`, `ino`）。
+        func identity(pid: pid_t, fd: Int32) -> FileIdentity?
+        /// 该进程的工作目录。
+        func cwd(pid: pid_t) -> String?
+    }
+
+    /// 真实系统调用实现（生产路径）。
+    public struct SystemProcessProbe: ProcessProbe {
+        public init() {}
+
+        public func fdList(pid: pid_t) -> FDList {
+            L0Probe.vnodeFDList(of: pid)
+        }
+
+        public func identity(pid: pid_t, fd: Int32) -> FileIdentity? {
+            // ⚠️ 必须是 `vnode_fdinfowithpath`（= `proc_fileinfo` 24 B + `vnode_info_path`），
+            //    **不是** `vnode_info_path`（实测约束 2）——后者会读出 `dev=1, ino=0` 的垃圾。
+            var vfpBuf = vnode_fdinfowithpath()
+            // 缓冲区必须 ≥ `PROC_PIDFDVNODEPATHINFO_SIZE`（1200 B）；传 1176 会 ENOMEM 失败。
+            let vnBytes = Int32(MemoryLayout<vnode_fdinfowithpath>.stride)
+            let vn = withUnsafeMutablePointer(to: &vfpBuf) { ptr -> Int32 in
+                proc_pidfdinfo(pid, fd, PROC_PIDFDVNODEPATHINFO, ptr, vnBytes)
+            }
+            guard vn > 0 else { return nil }
+            return FileIdentity(vst: vfpBuf.pvip.vip_vi.vi_stat)
+        }
+
+        public func cwd(pid: pid_t) -> String? {
+            var cwdBuf = vnode_info_path()
+            let cwdBytes = Int32(MemoryLayout<vnode_info_path>.stride)
+            let cw = withUnsafeMutablePointer(to: &cwdBuf) { ptr -> Int32 in
+                proc_pidinfo(pid, PROC_PIDVNODEPATHINFO, 0, ptr, cwdBytes)
+            }
+            guard cw > 0 else { return nil }
+            // `vip_path` 在 Swift 里已是 `Tuple` of `CChar`（不是指针）。
+            // 借整体内存按 C 字符串读取——避开 tuple → Array 转换与
+            // `withUnsafePointer(to:)` 的独占访问冲突。
+            let path = withUnsafeBytes(of: &cwdBuf.vip_path) { raw -> String in
+                let base = raw.baseAddress!.assumingMemoryBound(to: CChar.self)
+                return String(cString: base)
+            }
+            return path.isEmpty ? nil : path
+        }
+    }
+
+    /// 读真实进程表（`sysctl KERN_PROC_ALL`）。失败返回 `nil`。
+    public static func realProcessTable() -> [ProcessEntry]? {
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0]
+        var length = 0
+        guard sysctl(&mib, 4, nil, &length, nil, 0) == 0, length > 0 else {
+            return nil
+        }
+        let count = length / MemoryLayout<kinfo_proc>.stride
+        var procs = [kinfo_proc](repeating: kinfo_proc(), count: count)
+        guard sysctl(&mib, 4, &procs, &length, nil, 0) == 0 else {
+            return nil
+        }
+        let realCount = length / MemoryLayout<kinfo_proc>.stride
+        var out: [ProcessEntry] = []
+        out.reserveCapacity(realCount)
+        for i in 0..<realCount {
+            let proc = procs[i]
+            let pid = proc.kp_proc.p_pid
+            guard pid > 0 else { continue }
+            out.append(ProcessEntry(pid: pid, uid: proc.kp_eproc.e_ucred.cr_uid))
+        }
+        return out
+    }
+
+    /// 采集一次快照。
+    ///
+    /// - Parameters:
+    ///   - probe: 进程探针（生产用 `SystemProcessProbe`；测试可注入假实现）。
+    ///   - processTable: 进程表（`nil` = 读真实）。
     public static func snapshot(
         excludePIDs: Set<pid_t> = [],
-        now: Date = Date()
+        now: Date = Date(),
+        probe: ProcessProbe = SystemProcessProbe(),
+        processTable: [ProcessEntry]? = nil
     ) -> L0Snapshot {
         var snapshot = L0Snapshot(capturedAt: now)
         snapshot.coverage = L0Coverage()
@@ -211,34 +324,22 @@ public enum L0Probe {
         let myPID = getpid()
 
         // ---- 进程表 ----
-        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0]
-        var length = 0
-        guard sysctl(&mib, 4, nil, &length, nil, 0) == 0, length > 0 else {
+        guard let processes = processTable ?? realProcessTable() else {
             // 连进程表都读不到 → **本用户进程也看不到** → 按「同 uid 失败」降级。
             snapshot.degraded = true
             return snapshot
         }
-        let count = length / MemoryLayout<kinfo_proc>.stride
-        var procs = [kinfo_proc](repeating: kinfo_proc(), count: count)
-        guard sysctl(&mib, 4, &procs, &length, nil, 0) == 0 else {
-            snapshot.degraded = true
-            return snapshot
-        }
-        let realCount = length / MemoryLayout<kinfo_proc>.stride
 
         var inodeOwners: [FileIdentity: [pid_t]] = [:]
         var cwdPaths = Set<String>()
 
-        for i in 0..<realCount {
-            let proc = procs[i]
-            let pid = proc.kp_proc.p_pid
-            if pid <= 0 { continue }
+        for entry in processes {
+            let pid = entry.pid
 
-            // 自身与显式排除项：**归集但不计入 `P_now`**（自污染防护）。
-            let isExcluded = (pid == myPID) || excludePIDs.contains(pid)
-
-            let ownerUID = proc.kp_eproc.e_ucred.cr_uid
-            if ownerUID != myUID {
+            // 排除项的处理在**最后统一过滤**（见下方「排除自身 / 排除项」）——
+            // 这里不提前跳过，因为倒排表要记录「谁打开过」，过滤是「是否算被持有」的事，
+            // 两件事分开才不会漏掉「只有排除者打开」那种边界。
+            if entry.uid != myUID {
                 // 跨 uid：**恒不可读**，不计入 `degraded`（ADR-03 实测约束 ③）。
                 snapshot.coverage.statOtherUID += 1
                 continue
@@ -246,9 +347,7 @@ public enum L0Probe {
             snapshot.coverage.sameUIDTotal += 1
 
             // ---- fd 列表 ----
-            // `proc_pidinfo` 签名（Swift 侧）：
-            //   (pid: Int32, flavor: Int32, arg: UInt64, buf: UnsafeMutableRawPointer?, bufSize: Int32) -> Int32
-            let fdList = Self.vnodeFDList(of: pid)
+            let fdList = probe.fdList(pid: pid)
             if !fdList.success {
                 if fdList.errno == EPERM {
                     // 同 uid 也读不到 → **这才是真正的「权限受阻」**（AC-14 语义）。
@@ -260,41 +359,16 @@ public enum L0Probe {
             snapshot.coverage.sameUIDRead += 1
 
             // 只处理 **vnode 类** fd（socket / pipe 等不是文件）。
-            // 筛选在 `vnodeFDList` 里做，这里拿到的已经是纯 vnode fd 号。
             for fd in fdList.fds {
-
-
-                // ⚠️ 必须是 `vnode_fdinfowithpath`（= `proc_fileinfo` 24 B + `vnode_info_path`），
-                //    **不是** `vnode_info_path`（实测约束 2）——后者会读出 `dev=1, ino=0` 的垃圾。
-                var vfpBuf = vnode_fdinfowithpath()
-                // 缓冲区必须 ≥ `PROC_PIDFDVNODEPATHINFO_SIZE`（1200 B）；传 1176 会 ENOMEM 失败。
-                let vnBytes = Int32(MemoryLayout<vnode_fdinfowithpath>.stride)
-                let vn = withUnsafeMutablePointer(to: &vfpBuf) { ptr -> Int32 in
-                    proc_pidfdinfo(pid, fd, PROC_PIDFDVNODEPATHINFO, ptr, vnBytes)
-                }
-                guard vn > 0 else { continue }
-
-                let identity = FileIdentity(vst: vfpBuf.pvip.vip_vi.vi_stat)
+                guard let identity = probe.identity(pid: pid, fd: fd) else { continue }
                 var owners = inodeOwners[identity] ?? []
                 owners.append(pid)
                 inodeOwners[identity] = owners
             }
 
             // ---- cwd ----
-            var cwdBuf = vnode_info_path()
-            let cwdBytes = Int32(MemoryLayout<vnode_info_path>.stride)
-            let cw = withUnsafeMutablePointer(to: &cwdBuf) { ptr -> Int32 in
-                proc_pidinfo(pid, PROC_PIDVNODEPATHINFO, 0, ptr, cwdBytes)
-            }
-            if cw > 0 {
-                // `vip_path` 在 Swift 里已是 `Tuple` of `CChar`（不是指针）。
-                // 借整体内存按 C 字符串读取——避开 tuple → Array 转换与
-                // `withUnsafePointer(to:)` 的独占访问冲突。
-                let path = withUnsafeBytes(of: &cwdBuf.vip_path) { raw -> String in
-                    let base = raw.baseAddress!.assumingMemoryBound(to: CChar.self)
-                    return String(cString: base)
-                }
-                if !path.isEmpty { cwdPaths.insert(path) }
+            if let path = probe.cwd(pid: pid) {
+                cwdPaths.insert(path)
             }
         }
 
@@ -333,9 +407,31 @@ public enum L0Probe {
         // ① fd 命中
         if snapshot.inodes[identity] != nil { return true }
 
-        // ② 候选是某进程 cwd 的祖先（目录）
+        // ② **候选（目录）是某进程 cwd 的祖先** → 该目录正在被使用
+        //
+        // 契约原文（V6 定稿 · K2 裁定，R2 ADR-03）：
+        //   「持有」判据 = `(dev, ino)` 命中同 uid 进程的 fd 集合，
+        //   **或候选（目录）是任一同 uid 进程 cwd 的祖先路径**
+        //
+        // ## 这里曾经把方向写反了，而且会误删
+        //
+        // 原实现是 `isAncestor(cwd, of: path)`（cwd 是候选的祖先），
+        // 而契约要的是 `isAncestor(path, of: cwd)`（**候选是 cwd 的祖先**）。
+        //
+        // 两个方向在真实场景里的差别：
+        //
+        // | 场景 | 契约 | 原实现 |
+        // |---|---|---|
+        // | 候选 `/a/b`，某进程 cwd = `/a/b/c/d`（在候选里工作） | **在用** | 判不出 → **误删** |
+        // | 候选 `/a/b/c`，某进程 cwd = `/a/b`（在外面） | 不判在用 | 判在用（过度保守） |
+        //
+        // 第一行是灾难：进程正在那个目录里干活，产品把它整个 rename 进废纸篓。
+        // 第二行只是少删一点，无害。
+        //
+        // **为什么本机的测试没抓到**：原测试 `testDirectoryCandidateHeldWhenProcessCwdInside`
+        // 按错误方向写了断言，于是"验证通过"——**测试把 bug 当成了规格**。
         if isDirectory {
-            for cwd in snapshot.cwdPaths where isAncestor(cwd, of: path) {
+            for cwd in snapshot.cwdPaths where isAncestor(path, of: cwd) {
                 return true
             }
         }
