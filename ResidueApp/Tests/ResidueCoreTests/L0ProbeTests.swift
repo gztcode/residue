@@ -231,15 +231,44 @@ final class L0ProbeTests: XCTestCase {
         }
         let gotCount = Int(got) / MemoryLayout<proc_fdinfo>.stride
 
-        // 解析出的 fd 号（= 数组下标）应与地面真值**完全一致**
-        var parsed = Set<Int32>()
-        for j in 0..<gotCount { parsed.insert(Int32(j)) }
-        XCTAssertEqual(
-            parsed, realFDs,
-            "按 8 B stride 解析出的 fd 下标集合应与 fcntl 实测集合完全一致；"
-            + "不一致说明 stride 假设错了（24 B 会读进 3 倍脏数据）"
+        // ---- 用**生产原语**解析，不在测试里另写一份 ----
+        //
+        // ⚠️ 这条测试原来自己写了一份解析，而且是按**数组下标**当 fd 号
+        // （`parsed.insert(Int32(j))`）。生产代码改成读 `proc_fd` 字段后，
+        // 这份测试副本没跟着改 —— 于是它在 CI 上持续红，而本机绿。
+        //
+        // **这正是 D-1 的温床：同一段解析逻辑存在两份，各自腐坏。**
+        // 现在改为直接调 `L0Probe.vnodeFDList`，测试不再持有解析副本。
+        let list = L0Probe.vnodeFDList(of: proc.kp_proc.p_pid)
+        XCTAssertTrue(list.success, "自身进程枚举应成功（errno=\(list.errno)）")
+        let parsed = Set(list.fds)
+
+        // ---- 对 stride 错误敏感的断言 ----
+        //
+        // 若按 24 B 解析（v1.6 的错误假设），`gotCount` 只有实际的 1/3，
+        // 后 2/3 的 fd 会丢失；且读进的是错位的字节，fd 号会是乱码。
+        // 下面三条合起来能判死那种实现：
+        //
+        // ① 每个解析出的 fd 都必须是真实有效的（乱码 fd 不在 fcntl 集合里）
+        XCTAssertTrue(
+            parsed.isSubset(of: realFDs),
+            "解析出了不存在的 fd 号 \(parsed.subtracting(realFDs).sorted().prefix(8))"
+            + " —— 说明 stride 假设错（24 B 会读进脏数据）或 fd 号取自下标"
         )
-        XCTAssertTrue(parsed.contains(myFD), "刚打开的 fd 必须出现在解析结果里")
+        // ② 每个都必须能 fstat（vnode 类确实可 fstat；乱码 fd 会失败）
+        for fd in parsed {
+            var st = stat()
+            XCTAssertEqual(
+                fstat(fd, &st), 0,
+                "解析出的 fd \(fd) 无法 fstat —— 它是脏数据"
+            )
+        }
+        // ③ 刚打开的临时文件必须出现在结果里（**这一条抓「漏了后段」**）
+        XCTAssertTrue(
+            parsed.contains(myFD),
+            "刚打开的 fd \(myFD) 不在解析结果里（结果共 \(parsed.count) 项）"
+            + " —— 若按 24 B 解析，后 2/3 的 fd 会整段丢失"
+        )
     }
 
     /// **失败时返回 0 而非 −1**，且 `errno` 才有意义（ADR-03 失败判据）。

@@ -373,7 +373,9 @@ fi
 # 这是比「README 存在」更重要的检查：文档骗人是比代码 bug 更贵的事故。
 if [ -f "$README" ] && grep -q "TrashExecutor.swift. 里..没有任何删除调用" "$README" 2>/dev/null; then
   RM_IN_EXEC=$(grep -v '^[[:space:]]*//' Sources/ResidueCore/TrashExecutor.swift 2>/dev/null \
-               | grep -cE 'removeItem|unlink|\brm ' || true)
+               | grep -cE '(removeItem|unlink|[^a-zA-Z]rm[^a-zA-Z])' || true)
+  # ⚠️ 不用 `\b`：macOS 的 BSD grep 不支持单词边界（GNU 扩展），会静默不命中。
+  # 用「前后都不是字母」的字符类代替。
   if [ "${RM_IN_EXEC:-0}" -eq 0 ]; then
     ok "README 承诺「TrashExecutor 无删除调用」，实测一致（且已写明 StateFile 删的是自己的临时文件）"
   else
