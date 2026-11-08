@@ -432,7 +432,12 @@ echo "--- 十、L0 判定的契约常量（本机绿、CI 红那一类）---"
 # 这类"实测巧合"写进注释后会被当成契约，所以除了修正代码，还要钉一条静态断言。
 
 # fd 号必须来自结构体字段
-if grep -qF 'fdInfo.proc_fd' "$CORE_DIR/L0Probe.swift" 2>/dev/null; then
+# 判据用「读 .proc_fd 字段」而不是某个具体变量名 ——
+# 变量名会随重构改（`fdInfo` → `info`），断言不该跟着腐坏。
+# ⚠️ 不用 `\b`（单词边界）：macOS 的 BSD grep 不支持它，模式会静默不命中。
+# 实测：`grep -E '\.proc_fd\b'` 未命中，`grep -E '\.proc_fd'` 命中。
+# 这又是一条「工具行为跨实现不一致」——与 `plutil` / `NSError.domain` 同类。
+if grep -qE '\.proc_fd' "$CORE_DIR/L0Probe.swift" 2>/dev/null; then
   ok "fd 号取自 proc_fdinfo.proc_fd 字段（不是数组下标）"
 else
   bad "fd 号未取自 proc_fd 字段 → L0 判定会错位，可能误删活文件"

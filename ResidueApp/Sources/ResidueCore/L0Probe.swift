@@ -137,6 +137,62 @@ public struct L0Snapshot: Sendable {
 /// L0 活引用探测器（契约 ADR-03 / IF-03）。
 public enum L0Probe {
 
+    // MARK: - fd 枚举原语（**唯一实现处**）
+
+    /// 一次 `PROC_PIDLISTFDS` 枚举的结果。
+    public struct FDList: Sendable {
+        /// **vnode 类** fd 号（已过滤掉 socket / pipe 等）。
+        public let fds: [Int32]
+        /// 查询失败时的 `errno`（`0` = 成功）。
+        ///
+        /// **注意**：`proc_pidinfo` 失败时返回 `0` 而不是 `−1`，所以成败
+        /// **不能看返回值**，只能看 `errno`（实测约束 4）。
+        public let errno: Int32
+
+        public var success: Bool { errno == 0 }
+    }
+
+    /// 枚举某进程的 **vnode 类** fd 号。
+    ///
+    /// ## 为什么把这段抽成公开原语
+    ///
+    /// 1. **可测**：`snapshot()` 只返回「被持有的候选」，没有「解析出的 fd 集合」
+    ///    这个中间结果 —→ 而「fd 号取错了」恰恰只能在这个层面观测。
+    ///    没有这个原语，D-1 那类错误只能靠「运气好撞到不连续的 fd 布局」才发现。
+    /// 2. **单一实现**：解析逻辑写两遍（生产一份、测试一份）正是 D-1 的温床
+    ///    —— 两份会各自腐坏，而且测试那份往往写得"看起来对"。
+    public static func vnodeFDList(of pid: Int32) -> FDList {
+        let stride = MemoryLayout<proc_fdinfo>.stride
+
+        // 第一步：查所需字节数。返回值是**字节数**，不是元素数（实测约束 1）。
+        let need = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, nil, 0)
+        if need <= 0 {
+            return FDList(fds: [], errno: errno)
+        }
+        let capacity = Int(need) / stride
+        guard capacity > 0 else { return FDList(fds: [], errno: 0) }
+
+        var buf = [proc_fdinfo](repeating: proc_fdinfo(), count: capacity)
+        let got = buf.withUnsafeMutableBytes { raw -> Int32 in
+            proc_pidinfo(pid, PROC_PIDLISTFDS, 0, raw.baseAddress, need)
+        }
+        if got <= 0 {
+            return FDList(fds: [], errno: errno)
+        }
+        let count = min(Int(got) / stride, capacity)
+
+        var out: [Int32] = []
+        out.reserveCapacity(count)
+        for j in 0..<count {
+            let info = buf[j]
+            guard info.proc_fdtype == PROX_FDTYPE_VNODE else { continue }
+            // **fd 号 = `proc_fd` 字段**，不是数组下标（见 CR-027 D-1）。
+            out.append(info.proc_fd)
+        }
+        return FDList(fds: out, errno: 0)
+    }
+
+
     // MARK: - 快照
 
     /// 采集一次 L0 快照。
@@ -192,11 +248,9 @@ public enum L0Probe {
             // ---- fd 列表 ----
             // `proc_pidinfo` 签名（Swift 侧）：
             //   (pid: Int32, flavor: Int32, arg: UInt64, buf: UnsafeMutableRawPointer?, bufSize: Int32) -> Int32
-            let fdBytes = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, nil, 0)
-            if fdBytes <= 0 {
-                // 返回 0（不是 −1）；**errno 才有意义**。
-                let e = errno
-                if e == EPERM {
+            let fdList = Self.vnodeFDList(of: pid)
+            if !fdList.success {
+                if fdList.errno == EPERM {
                     // 同 uid 也读不到 → **这才是真正的「权限受阻」**（AC-14 语义）。
                     snapshot.degraded = true
                 }
@@ -205,40 +259,10 @@ public enum L0Probe {
             }
             snapshot.coverage.sameUIDRead += 1
 
-            // **返回值是字节数**，每项 `sizeof(proc_fdinfo)` = 8 B（实测约束 1）。
-            let entryCount = Int(fdBytes) / MemoryLayout<proc_fdinfo>.stride
-            guard entryCount > 0 else { continue }
+            // 只处理 **vnode 类** fd（socket / pipe 等不是文件）。
+            // 筛选在 `vnodeFDList` 里做，这里拿到的已经是纯 vnode fd 号。
+            for fd in fdList.fds {
 
-            var fds = [proc_fdinfo](repeating: proc_fdinfo(), count: entryCount)
-            let got = fds.withUnsafeMutableBytes { raw -> Int32 in
-                proc_pidinfo(pid, PROC_PIDLISTFDS, 0, raw.baseAddress, fdBytes)
-            }
-            guard got > 0 else { continue }
-            let gotCount = Int(got) / MemoryLayout<proc_fdinfo>.stride
-
-            for j in 0..<gotCount {
-                let fdInfo = fds[j]
-                // 只处理 vnode 类 fd（socket / pipe 等不是文件）。
-                guard fdInfo.proc_fdtype == PROX_FDTYPE_VNODE else { continue }
-                // **fd 号 = `proc_fdinfo.proc_fd` 字段，不是数组下标。**
-                //
-                // ## 这里曾经写错过，而且本机永远测不出来
-                //
-                // 原实现把**数组下标**直接当成 fd 号用，注释还理直气壮写着
-                // 「fd 号 = 数组下标（实测约束）」。**那句是错的。**
-                //
-                // 错因不是粗心，是**把「值恰好相等」当成了「定义如此」**：
-                // 本机进程的 fd 恰好连续 `0..7`，此时「下标」与「fd 号」数值相同，
-                // 实测一比对就"验证通过"了。CI runner 上 fd 不连续
-                // （实测 `{0,1,2,3,4,7,131,140,143,146}`），下标立刻错位。
-                //
-                // **后果不是测试红，是误删**：
-                // 下面用这个 `fd` 去调 `PROC_PIDFDVNODEPATHINFO` 拿 `(dev, ino)`。
-                // 下标错位 → 拿到的是**别的 fd** 的身份 → 倒排表里查到错的条目
-                // → L0 判「无活引用」→ 把正在被进程使用的文件移进废纸篓。
-                //
-                // 所以这条必须按 SDK 的结构定义读，不能靠实测巧合。
-                let fd = fdInfo.proc_fd
 
                 // ⚠️ 必须是 `vnode_fdinfowithpath`（= `proc_fileinfo` 24 B + `vnode_info_path`），
                 //    **不是** `vnode_info_path`（实测约束 2）——后者会读出 `dev=1, ino=0` 的垃圾。

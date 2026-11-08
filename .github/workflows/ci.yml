@@ -77,9 +77,24 @@ jobs:
       # ── 单测 ────────────────────────────────────────────────
       - name: Test
         working-directory: ResidueApp
-        # 管道只为压缩输出；**退出码靠 workflow 顶部的 pipefail**。
-        # 若把 `defaults.run.shell` 去掉，这一步会重新变成「永远绿」。
-        run: swift test 2>&1 | tee /tmp/test.log | tail -40
+        # **不要加 `| tail -N`**。
+        #
+        # 第一版为了压缩输出写了 `| tail -40`，结果失败时详情被截掉了 ——
+        # 日志里只剩「1 failure」，不知道是哪个测试、为什么挂。
+        # 我为此多跑了一轮 CI 才发现（而且要改 workflow 才能看到）。
+        #
+        # 截断输出的代价永远是「排障时看不到关键行」；而 GitHub 本来就会
+        # 折叠超长日志、也支持下载完整日志。**不该在源头砍。**
+        run: swift test 2>&1 | tee /tmp/test.log
+
+      - name: Test failures (if any)
+        if: failure()
+        run: |
+          echo "════════ 失败的测试 ════════"
+          grep -E "error: -\[|XCTAssert.*failed|XCTSkip" /tmp/test.log | head -40 || true
+          echo ""
+          echo "════════ 统计 ════════"
+          grep -E "Executed [0-9]+ tests" /tmp/test.log | tail -3 || true
 
       - name: Test summary
         if: always()

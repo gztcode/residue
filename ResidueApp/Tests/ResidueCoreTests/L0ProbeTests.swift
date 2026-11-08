@@ -327,4 +327,129 @@ final class L0ProbeTests: XCTestCase {
         XCTAssertEqual(big.ino, UInt64(1) << 40 | 12345, "ino 不得被截断")
         XCTAssertEqual(big.dev, 7)
     }
+
+    // ======================================================================
+    // MARK: - fd 号必须来自结构体字段（CR-027 D-1 · P0）
+    //
+    // 这一组的存在理由：**「本机绿」这件事本身可能是巧合**。
+    //
+    // 本机进程的 fd 恰好连续 {0..7}，此时「数组下标」与「proc_fd 字段」
+    // 数值完全相同 —— 传统写法（用下标）在本机永远测不出来。
+    // CI runner 上 fd 是 {0,1,2,3,4,7,131,140,143,146}，立刻错位。
+    //
+    // 所以本组测试的**核心价值不是断言"值对不对"，而是造出能让两种解释
+    // 分岔的样本**。没有这份样本，任何断言都只是在验证巧合。
+    // ======================================================================
+
+    /// **造出 fd 不连续的布局，验证解析结果与 `fcntl` 地面真值一致。**
+    ///
+    /// 造法：开 150 个 fd，然后**关掉中间一大段**（20..99）。
+    /// 此时进程的有效 fd 是 `{0..19} ∪ {100..~150}` —— 不连续。
+    /// 若实现用数组下标当 fd 号，会得到一串**已关闭的 fd 号**，必然撞不进地面真值。
+    func testFdNumbersSurviveNonContiguousLayout() throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("residue-fd-\(UUID().uuidString).tmp")
+        FileManager.default.createFile(atPath: tmp.path, contents: Data("x".utf8))
+        defer {
+            try? FileManager.default.removeItem(at: tmp)
+        }
+
+        // ---- 1. 造 fd 空洞 ----
+        var mine: [Int32] = []
+        for _ in 0..<150 {
+            let fd = open(tmp.path, O_RDONLY)
+            if fd >= 0 { mine.append(fd) }
+        }
+        defer { for fd in mine where fcntl(fd, F_GETFD) != -1 { close(fd) } }
+
+        try XCTSkipIf(mine.count < 60, "本进程可用 fd 不足，无法造出有意义的空洞")
+
+        var closed = 0
+        for fd in mine where fd >= 20 && fd < 100 {
+            close(fd)
+            closed += 1
+        }
+        try XCTSkipIf(closed < 20, "未能关掉足够多的中间 fd，无法造出空洞")
+
+        // ---- 2. 地面真值：fcntl 扫描 ----
+        var truth: [Int32] = []
+        for fd in Int32(0)..<4096 {
+            if fcntl(fd, F_GETFD) != -1 { truth.append(fd) }
+        }
+        let truthSet = Set(truth)
+
+        // 前置断言：**布局确实不连续**。若这条不成立，下面的断言就退化回"验证巧合"。
+        let contiguous = truth == Array(truth.first!...Int32(truth.last!))
+        XCTAssertFalse(
+            contiguous,
+            "本测试的前提是 fd 不连续；若进程 fd 恰好连续，这条测试没有区分力（应视为跳过而非通过）"
+        )
+
+        // ---- 3. 被测对象 ----
+        let result = L0Probe.vnodeFDList(of: getpid())
+        XCTAssertTrue(result.success, "自身进程的 fd 枚举应成功（errno=\(result.errno)）")
+        XCTAssertFalse(result.fds.isEmpty, "至少应有几个 vnode fd（打开的临时文件本身）")
+
+        // ---- 4. 核心断言 ----
+        // 解析出的每个 fd 都必须是**真实有效**的 fd。
+        let bogus = Set(result.fds).subtracting(truthSet)
+        XCTAssertTrue(
+            bogus.isEmpty,
+            "解析出了不存在的 fd 号 \(bogus.sorted().prefix(10)) —— 说明 fd 号取自数组下标而非 proc_fd 字段"
+        )
+
+        // 反向锚：结果里必须出现「高号 fd」，否则可能只是巧合地取了低号连续段
+        let high = result.fds.filter { $0 >= 100 }
+        XCTAssertFalse(
+            high.isEmpty,
+            "解析结果里没有 ≥100 的 fd，而本测试确实打开了这些 fd —— 说明解析漏了后段"
+        )
+    }
+
+    /// **同一进程里，「下标法」与「字段法」必须能给出不同结果。**
+    ///
+    /// 这条是上一条的元断言：它不验实现，验**测试样本有没有区分力**。
+    /// 若两者结果相同，说明本进程 fd 恰好连续 → 样本无效，
+    /// 上一条测试即使绿也什么都不能证明。
+    func testIndexAndFieldDifferUnderHoles() throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("residue-fd2-\(UUID().uuidString).tmp")
+        FileManager.default.createFile(atPath: tmp.path, contents: Data("x".utf8))
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        var mine: [Int32] = []
+        for _ in 0..<150 {
+            let fd = open(tmp.path, O_RDONLY)
+            if fd >= 0 { mine.append(fd) }
+        }
+        defer { for fd in mine where fcntl(fd, F_GETFD) != -1 { close(fd) } }
+        for fd in mine where fd >= 20 && fd < 100 { close(fd) }
+
+        // 手工按两种解释解析，比对
+        let pid = getpid()
+        let stride = MemoryLayout<proc_fdinfo>.stride
+        let need = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, nil, 0)
+        try XCTSkipIf(need <= 0, "无法查询 fd 列表")
+
+        var buf = [proc_fdinfo](repeating: proc_fdinfo(), count: Int(need) / stride)
+        let got = buf.withUnsafeMutableBytes { raw in
+            proc_pidinfo(pid, PROC_PIDLISTFDS, 0, raw.baseAddress, need)
+        }
+        try XCTSkipIf(got <= 0, "无法读取 fd 列表")
+        let n = Int(got) / stride
+
+        var byIndex: [Int32] = []
+        var byField: [Int32] = []
+        for j in 0..<n where buf[j].proc_fdtype == PROX_FDTYPE_VNODE {
+            byIndex.append(Int32(j))
+            byField.append(buf[j].proc_fd)
+        }
+
+        XCTAssertNotEqual(
+            byIndex, byField,
+            "本样本里「下标」与「字段」结果相同 → 本进程 fd 恰好连续 → "
+            + "抓不到 CR-027 D-1 那类错误。这条失败说明**测试样本需要加强**，不是实现有问题"
+        )
+    }
+
 }
