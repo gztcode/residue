@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Residue · entitlements（ADR-10 / §10.1）
+
+  ## 首版不含任何 com.apple.security.*
+  为什么：
+    - 非沙盒：C1 已裁决只走 GitHub Releases 直发、不进 Mac App Store（MAS）。
+      App Sandbox 是 MAS 的强制机制，不进 MAS 就不需要（也不需要它的 Powerbox /
+      security-scoped bookmark 那一套限制）。
+    - 非 App Store：故不能有 com.apple.security.app-sandbox。
+    - 不申请 network.client：N7 / T4 / A3 要求零外发，连 entitlement 都不该有，
+      否则「零外发」就失去一道结构性保证（§9 的 S-09 三层判据第一层是源码 grep，
+      entitlement 层是更早的一道闸）。
+
+  ## Hardened Runtime 与这些 entitlement 的关系
+    - cs.allow-jit / allow-unsigned-executable-memory 不需要：
+      产品是纯 Swift，无 JIT、无动态代码生成。
+    - cs.disable-library-validation 不需要：
+      ADR-09 零第三方运行期依赖，不需要加载非同一 Team ID 签名的库。
+    少一个 entitlement 就少一个被滥用的面。
+
+  ## get-task-allow 必须为 false（§10.1 第 2 条）
+    该键只能出现在 Debug 配置的签名里；进入 Release 产物会让公证被拒。
+    本文件故意不写该键，即取默认 false。
+    make_app.sh 会回读产物的 entitlements 并断言它不为 true。
+
+  ## XML 语法注意
+    本文件是 plist，注释内不得出现连续两个连字符（XML 规范禁止），
+    否则 codesign 会报 AMFIUnserializeXML: syntax error 而签名失败。
+-->
+<plist version="1.0">
+<dict>
+    <!--
+      空 dict 是有意为之，不是漏写。
+      任何 com.apple.security.* 键的加入都必须先改 PRD（P6 / N7 / T4）并重跑 R2 检查表。
+    -->
+</dict>
+</plist>

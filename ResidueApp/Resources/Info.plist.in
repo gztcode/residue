@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Residue · Info.plist 源模板（ADR-10 / §10.1）
+  make_app.sh 会用 sed 注入版本号后拷贝到 Residue.app/Contents/Info.plist。
+
+  硬约束（ADR-10）：
+    - CFBundleIdentifier = com.residue.app
+    - LSMinimumSystemVersion = 14.0（产品基线 macOS 14+）
+    - CFBundleShortVersionString / CFBundleVersion 必须有
+    - NSHumanReadableCopyright 必须有
+
+  ⚠️ **必须不设 LSUIElement**（ADR-02 原文：不设 LSUIElement，需要主窗口；
+  设了会失去 Dock 与常规激活行为）。首版的实现曾经设了 true，并把校验脚本也写成
+  「必须为 true」——**断言钉在了错的那一侧**，ADR-02 从未如此要求。
+  菜单栏常驻靠 NSStatusItem（运行期创建），不靠 LSUIElement。
+-->
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>zh_CN</string>
+    <key>CFBundleExecutable</key>
+    <string>Residue</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.residue.app</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>Residue</string>
+    <key>CFBundleDisplayName</key>
+    <string>Residue</string>
+    <!-- 应用图标。缺它时 Finder / 登录项 / TCC 面板都显示通用白纸图标，
+         直接影响 A-5 验收③「TCC 面板能认到」的可发现性（客户端审查 C5）。 -->
+    <key>CFBundleIconFile</key>
+    <string>Residue</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>__VERSION__</string>
+    <key>CFBundleVersion</key>
+    <string>__BUILD__</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSHumanReadableCopyright</key>
+    <string>Residue · AI 运行时存储治理</string>
+    <!--
+      ⚠️ 此处**刻意不设 LSUIElement**（ADR-02）。
+      产品是「单进程 + 菜单栏常驻 + 有主窗口」：菜单栏项由 NSStatusItem 在运行期创建，
+      主窗口需要 Dock 与常规激活行为。设 LSUIElement = true 会把这两样都去掉。
+    -->
+    <!--
+      不声明 NSAppleEventsUsageDescription 等任何用途说明：
+      N7 要求零遥测、零上报、零账号，产品不访问通讯录/日历/相机等任何用户数据源。
+      声明不需要的 usage description 反而会让 TCC 面板出现无意义的授权项。
+    -->
+    <!--
+      不使用 NSAppTransportSecurity：产品零外发（T4 / N7 / A3），无任何网络请求。
+      若未来引入网络（C1 已裁决不引入），须先改 PRD 并重跑 P1/P6 判定。
+    -->
+</dict>
+</plist>

@@ -1,0 +1,208 @@
+name: Release
+
+# 触发：推一个 v* tag（例：git tag v0.1.0 && git push origin v0.1.0）
+#
+# ## 这个 workflow 产出什么、不产出什么
+#
+# ✅ 产出：ad-hoc 签名的 .app（zip）+ SHA-256 校验文件
+# ❌ 不产出：已公证的包 —— GitHub Actions 里没有 Developer ID 私钥，
+#            也没有 notarytool 的 keychain profile。
+#
+# 所以资产名里带 **UNNOTARIZED**。这不是命名洁癖：
+# 名字会出现在 Releases 资产列表里，任何人看一眼就知道它没走完公证流程。
+# 只靠 release notes 里的文字提醒是不够的 —— 人们不读说明，只读文件名。
+#
+# 补齐公证的做法（有身份之后）：
+#   1. 在仓库 Settings → Secrets 里存证书与密码
+#   2. 本 workflow 加一个 import certificate + notarytool 的 job
+#   3. 钉票后**重打 zip 并重算 SHA-256**（钉票改写了 .app，旧 zip 失效）
+#   详见 Residue-A10-发布准入执行单-v1.0.md §1 的 S1–S5。
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号（不填则用 tag 或 0.1.0-dev）'
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build & Publish Release
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: ver
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            V="${{ github.event.inputs.version }}"
+          elif [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            V="${GITHUB_REF_NAME#v}"
+          else
+            V="0.1.0-dev"
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "解析出版本：$V"
+
+      - name: Toolchain info
+        run: |
+          swift --version
+          xcodebuild -version
+          uname -m
+
+      # ── 发布前必须全绿（**不跳过**）────────────────────────────
+      # 发一个测不过的包，比不发更糟：用户会以为「这产品就是这样」。
+      - name: Pre-flight — tests
+        working-directory: ResidueApp
+        run: swift test
+
+      - name: Pre-flight — contract checks
+        working-directory: ResidueApp
+        run: |
+          python3 scripts/verify_codes.py
+          ./scripts/verify_a9.sh
+          swift run --disable-sandbox ResidueApp --verify-wiring /tmp/wiring-release
+
+      - name: Pre-flight — baseline docs
+        run: |
+          ./check_all.sh
+          python3 verify_r2.py
+
+      # ── 打包 ────────────────────────────────────────────────
+      - name: Package .app (ad-hoc signed)
+        working-directory: ResidueApp
+        env:
+          RESIDUE_VERSION: ${{ steps.ver.outputs.version }}
+        run: ./scripts/make_app.sh
+
+      - name: Verify .app structure
+        working-directory: ResidueApp
+        run: ./scripts/verify_a5.sh
+
+      # ── 明确标记「未公证」并算校验值 ──────────────────────────
+      - name: Mark as unnotarized & checksum
+        working-directory: ResidueApp
+        run: |
+          set -euo pipefail
+          cd build
+          # ad-hoc 分支产出的是 Residue.app.zip；统一改成带 UNNOTARIZED 的名字。
+          # 理由见本文件顶部注释：文件名是唯一会被真正看见的声明。
+          if [ -f "Residue.app.zip" ]; then
+            mv "Residue.app.zip" "Residue-${RESIDUE_VER}.UNNOTARIZED.zip" \
+              2>/dev/null || mv "Residue.app.zip" "Residue.app.UNNOTARIZED.zip"
+          fi
+          ls -la
+          shasum -a 256 *.zip > SHA256SUMS.txt
+          echo "=== SHA256SUMS.txt ==="
+          cat SHA256SUMS.txt
+        env:
+          RESIDUE_VER: ${{ steps.ver.outputs.version }}
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p out
+          cp ResidueApp/build/*.zip out/
+          cp ResidueApp/build/SHA256SUMS.txt out/
+          ls -la out/
+
+      - name: Upload artifacts (for inspection even if release fails)
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-artifacts
+          path: out/
+          if-no-files-found: error
+
+      # ── 建 Release ─────────────────────────────────────────
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          ZIP=$(ls out/*.zip | head -1)
+          SHA=$(awk '{print $1}' out/SHA256SUMS.txt | head -1)
+
+          cat > /tmp/notes.md <<EOF
+          ## Residue v${VERSION}
+
+          看清 AI 工具（\`uv\` / \`npm\` / \`pipx\`）在你机器上留下的缓存，然后安全地收回它。
+
+          ---
+
+          ### ⚠️ 这个包**未公证**
+
+          本次构建是 **ad-hoc 签名**，未经过 Apple 公证。首次打开会被 Gatekeeper 拦下，
+          需要手动放行一次（步骤见下）。**这不是安装包坏了。**
+
+          > 正式（已公证）版本需要 Developer ID 证书，目前尚未配置。
+          > 详见仓库内 \`Residue-A10-发布准入执行单-v1.0.md\`。
+
+          ### 安装
+
+          1. 下载 \`$(basename "$ZIP")\`，解压
+          2. 把 \`Residue.app\` **拖进「应用程序」文件夹**
+             （放错位置会让登录项失效、定时任务不执行）
+          3. 双击打开；被拦下后到 **系统设置 → 隐私与安全性** 点「仍要打开」
+          4. 再双击一次，在弹窗里点「打开」
+
+          ### 验证完整性
+
+          \`\`\`bash
+          shasum -a 256 $(basename "$ZIP")
+          # 应等于：${SHA}
+          \`\`\`
+
+          ### 系统要求
+
+          | 项 | 要求 |
+          |---|---|
+          | macOS | **14.0 或更高** |
+          | 处理器 | **仅 Apple Silicon（arm64）** |
+          | 网络 | **完全不需要**（零外发） |
+
+          ### 这个版本能做什么
+
+          - 只读扫描 \`uv\` / \`npm(npx)\` / \`pipx\` 的缓存来源，显示占用
+          - 14 天影子观察期（先证明判断准，才允许它动手）
+          - 自动删除（默认**关闭**，且默认执行方式是**仅报告**）
+          - 白名单（你明确保护它不动的东西）
+          - 导出脱敏诊断报告（用户名/主目录/主机名替换为占位符，不含文件内容）
+          - 清理只做 **rename 到废纸篓**，14 天内可恢复
+
+          ### 已知限制
+
+          完整清单见 README。最要紧的三条：
+
+          1. **仅 Apple Silicon** —— Intel Mac 无法运行
+          2. **跨 uid 进程看不见** —— 只能判断你登录用户的进程，界面会如实显示「无法判定」
+          3. **增量扫描不发现深层新候选** —— 新装的包要到下一次全量扫描才进清单
+
+          ---
+
+          **完整校验状态**：243 单测全绿、码表 11 项、页面结构 51 项、接线自检 36 项、
+          产物结构 36 项（3 项因无身份如实标未覆盖）、PRD 40 项、R2 124 项。
+
+          这些是 CI 每次构建都会重跑的，不是一次性声明。
+          EOF
+
+          # workflow_dispatch 时可能没有 tag，用 main 作为 target
+          TARGET="${GITHUB_REF_NAME}"
+          if [ "${GITHUB_REF_TYPE}" != "tag" ]; then
+            TARGET="main"
+          fi
+
+          gh release create "v${VERSION}" \
+            --target "$TARGET" \
+            --title "Residue v${VERSION}" \
+            --notes-file /tmp/notes.md \
+            "$ZIP" out/SHA256SUMS.txt

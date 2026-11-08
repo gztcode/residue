@@ -1,0 +1,37 @@
+# ── 构建产物 ──────────────────────────────────────────────
+.build/
+build/
+*.xcodeproj/
+*.xcworkspace/
+DerivedData/
+*.o
+*.dSYM/
+
+# ── 打包产物（由 scripts/make_app.sh 生成，走 Releases 分发）──
+*.app
+*.app.zip
+*.app.UNNOTARIZED.zip
+*.icns.tmp
+Residue.iconset/
+
+# ── 开发期临时脚本（不进版本库）──────────────────────────────
+# 这些是构建/补丁过程的中间产物，不是交付物。
+# 正式的校验链（verify*.py / check_all.sh）**不在**此列，它们要进库。
+build[0-9]*.py
+patch[0-9]*.py
+ctx[0-9]*.py
+s6_*.py
+blk_*.txt
+
+# ── WorkBuddy 项目内部状态（记忆、screenshots、缓存）────────
+# 这是开发工具的内部数据，不属于产品。
+.workbuddy/
+
+# ── macOS ────────────────────────────────────────────────
+.DS_Store
+._*
+
+# ── 编辑器 ───────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp

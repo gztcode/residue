@@ -1,0 +1,154 @@
+name: CI
+
+# 这个 workflow 验什么、不验什么，先说清楚（失败时能分辨该修什么）：
+#
+# ✅ 能验：编译、243 个单测、错误码表一致性、页面结构与空实现检测、
+#         接线自检（首启落盘→扫描→落盘→导出→清除）、PRD/R2 文档校验、打包脚本产物结构
+# ❌ 不能验：公证链（无 Developer ID）、端到端装机（无干净机）、
+#           GUI 交互（无显示会话）、滚动/焦点/键盘可达性
+#
+# 所以「CI 绿」**不等于「可发布」**。可发布还差 A-10 的签名链，那是外部资源。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-verify:
+    name: Build & Verify (macOS 15, arm64)
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Toolchain info
+        working-directory: ResidueApp
+        run: |
+          echo "=== swift ==="; swift --version
+          echo "=== xcode ==="; xcodebuild -version
+          echo "=== arch ==="; uname -m
+          echo "=== macOS ==="; sw_vers
+
+      - name: Cache SwiftPM build
+        uses: actions/cache@v4
+        with:
+          path: ResidueApp/.build
+          key: ${{ runner.os }}-swiftpm-${{ hashFiles('ResidueApp/Package.swift') }}
+          restore-keys: |
+            ${{ runner.os }}-swiftpm-
+
+      # ── 编译 ────────────────────────────────────────────────
+      - name: Build (debug)
+        working-directory: ResidueApp
+        run: swift build
+
+      - name: Build (release)
+        # Release 配置会裁掉 #if DEBUG 包裹的测试注入点与自检入口，
+        # 这是 §9.5 / §10.1 第 10 条的要求，必须单独验一次能编过。
+        working-directory: ResidueApp
+        run: swift build -c release
+
+      # ── 单测 ────────────────────────────────────────────────
+      - name: Test
+        working-directory: ResidueApp
+        run: swift test 2>&1 | tee /tmp/test.log | tail -40
+
+      - name: Test summary
+        if: always()
+        run: |
+          echo "=== 单测统计 ==="
+          grep -E "Executed [0-9]+ tests" /tmp/test.log | tail -1 || echo "（没拿到统计行）"
+
+      # ── 契约与结构校验 ──────────────────────────────────────
+      - name: Verify error code table
+        # 码表 ↔ R2 §6 的一致性（11 项：码集合/归类/AC-14 三类/测试覆盖）
+        working-directory: ResidueApp
+        run: python3 scripts/verify_codes.py
+
+      - name: Verify page structure & empty-action detection
+        # 51 项：语义位类型化 / 域内算术 / 数据层接线 / 定时任务 / 空实现 / 错误码
+        working-directory: ResidueApp
+        run: ./scripts/verify_a9.sh
+
+      - name: Verify v2.6 wiring (real IO round-trip)
+        # 36 项：**真的走一遍**首启落盘 → 扫描 → 落盘 → 门槛链 → 导出脱敏 → 清除 → 定时任务
+        # 比单测更重要：它验的是「数据层接上了没有」，而单测只验各模块自身契约。
+        working-directory: ResidueApp
+        run: swift run --disable-sandbox ResidueApp --verify-wiring /tmp/residue-wiring
+
+      # ── 打包产物结构 ────────────────────────────────────────
+      - name: Package .app
+        working-directory: ResidueApp
+        run: ./scripts/make_app.sh
+
+      - name: Verify .app structure
+        # 36 项：bundle 结构 / Info.plist / entitlements / 逐 Mach-O 签名 /
+        #        C1 真身份时间戳 / C9 钉票顺序 / README 信任面
+        # 注：本机与 CI 都无 Developer ID → 会有 3 项**如实标「未覆盖」**，
+        #     不算通过也不算失败。这是设计，不是疏漏。
+        working-directory: ResidueApp
+        run: ./scripts/verify_a5.sh
+
+      # ── 文档基线校验 ────────────────────────────────────────
+      - name: Verify PRD baseline
+        # 40 项：PRD v5.5 的结构 / 落点 / 归零 / 一致性 / 自洽
+        run: ./check_all.sh
+
+      - name: Verify R2 baseline
+        # 124 项：R2 v1.7 的结构 30 + 落地 65 + 归零 16 + 一致 10 + 自洽 2
+        run: python3 verify_r2.py
+
+      # ── 设计走查产物 ────────────────────────────────────────
+      - name: Render design pages
+        # 16 张：七页 + 只读 ×2 + 空态 ×3 + 错误/无权限/超限/加载
+        # 这些是 R3.8 设计走查的证据基础，必须随代码一起可复现。
+        working-directory: ResidueApp
+        run: swift run --disable-sandbox ResidueApp --render-pages design-renders
+
+      - name: Upload design renders
+        uses: actions/upload-artifact@v4
+        with:
+          name: design-renders
+          path: ResidueApp/design-renders/*.png
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload .app bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: Residue-app-debug-signed
+          path: |
+            ResidueApp/build/Residue.app.zip
+            ResidueApp/build/*.UNNOTARIZED.zip
+          if-no-files-found: warn
+          retention-days: 7
+
+      # ── 明确登记「CI 验不了什么」──────────────────────────────
+      - name: Known coverage gaps (always shown)
+        if: always()
+        run: |
+          cat <<'EOF'
+          ┌──────────────────────────────────────────────────────────────┐
+          │ CI 绿 ≠ 可发布。以下项本 workflow 验不了，属 A-10 发布准入：  │
+          ├──────────────────────────────────────────────────────────────┤
+          │ ✗ notarytool 公证        —— 需 Developer ID 身份             │
+          │ ✗ stapler 钉票           —— 同上                             │
+          │ ✗ spctl 评估通过         —— 同上（本机实测 rejected）        │
+          │ ✗ 干净机端到端装机       —— 需 macOS 14/15 干净机            │
+          │ ✗ GUI 交互/滚动/焦点     —— 无显示会话（screencapture 全黑） │
+          │ ✗ 回滚演练两支           —— 需先产生 a/countedDays 数据      │
+          └──────────────────────────────────────────────────────────────┘
+          上述六项在 Residue-Phase3-闸门台账.md 与 Residue-A10-发布准入执行单-v1.0.md 逐条登记。
+          EOF
