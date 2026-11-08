@@ -19,6 +19,20 @@ on:
 permissions:
   contents: read
 
+# ⚠️ **必须开 pipefail**。
+#
+# 本文件的 `Test` step 写成 `swift test | tee | tail -40`（为了只显示末尾摘要）。
+# 而 bash 默认的管道退出码取**最后一个命令**（`tail`）——于是 `swift test` 失败
+# 也会显示成功。这不只是理论问题：**第一次发 Release 时就撞上了**——
+# CI 的 Test step 绿着，Release 的 `swift test`（无管道）红了，
+# 暴露出 L0Probe 一处真 bug（fd 号用数组下标当，见 CR-027）。
+#
+# 也就是说：**这个 workflow 曾经是「永远绿的」，等于没有 CI。**
+# 管道吞退出码是 CI 里最隐蔽的一类假绿——它看起来在做事，实际什么都没验。
+defaults:
+  run:
+    shell: bash -o pipefail {0}
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -63,6 +77,8 @@ jobs:
       # ── 单测 ────────────────────────────────────────────────
       - name: Test
         working-directory: ResidueApp
+        # 管道只为压缩输出；**退出码靠 workflow 顶部的 pipefail**。
+        # 若把 `defaults.run.shell` 去掉，这一步会重新变成「永远绿」。
         run: swift test 2>&1 | tee /tmp/test.log | tail -40
 
       - name: Test summary

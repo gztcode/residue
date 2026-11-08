@@ -31,6 +31,12 @@ on:
 permissions:
   contents: write
 
+# 同 ci.yml：管道会吞退出码，必须开 pipefail。
+# 本文件里 `swift test` 与 `gh release create` 都直接决定成败。
+defaults:
+  run:
+    shell: bash -o pipefail {0}
+
 jobs:
   release:
     name: Build & Publish Release

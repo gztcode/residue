@@ -15,12 +15,15 @@ import Darwin
 // ## 四条实测得来的实现约束（写死，否则第二个实现者还会踩）
 //
 // 1. **`PROC_PIDLISTFDS` 的返回值是字节数**，不是元素数。
-//    **每项 8 B**（`struct proc_fdinfo` = `int32 proc_fd` + `uint32 proc_fdtype`），
-//    **fd 号 = 数组下标**（不是结构体里存的字段）。
+//    **每项 8 B**（`struct proc_fdinfo` = `int32 proc_fd` + `uint32 proc_fdtype`）。
+//    **fd 号来自结构体字段 `proc_fd`，不是数组下标。**
 //    ⚠️ R2 v1.6 原文写「每项 24 B」是**错的**（那是 `state.residue` 段表项的尺寸，
 //    被误套到 fd 列表上）——**按 24 B 解析会读进 3 倍脏数据**。
-//    实测（2026-11-08 · 本机）：`returned=64` → 8 项，与 `fcntl` 实测 fd 集合
-//    `{0..7}` **逐一对应**，fd 号即下标。
+//    ⚠️ **本条第一版还写过「fd 号 = 数组下标」，那句也是错的**（2026-11-08 修正）：
+//    本机进程 fd 恰好连续 `0..7`，下标与 fd 号数值相同，实测"验证通过"了。
+//    CI runner 上 fd 不连续（实测 `{0,1,2,3,4,7,131,140,143,146}`）→ 立刻错位。
+//    **教训：「两个值相等」不等于「它们同义」。实测要造出能区分两者的样本，
+//    否则你验证的是巧合，而且这个巧合会让你把错的写进注释当"实测约束"。**
 //
 // 2. **`PROC_PIDFDVNODEPATHINFO` 的返回结构是 `vnode_fdinfowithpath`**，
 //    **不是 `vnode_info_path`**。
@@ -217,8 +220,25 @@ public enum L0Probe {
                 let fdInfo = fds[j]
                 // 只处理 vnode 类 fd（socket / pipe 等不是文件）。
                 guard fdInfo.proc_fdtype == PROX_FDTYPE_VNODE else { continue }
-                // **fd 号 = 数组下标**（实测约束 1）——不是结构体字段。
-                let fd = Int32(j)
+                // **fd 号 = `proc_fdinfo.proc_fd` 字段，不是数组下标。**
+                //
+                // ## 这里曾经写错过，而且本机永远测不出来
+                //
+                // 原实现把**数组下标**直接当成 fd 号用，注释还理直气壮写着
+                // 「fd 号 = 数组下标（实测约束）」。**那句是错的。**
+                //
+                // 错因不是粗心，是**把「值恰好相等」当成了「定义如此」**：
+                // 本机进程的 fd 恰好连续 `0..7`，此时「下标」与「fd 号」数值相同，
+                // 实测一比对就"验证通过"了。CI runner 上 fd 不连续
+                // （实测 `{0,1,2,3,4,7,131,140,143,146}`），下标立刻错位。
+                //
+                // **后果不是测试红，是误删**：
+                // 下面用这个 `fd` 去调 `PROC_PIDFDVNODEPATHINFO` 拿 `(dev, ino)`。
+                // 下标错位 → 拿到的是**别的 fd** 的身份 → 倒排表里查到错的条目
+                // → L0 判「无活引用」→ 把正在被进程使用的文件移进废纸篓。
+                //
+                // 所以这条必须按 SDK 的结构定义读，不能靠实测巧合。
+                let fd = fdInfo.proc_fd
 
                 // ⚠️ 必须是 `vnode_fdinfowithpath`（= `proc_fileinfo` 24 B + `vnode_info_path`），
                 //    **不是** `vnode_info_path`（实测约束 2）——后者会读出 `dev=1, ino=0` 的垃圾。

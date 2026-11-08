@@ -420,6 +420,42 @@ fi
 
 # ---------------------------------------------------------------------------
 echo ""
+echo "--- 十、L0 判定的契约常量（本机绿、CI 红那一类）---"
+# ---------------------------------------------------------------------------
+# 背景：`L0Probe` 曾把 fd 列表的**数组下标**当成 fd 号用，注释还写着
+# 「fd 号 = 数组下标（实测约束）」。本机进程 fd 恰好连续 0..7，下标与字段值相同，
+# 实测"验证通过"；CI runner 上 fd 不连续（含 131/140/143/146）立刻错位。
+#
+# 后果不是测试红，是**误删**：用错的 fd 调 PROC_PIDFDVNODEPATHINFO 会拿到
+# 别的 fd 的 (dev, ino) → L0 判「无活引用」→ 把正在被使用的文件移进废纸篓。
+#
+# 这类"实测巧合"写进注释后会被当成契约，所以除了修正代码，还要钉一条静态断言。
+
+# fd 号必须来自结构体字段
+if grep -qF 'fdInfo.proc_fd' "$CORE_DIR/L0Probe.swift" 2>/dev/null; then
+  ok "fd 号取自 proc_fdinfo.proc_fd 字段（不是数组下标）"
+else
+  bad "fd 号未取自 proc_fd 字段 → L0 判定会错位，可能误删活文件"
+fi
+
+# 不得用下标当 fd（查活的代码行，注释里的历史说明不算）
+LIVE_FD_INDEX=$(grep -v '^[[:space:]]*//' "$CORE_DIR/L0Probe.swift" 2>/dev/null \
+                | grep -cE 'let +fd *= *Int32\(j\)' || true)
+if [ "${LIVE_FD_INDEX:-0}" -eq 0 ]; then
+  ok "无「用数组下标当 fd 号」的活代码"
+else
+  bad "仍有 ${LIVE_FD_INDEX} 处用数组下标当 fd 号"
+fi
+
+# PROC_PIDLISTFDS 返回值是字节数，必须除以 stride
+if grep -qF 'MemoryLayout<proc_fdinfo>.stride' "$CORE_DIR/L0Probe.swift" 2>/dev/null; then
+  ok "PROC_PIDLISTFDS 返回值按 8 B stride 换算（不是当元素数）"
+else
+  bad "PROC_PIDLISTFDS 返回值未按 stride 换算 → 元素数会多 8 倍"
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
 echo "=============================================="
 echo "通过 $PASS 项 / 失败 $FAIL 项"
 echo "=============================================="
