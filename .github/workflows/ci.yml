@@ -145,6 +145,12 @@ jobs:
         # 123 项：R2 v1.8 的结构 30 + 落地 65 + 归零 16 + 一致 10 + 自洽 2
         run: python3 tests/contract/verify_r2.py
 
+      - name: Verify declared counts match measured
+        # 本文件与 release.yml 注释里写的项数，必须等于脚本实测值。
+        # 这些数字曾一次性漂移 6 处且无人发现 —— 现在对上不齐就红。
+        # 注意：报红时**改注释**，不要改实测值去迁就注释。
+        run: python3 tests/contract/verify_counts.py
+
       # ── 设计走查产物 ────────────────────────────────────────
       - name: Render design pages
         # 16 张：七页 + 只读 ×2 + 空态 ×3 + 错误/无权限/超限/加载
