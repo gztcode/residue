@@ -4,7 +4,7 @@ name: Release
 #
 # ## 这个 workflow 产出什么、不产出什么
 #
-# ✅ 产出：ad-hoc 签名的 .app（zip）+ SHA-256 校验文件
+# ✅ 产出：ad-hoc 签名的 .app + dmg 分发载体 + SHA-256 校验文件
 # ❌ 不产出：已公证的包 —— GitHub Actions 里没有 Developer ID 私钥，
 #            也没有 notarytool 的 keychain profile。
 #
@@ -15,7 +15,7 @@ name: Release
 # 补齐公证的做法（有身份之后）：
 #   1. 在仓库 Settings → Secrets 里存证书与密码
 #   2. 本 workflow 加一个 import certificate + notarytool 的 job
-#   3. 钉票后**重打 zip 并重算 SHA-256**（钉票改写了 .app，旧 zip 失效）
+#   3. 钉票对象是 **dmg**（票据写在分发载体外层），钉票后重算 SHA-256
 #   详见 Residue-A10-发布准入执行单-v1.0.md §1 的 S1–S5。
 
 on:
@@ -113,14 +113,14 @@ jobs:
         run: |
           set -euo pipefail
           cd build
-          # ad-hoc 分支产出的是 Residue.app.zip；统一改成带 UNNOTARIZED 的名字。
+          # ad-hoc 分支产出的是 Residue.app.dmg；统一改成带 UNNOTARIZED 的名字。
           # 理由见本文件顶部注释：文件名是唯一会被真正看见的声明。
-          if [ -f "Residue.app.zip" ]; then
-            mv "Residue.app.zip" "Residue-${RESIDUE_VER}.UNNOTARIZED.zip" \
-              2>/dev/null || mv "Residue.app.zip" "Residue.app.UNNOTARIZED.zip"
+          if [ -f "Residue.app.dmg" ]; then
+            mv "Residue.app.dmg" "Residue-${RESIDUE_VER}.UNNOTARIZED.dmg" \
+              2>/dev/null || mv "Residue.app.dmg" "Residue.app.UNNOTARIZED.dmg"
           fi
           ls -la
-          shasum -a 256 *.zip > SHA256SUMS.txt
+          shasum -a 256 *.dmg > SHA256SUMS.txt
           echo "=== SHA256SUMS.txt ==="
           cat SHA256SUMS.txt
         env:
@@ -129,7 +129,7 @@ jobs:
       - name: Collect artifacts
         run: |
           mkdir -p out
-          cp ResidueApp/build/*.zip out/
+          cp ResidueApp/build/*.dmg out/
           cp ResidueApp/build/SHA256SUMS.txt out/
           ls -la out/
 
@@ -147,7 +147,7 @@ jobs:
           VERSION: ${{ steps.ver.outputs.version }}
         run: |
           set -euo pipefail
-          ZIP=$(ls out/*.zip | head -1)
+          DMG=$(ls out/*.dmg | head -1)
           SHA=$(awk '{print $1}' out/SHA256SUMS.txt | head -1)
 
           cat > /tmp/notes.md <<EOF
@@ -167,16 +167,17 @@ jobs:
 
           ### 安装
 
-          1. 下载 \`$(basename "$ZIP")\`，解压
+          1. 下载 \`$(basename "$DMG")\`，双击打开
           2. 把 \`Residue.app\` **拖进「应用程序」文件夹**
              （放错位置会让登录项失效、定时任务不执行）
-          3. 双击打开；被拦下后到 **系统设置 → 隐私与安全性** 点「仍要打开」
-          4. 再双击一次，在弹窗里点「打开」
+          3. 推出磁盘映像；到「应用程序」里双击打开
+          4. 被拦下后到 **系统设置 → 隐私与安全性** 点「仍要打开」，
+             再双击一次，在弹窗里点「打开」
 
           ### 验证完整性
 
           \`\`\`bash
-          shasum -a 256 $(basename "$ZIP")
+          shasum -a 256 $(basename "$DMG")
           # 应等于：${SHA}
           \`\`\`
 
@@ -207,8 +208,8 @@ jobs:
 
           ---
 
-          **完整校验状态**：276 单测全绿、码表 11 项、页面结构 72 项、接线自检 45 项、
-          产物结构 36 项（3 项因无身份如实标未覆盖）、PRD 238 项（191 + 47）、R2 123 项。
+          **完整校验状态**：283 单测全绿、码表 11 项、页面结构 72 项、接线自检 45 项、
+          产物结构 42 项（3 项因无身份如实标未覆盖）、PRD 238 项（191 + 47）、R2 123 项。
 
           这些是 CI 每次构建都会重跑的，不是一次性声明。
           EOF
@@ -223,4 +224,4 @@ jobs:
             --target "$TARGET" \
             --title "Residue v${VERSION}" \
             --notes-file /tmp/notes.md \
-            "$ZIP" out/SHA256SUMS.txt
+            "$DMG" out/SHA256SUMS.txt

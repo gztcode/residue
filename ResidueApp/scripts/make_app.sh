@@ -9,7 +9,7 @@
 #
 # 产出：
 #   build/Residue.app                        # 可 launch 的 .app
-#   build/Residue.app.zip                    # 分发载体（内含已 staple 的 .app）
+#   build/Residue.app.dmg                    # 分发载体（内含 .app，公证后 dmg 本身被 staple）
 #
 # ## 为什么必须产出 .app 而不是裸 Mach-O（ADR-10 的核心）
 #   - `SMAppService`（登录项）在裸 Mach-O 下抛 `kSMErrorInvalidSignature`
@@ -129,7 +129,13 @@ fi
 # 找出 bundle 内所有 Mach-O 并逐个签名
 MACHO_COUNT=0
 while IFS= read -r -d '' candidate; do
-  if file "$candidate" | grep -q "Mach-O"; then
+  # ⚠ 下游一律写成 `grep <模式> >/dev/null`，**不用 `grep -q`**。
+  # 本脚本开了 `pipefail`；`grep -q` 命中后立刻退出 → 上游命令写管道时收到
+  # SIGPIPE（141）→ 整条管道状态变 141 → `if` 判成「不匹配」。
+  # 实测：`codesign -d --verbose=2` 明明输出 `flags=0x10002(adhoc,runtime)`，
+  # 这里却判「Hardened Runtime 未启用」并 exit 1，整个打包直接停摆。
+  # 换成不带 `-q` 的 grep 会读完整个输入，不会提前关闭管道。
+  if file "$candidate" | grep "Mach-O" >/dev/null; then
     codesign "${SIGN_FLAGS[@]}" \
       --entitlements "$ENTITLEMENTS" \
       --sign "$IDENTITY" \
@@ -155,9 +161,9 @@ echo "  codesign --verify --deep --strict 通过"
 
 # get-task-allow 必须为 false / 不存在（否则公证必被拒）
 ENT_OUT="$(codesign -d --entitlements :- "$APP" 2>/dev/null || true)"
-if echo "$ENT_OUT" | grep -q "get-task-allow"; then
+if echo "$ENT_OUT" | grep "get-task-allow" >/dev/null; then
   # 若存在，其值必须是 false
-  if echo "$ENT_OUT" | grep -A1 "get-task-allow" | grep -q "<true/>"; then
+  if echo "$ENT_OUT" | grep -A1 "get-task-allow" | grep "<true/>" >/dev/null; then
     echo "✗ entitlements 含 get-task-allow = true → 公证必被拒（§10.1 第 2 条）" >&2
     exit 1
   fi
@@ -167,7 +173,7 @@ else
 fi
 
 # 断言没有任何 com.apple.security.*（首版非沙盒、零网络）
-if echo "$ENT_OUT" | grep -q "com.apple.security"; then
+if echo "$ENT_OUT" | grep "com.apple.security" >/dev/null; then
   echo "⚠ entitlements 含 com.apple.security.* —— 首版应为空（非沙盒、零外发）" >&2
   echo "$ENT_OUT" | grep "com.apple.security" >&2
   exit 1
@@ -175,7 +181,7 @@ fi
 echo "  无 com.apple.security.*（非沙盒、零外发）"
 
 # 断言测试注入点未进发布版（§10.1 第 10 条 / §9.5）
-if strings "$CONTENTS/MacOS/$APP_NAME" | grep -q "RESIDUE_TEST_"; then
+if strings "$CONTENTS/MacOS/$APP_NAME" | grep "RESIDUE_TEST_" >/dev/null; then
   echo "✗ Release 产物含 RESIDUE_TEST_ 前缀的测试注入点（§9.5 绝不能进发布版）" >&2
   strings "$CONTENTS/MacOS/$APP_NAME" | grep "RESIDUE_TEST_" | head -5 >&2
   exit 1
@@ -186,7 +192,7 @@ echo "  无 RESIDUE_TEST_ 注入点残留"
 # 这条断言的存在意义：`--timestamp=none` 的退出码是 0、静默生效，
 # 靠人看日志发现不了；只能靠机器断言。
 if [ "$IDENTITY" != "-" ]; then
-  if codesign -dv --verbose=4 "$APP" 2>&1 | grep -q "^Timestamp="; then
+  if codesign -dv --verbose=4 "$APP" 2>&1 | grep "^Timestamp=" >/dev/null; then
     echo "  安全时间戳存在（公证前提满足）"
   else
     echo "✗ 真身份签名但缺安全时间戳 → notarytool 必被拒（检查 --timestamp 是否被误设为 none）" >&2
@@ -229,7 +235,7 @@ else
 fi
 
 # Hardened Runtime 必须启用（公证前提，§10.1）
-if codesign -d --verbose=2 "$APP" 2>&1 | grep -q "flags=.*runtime"; then
+if codesign -d --verbose=2 "$APP" 2>&1 | grep "flags=.*runtime" >/dev/null; then
   echo "  Hardened Runtime 已启用"
 else
   echo "✗ Hardened Runtime 未启用 → 公证必被拒（§10.1）" >&2
@@ -243,18 +249,31 @@ echo "  bundle 结构完整"
 # ---------------------------------------------------------------------------
 echo ""
 echo "--- [6/7] 打包分发载体 ---"
-ZIP="$BUILD_DIR/$APP_NAME.app.zip"
-rm -f "$ZIP"
-# ditto 保留资源分叉与签名（zip -r 会破坏签名）
-ditto -c -k --keepParent "$APP" "$ZIP"
-echo "  产出: $ZIP"
+DMG="$BUILD_DIR/$APP_NAME.app.dmg"
+rm -f "$DMG"
 
-SHA256="$(shasum -a 256 "$ZIP" | awk '{print $1}')"
+# 暂存目录里放「.app + Applications 快捷方式」，打开 dmg 就能直接拖进应用程序。
+# 直接 `-srcfolder "$APP"` 只会把 .app 铺在根上，用户还得自己找「应用程序」文件夹。
+STAGE="$(mktemp -d)"
+trap 'rm -rf "$STAGE"' EXIT
+ditto "$APP" "$STAGE/$APP_NAME.app"
+ln -s /Applications "$STAGE/Applications"
+
+# UDZO = 压缩只读，分发标准格式。
+# 用 ditto 复制而不是 cp -R：前者保留资源分叉、扩展属性与代码签名。
+hdiutil create \
+  -volname "$APP_NAME" \
+  -srcfolder "$STAGE" \
+  -ov -format UDZO \
+  "$DMG" >/dev/null
+echo "  产出: $DMG"
+
+SHA256="$(shasum -a 256 "$DMG" | awk '{print $1}')"
 echo "  SHA-256: $SHA256"
-echo "  （注：此 SHA-256 只对本轮产物有效；**公证钉票后 .app 会变，必须重打 zip 并重算**）"
+echo "  （注：公证 staple 会改写 dmg，届时本脚本会重算并覆盖此值）"
 
 # ---------------------------------------------------------------------------
-# 7. 公证与钉票（**真身份下自动做，且必须重打 zip**）
+# 7. 公证与钉票（**真身份下自动做，钉票对象是 dmg**）
 # ---------------------------------------------------------------------------
 echo ""
 echo "--- [7/7] 公证与钉票 ---"
@@ -271,20 +290,20 @@ elif [ -z "${NOTARY_PROFILE:-}" ]; then
   # **真身份但没给公证 profile** —— 这是最危险的中间态
   # ---------------------------------------------------------------------
   #
-  # 客户端审查 C9 指出：原脚本只靠「注释提醒」要求钉票后重打 zip。
-  # 而实际上，一个已签名但**未公证未钉票**的 zip 完全能传上去 ——
+  # 客户端审查 C9 指出：原脚本只靠「注释提醒」要求钉票后重打载体。
+  # 而实际上，一个已签名但**未公证未钉票**的 dmg 完全能传上去 ——
   # 用户下载后 Gatekeeper 会拦，但**发布方看不到红灯**（公证环节才暴露）。
   #
-  # 所以这里做的不只是提醒，而是**让这个 zip 无法被误当成发布物**：
+  # 所以这里做的不只是提醒，而是**让这个 dmg 无法被误当成发布物**：
   # 把文件名改成 `UNNOTARIZED`。名字会出现在 Releases 资产列表里，
   # 任何人看一眼就知道它还没走完流程。
-  UNNOTARIZED_ZIP="$BUILD_DIR/$APP_NAME.app.UNNOTARIZED.zip"
-  mv "$ZIP" "$UNNOTARIZED_ZIP"
-  ZIP="$UNNOTARIZED_ZIP"
-  SHA256="$(shasum -a 256 "$ZIP" | awk '{print $1}')"
+  UNNOTARIZED_DMG="$BUILD_DIR/$APP_NAME.app.UNNOTARIZED.dmg"
+  mv "$DMG" "$UNNOTARIZED_DMG"
+  DMG="$UNNOTARIZED_DMG"
+  SHA256="$(shasum -a 256 "$DMG" | awk '{print $1}')"
   cat <<EOF
   ⚠⚠ **本产物未公证、未钉票，不可用于发布。**
-    已把 zip 改名为：$(basename "$ZIP")
+    已把 dmg 改名为：$(basename "$DMG")
     —— 改名不是洁癖：名字会出现在 Releases 资产列表里，
        **看一眼就知道它没走完流程**。只靠注释提醒是不够的（C9）。
 
@@ -292,7 +311,7 @@ elif [ -z "${NOTARY_PROFILE:-}" ]; then
     NOTARY_PROFILE=<keychain-profile> CODESIGN_IDENTITY="Developer ID Application: …" \
       ./scripts/make_app.sh
 
-  那条路径会自动做：submit → staple → **重打 zip** → **重算 SHA-256** → spctl 验证。
+  那条路径会自动做：submit → staple dmg → **重算 SHA-256** → spctl 验证。
   （`xcrun notarytool store-credentials <profile>` 可创建 profile）
 EOF
 else
@@ -300,23 +319,23 @@ else
   # **完整公证流程**（真身份 + profile）
   # ---------------------------------------------------------------------
   echo "  ① 提交公证（profile: ${NOTARY_PROFILE}）"
-  xcrun notarytool submit "$ZIP" --keychain-profile "${NOTARY_PROFILE}" --wait
+  xcrun notarytool submit "$DMG" --keychain-profile "${NOTARY_PROFILE}" --wait
 
-  echo "  ② 对 .app 钉票（zip 本身不可 staple，票据在 .app 内）"
-  xcrun stapler staple "$APP"
-  xcrun stapler validate "$APP"
+  # dmg 自身可被 staple（Apple 自 macOS 10.15 起支持）。
+  # 注意：这里 staple 的是 **dmg**，票据写在 dmg 外层；
+  # 用户拖出的 .app 本体没有票据，首次离线运行可能仍被 Gatekeeper 拦。
+  # 若要求 .app 自身可离线验证，需再 staple "$APP" 并重打 dmg 二次公证 ——
+  # 本脚本不走这条（两次公证成本高），发布说明里如实写明该限制。
+  echo "  ② 对 dmg 钉票"
+  xcrun stapler staple "$DMG"
+  xcrun stapler validate "$DMG"
 
-  # **关键**：钉票改写了 .app 内的票据 → 之前的 zip 与 SHA-256 全部失效。
-  # 必须重打、重算，否则发出去的 zip 里没有票据（用户离线时 Gatekeeper 会拦）。
-  echo "  ③ 重打 zip（钉票后 .app 已变更，旧 zip 失效）"
-  rm -f "$ZIP"
-  ditto -c -k --keepParent "$APP" "$ZIP"
+  echo "  ③ 重算 SHA-256（钉票改写了 dmg，之前的哈希已失效）"
+  SHA256="$(shasum -a 256 "$DMG" | awk '{print $1}')"
 
-  echo "  ④ 重算 SHA-256"
-  SHA256="$(shasum -a 256 "$ZIP" | awk '{print $1}')"
-
-  echo "  ⑤ spctl 评估（成功须看到 source=Notarized Developer ID，失败退出码是 3 不是 1）"
-  if spctl --assess --type execute --verbose=4 "$APP" 2>&1 | tee /dev/stderr | grep -q "Notarized Developer ID"; then
+  echo "  ④ spctl 评估 dmg（成功须看到 source=Notarized Developer ID，失败退出码是 3 不是 1）"
+  # 评估对象必须是 **dmg**，不是裸 .app：票据在外层 dmg 上，裸 .app 看不到它。
+  if spctl -a -t open --context context:primary-signature -v "$DMG" 2>&1 | tee /dev/stderr | grep "Notarized Developer ID" >/dev/null; then
     echo "  ✓ 公证链完整（Notarized Developer ID）"
   else
     echo "  ✗ spctl 未通过 —— 不得发布。常见原因：get-task-allow 为 true / 签名不完整 / 当前在离线环境" >&2
@@ -328,6 +347,6 @@ echo ""
 echo "=============================================="
 echo "完成"
 echo "  .app  : $APP"
-echo "  .zip  : $ZIP"
+echo "  .dmg  : $DMG"
 echo "  SHA256: $SHA256"
 echo "=============================================="

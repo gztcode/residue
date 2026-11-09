@@ -2,7 +2,7 @@ name: CI
 
 # 这个 workflow 验什么、不验什么，先说清楚（失败时能分辨该修什么）：
 #
-# ✅ 能验：编译、276 个单测、错误码表一致性、页面结构与空实现检测、
+# ✅ 能验：编译、283 个单测、错误码表一致性、页面结构与空实现检测、
 #         接线自检（首启落盘→扫描→落盘→导出→清除）、PRD/R2 文档校验、打包脚本产物结构
 # ❌ 不能验：公证链（无 Developer ID）、端到端装机（无干净机）、
 #           GUI 交互（无显示会话）、滚动/焦点/键盘可达性
@@ -129,8 +129,8 @@ jobs:
         run: ./scripts/make_app.sh
 
       - name: Verify .app structure
-        # 36 项：bundle 结构 / Info.plist / entitlements / 逐 Mach-O 签名 /
-        #        C1 真身份时间戳 / C9 钉票顺序 / README 信任面
+        # 42 项：bundle 结构 / Info.plist / entitlements / 逐 Mach-O 签名 /
+        #        dmg 载体 + 拖拽布局 / C1 真身份时间戳 / C9 钉票顺序 / README 信任面
         # 注：本机与 CI 都无 Developer ID → 会有 3 项**如实标「未覆盖」**，
         #     不算通过也不算失败。这是设计，不是疏漏。
         working-directory: ResidueApp
@@ -171,8 +171,8 @@ jobs:
         with:
           name: Residue-app-debug-signed
           path: |
-            ResidueApp/build/Residue.app.zip
-            ResidueApp/build/*.UNNOTARIZED.zip
+            ResidueApp/build/Residue.app.dmg
+            ResidueApp/build/*.UNNOTARIZED.dmg
           if-no-files-found: warn
           retention-days: 7
 
