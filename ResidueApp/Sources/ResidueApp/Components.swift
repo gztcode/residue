@@ -292,7 +292,7 @@ struct LoadingView: View {
                 .font(Tokens.Typography.secondary)
                 .foregroundStyle(Tokens.Color.textSecondary)
             if let onCancel {
-                Button("取消", action: onCancel)
+                Button(L.pick("取消", "Cancel"), action: onCancel)
                     .buttonStyle(.plain)
                     .font(Tokens.Typography.secondary)
                     .foregroundStyle(Tokens.Color.textSecondary)

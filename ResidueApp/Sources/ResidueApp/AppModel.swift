@@ -219,7 +219,7 @@ final class AppModel {
     /// 注册登录项（用户首次启用自动删除时调用）。
     func registerLoginItem() {
         if case .failure(let e) = loginItem.register() {
-            errorMessage = "登录项注册失败：\(e.localizedDescription)"
+            errorMessage = L.pick("登录项注册失败：\(e.localizedDescription)", "Failed to register login item: \(e.localizedDescription)")
         }
         refreshLoginItem()
     }
@@ -491,7 +491,7 @@ final class AppModel {
         } catch {
             // **未落盘即「无法证明」，验收按不通过**（§5.4）——
             // 所以这里把失败如实暴露给用户，不静默。
-            errorMessage = "扫描日志写入失败：\(error.localizedDescription)"
+            errorMessage = L.pick("扫描日志写入失败：\(error.localizedDescription)", "Failed to write scan log: \(error.localizedDescription)")
         }
 
         lastAbort = job.abortReason
@@ -533,7 +533,7 @@ final class AppModel {
     func setAutoDelete(_ on: Bool) {
         guard !readOnly else { return }
         if on && !pageModel.canLightUp {
-            errorMessage = "未达达标条件，不能点亮自动删除"
+            errorMessage = L.pick("未达达标条件，不能点亮自动删除", "Gate not met; auto-delete can't be enabled")
             return
         }
         contents.header.autoDeleteEnabled = on
@@ -587,7 +587,7 @@ final class AppModel {
         }
         // **同门槛**：未达线不得执行（AC-04 ③ 逐来源复核 + AC-08 组 B）
         guard pageModel.canLightUp else {
-            errorMessage = "未达达标条件，本次不执行（逐来源复核未通过）"
+            errorMessage = L.pick("未达达标条件，本次不执行（逐来源复核未通过）", "Gate not met; nothing executed this time (per-source re-check failed)")
             return
         }
         guard !isScanning else { return }
@@ -920,10 +920,13 @@ final class AppModel {
     /// 交互式导出（弹保存面板）。
     func exportReportInteractive() {
         let panel = NSSavePanel()
-        panel.nameFieldStringValue = "Residue-报告-\(Self.timestampForFileName()).md"
+        panel.nameFieldStringValue = L.pick(
+            "Residue-报告-\(Self.timestampForFileName()).md",
+            "Residue-Report-\(Self.timestampForFileName()).md"
+        )
         panel.canCreateDirectories = true
-        panel.title = "导出脱敏报告"
-        panel.message = "报告已脱敏：用户名、主目录、主机名替换为占位符；不包含文件内容。"
+        panel.title = L.pick("导出脱敏报告", "Export redacted report")
+        panel.message = L.pick("报告已脱敏：用户名、主目录、主机名替换为占位符；不包含文件内容。", "The report is redacted: usernames, home directory, and hostname are replaced with placeholders; file contents are not included.")
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
             try exportReport(to: url)
@@ -949,7 +952,7 @@ final class AppModel {
         let sources = contents.header.sources.map { entry in
             Redactor.SourceMetrics(
                 source: entry.source.rawValue,
-                state: entry.snapshotTaken ? "在域" : "仅报告",
+                state: entry.snapshotTaken ? L.pick("在域", "In domain") : L.pick("仅报告", "Report only"),
                 // **`nil` 必须原样保留为 `nil`，不得写成 0**
                 // （0 会被读成「本轮样本量为零」，而事实是「本轮还没结算」）
                 t: entry.T,
@@ -1076,7 +1079,10 @@ final class AppModel {
             // **不给数字的提示等于没有提示**（§6 原话）
             return describe(
                 code,
-                detail: "需要 \(need / 1_000_000) MB，当前可用 \(avail / 1_000_000) MB"
+                detail: L.pick(
+                    "需要 \(need / 1_000_000) MB，当前可用 \(avail / 1_000_000) MB",
+                    "Needs \(need / 1_000_000) MB; \(avail / 1_000_000) MB available"
+                )
             )
         case .migrationRestoreFailed:
             return describe(code)

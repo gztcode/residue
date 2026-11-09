@@ -102,9 +102,16 @@ struct LoginItemManager: Sendable {
     static func locationWarning(bundlePath: String = Bundle.main.bundlePath) -> String? {
         if isInApplicationsFolder(bundlePath: bundlePath) { return nil }
         if isTranslocated(bundlePath: bundlePath) {
-            return "请先把 Residue 拖入「应用程序」再运行——"
-                + "从磁盘映像直接运行会导致登录项失效、定时任务不执行。"
+            return L.pick(
+                "请先把 Residue 拖入「应用程序」再运行——"
+                + "从磁盘映像直接运行会导致登录项失效、定时任务不执行。",
+                "Move Residue into Applications before running — "
+                + "running it straight from the disk image breaks the login item and scheduled tasks won't run."
+            )
         }
-        return "Residue 当前不在「应用程序」文件夹，登录项可能失效。建议拖入「应用程序」后重开。"
+        return L.pick(
+            "Residue 当前不在「应用程序」文件夹，登录项可能失效。建议拖入「应用程序」后重开。",
+            "Residue isn't in the Applications folder; the login item may stop working. Move it there and reopen."
+        )
     }
 }

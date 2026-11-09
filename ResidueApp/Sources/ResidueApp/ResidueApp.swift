@@ -24,6 +24,11 @@ struct ResidueApp: App {
     @State private var app = AppModel()
 
     init() {
+        // 语言必须在**任何文案被求值之前**定下来：`PageModel` 的默认值、
+        // `UICopy` 都是按 `L.current` 在构造期取词的。
+        // 优先级：`RESIDUE_LANG` > 系统首选语言 > 简体中文（见 `Localization.swift`）。
+        L.applyEnvironment()
+
         #if DEBUG
         // 开发期渲染入口：`--render-pages <dir>` 渲染七页 PNG 后直接退出。
         // **不随发布版分发**（整段在 `#if DEBUG` 内，Release 不编译）。
@@ -40,7 +45,7 @@ struct ResidueApp: App {
     var body: some Scene {
         // ---- 菜单栏常驻 ----
         MenuBarExtra("Residue", systemImage: "internaldrive") {
-            Button("打开主界面…") {
+            Button(L.pick("打开主界面…", "Open main window…")) {
                 openWindow(id: "main")
                 NSApp.activate(ignoringOtherApps: true)
             }
@@ -48,12 +53,12 @@ struct ResidueApp: App {
 
             Divider()
 
-            Text("本机 · 零外发")
+            Text(L.pick("本机 · 零外发", "On-device · No outbound"))
                 .font(.caption)
 
             Divider()
 
-            Button("退出") {
+            Button(L.pick("退出", "Quit")) {
                 NSApplication.shared.terminate(nil)
             }
             .keyboardShortcut("q")

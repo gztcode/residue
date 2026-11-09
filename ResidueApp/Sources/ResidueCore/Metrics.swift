@@ -434,12 +434,21 @@ public enum UnmetSourceItem: Equatable, Sendable {
     public var text: String {
         switch self {
         case .insufficientSample:
-            return "样本不足"
+            return L.pick("样本不足", "Insufficient samples")
         case .l0Misjudged(let miss, let check, let undetermined):
-            if undetermined { return "L0 未判定（未取得 Full Disk Access）" }
-            if let miss, let check { return "L0 误判 \(miss) 次（检查 \(check) 次）" }
-            if let check { return "L0 未检查（检查 \(check) 次）" }
-            return "L0 误判"
+            if undetermined {
+                return L.pick("L0 未判定（未取得 Full Disk Access）", "L0 undetermined (Full Disk Access not granted)")
+            }
+            if let miss, let check {
+                return L.pick(
+                    "L0 误判 \(miss) 次（检查 \(check) 次）",
+                    "L0 misjudgment \(miss) times (\(check) checks)"
+                )
+            }
+            if let check {
+                return L.pick("L0 未检查（检查 \(check) 次）", "L0 not checked (\(check) checks)")
+            }
+            return L.pick("L0 误判", "L0 misjudgment")
         }
     }
 }
@@ -454,9 +463,10 @@ public enum UnmetGlobalItem: Equatable, Sendable {
     /// - 计数日已满而报告未产出 → 「第 N 轮 · 观察期未满 · 待结算扫描（无需操作）」
     public static func text(round: Int, countedDays: Int) -> String {
         if countedDays < ObservationProgress.requiredDays {
-            return "第 \(round) 轮 · 观察期 \(countedDays)/\(ObservationProgress.requiredDays) 天"
+            // **不在这里重新拼一遍**：多语言后两处译文必然分叉。
+            return UICopy.observationInProgress(round: round, observed: countedDays)
         }
-        return "第 \(round) 轮 · 观察期未满 · 待结算扫描（无需操作）"
+        return UICopy.awaitingSettlementScan(round: round)
     }
 }
 

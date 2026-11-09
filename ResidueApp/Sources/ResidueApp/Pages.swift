@@ -36,8 +36,8 @@ struct OverviewPage: View {
 
                 if model.overviewBlocks.isEmpty {
                     EmptyStateView(
-                        message: "还没有扫描过",
-                        hint: "首次扫描会在观察期内进行，不读取文件内容。"
+                        message: L.pick("还没有扫描过", "No scan yet"),
+                        hint: L.pick("首次扫描会在观察期内进行，不读取文件内容。", "The first scan runs during the observation period and never reads file contents.")
                     )
                 } else {
                     // 三区块横向并排（总览页的语义是「一眼看完三个来源的占用」）
@@ -56,11 +56,11 @@ struct OverviewPage: View {
                 // 那是在用不确定的东西承诺确定性。
                 Card {
                     VStack(alignment: .leading, spacing: Tokens.Spacing.xs) {
-                        SectionTitle(text: "可释放量")
+                        SectionTitle(text: L.pick("可释放量", "Reclaimable"))
                         HStack(alignment: .top, spacing: Tokens.Spacing.l) {
                             // ① 确定可释放（L1）
                             VStack(alignment: .leading, spacing: Tokens.Spacing.xxs) {
-                                Text("确定可释放（L1）")
+                                Text(L.pick("确定可释放（L1）", "Confirmed reclaimable (L1)"))
                                     .font(Tokens.Typography.secondary)
                                     .foregroundStyle(Tokens.Color.textSecondary)
                                 SemanticSlotView(slot: model.l1Confirmed)
@@ -68,7 +68,7 @@ struct OverviewPage: View {
                             }
                             // ② 推断可释放（L2）—— 带「不作为删除依据」标识
                             VStack(alignment: .leading, spacing: Tokens.Spacing.xxs) {
-                                Text("推断可释放（L2）")
+                                Text(L.pick("推断可释放（L2）", "Inferred reclaimable (L2)"))
                                     .font(Tokens.Typography.secondary)
                                     .foregroundStyle(Tokens.Color.textSecondary)
                                 SemanticSlotView(slot: model.l2Inferred)
@@ -80,7 +80,7 @@ struct OverviewPage: View {
                             }
                             // ③ 可删除量（= L1，**独立元素**）
                             VStack(alignment: .leading, spacing: Tokens.Spacing.xxs) {
-                                Text("可删除量")
+                                Text(L.pick("可删除量", "Deletable amount"))
                                     .font(Tokens.Typography.secondary)
                                     .foregroundStyle(Tokens.Color.textSecondary)
                                 SemanticSlotView(slot: model.deletableAmount)
@@ -127,8 +127,8 @@ struct EnvironmentsPage: View {
     var body: some View {
         if model.candidateRows.isEmpty {
             EmptyStateView(
-                message: "没有可清理的候选",
-                hint: "扫描范围内未发现缓存、临时环境或构建产物。"
+                message: L.pick("没有可清理的候选", "No candidates to clean up"),
+                hint: L.pick("扫描范围内未发现缓存、临时环境或构建产物。", "No caches, temporary environments, or build artifacts were found in the scan scope.")
             )
         } else {
             VStack(spacing: 0) {
@@ -143,7 +143,10 @@ struct EnvironmentsPage: View {
                 HStack {
                     Spacer()
                     SemanticSlotView(
-                        slot: .text("第 \(model.pageIndex + 1) / \(model.pageCount) 页"),
+                        slot: .text(L.pick(
+                            "第 \(model.pageIndex + 1) / \(model.pageCount) 页",
+                            "Page \(model.pageIndex + 1) / \(model.pageCount)"
+                        )),
                         muted: true
                     )
                 }
@@ -254,7 +257,7 @@ struct PolicyPage: View {
                 VStack(alignment: .leading, spacing: Tokens.Spacing.xs) {
                     // 开关本体（AC-08 的核心对象：用户「尝试点亮」的那个开关）
                     HStack {
-                        SectionTitle(text: "自动删除")
+                        SectionTitle(text: L.pick("自动删除", "Auto-delete"))
                         Spacer()
                         // 自建开关（系统 `.switch` 在离屏渲染下不可用，且不符合 token 约束）
                         TokenSwitch(
@@ -268,7 +271,7 @@ struct PolicyPage: View {
                         if let unmet = model.unmetNotice {
                             SemanticSlotView(slot: unmet)
                         } else {
-                            SemanticSlotView(slot: .text("未达项读取中"), muted: true)
+                            SemanticSlotView(slot: .text(L.pick("未达项读取中", "Loading unmet items")), muted: true)
                         }
                         Spacer(minLength: Tokens.Spacing.s)
                         // 视觉基线 §五：「剩余天数」与未达项同一语义位旁另设一格
@@ -285,11 +288,11 @@ struct PolicyPage: View {
             // 在冒烟集与回归集里双双为零，原因就是界面上根本没有入口）。
             Card {
                 VStack(alignment: .leading, spacing: Tokens.Spacing.s) {
-                    SectionTitle(text: "清理策略")
+                    SectionTitle(text: L.pick("清理策略", "Cleanup policy"))
 
                     // ① 执行方式（默认「仅报告」）
                     HStack(spacing: Tokens.Spacing.xs) {
-                        Text("执行方式")
+                        Text(L.pick("执行方式", "Execution mode"))
                             .font(Tokens.Typography.secondary)
                             .foregroundStyle(Tokens.Color.textSecondary)
                             .frame(width: 88, alignment: .leading)
@@ -307,7 +310,7 @@ struct PolicyPage: View {
 
                     // ② 单次容量上限（可见可编辑）
                     HStack(spacing: Tokens.Spacing.xs) {
-                        Text("单次容量上限")
+                        Text(L.pick("单次容量上限", "Per-run size cap"))
                             .font(Tokens.Typography.secondary)
                             .foregroundStyle(Tokens.Color.textSecondary)
                             .frame(width: 88, alignment: .leading)
@@ -317,7 +320,7 @@ struct PolicyPage: View {
 
                     // ③ 条目数上限（可见可编辑）
                     HStack(spacing: Tokens.Spacing.xs) {
-                        Text("条目数上限")
+                        Text(L.pick("条目数上限", "Item count cap"))
                             .font(Tokens.Typography.secondary)
                             .foregroundStyle(Tokens.Color.textSecondary)
                             .frame(width: 88, alignment: .leading)
@@ -331,7 +334,7 @@ struct PolicyPage: View {
                     // 这里是「产品怎么用这些值的规则」。
                     // 放在同一张卡里分两组，比两张几乎同名的卡清楚得多。
                     DividerLine()
-                    Text("规则（只读）")
+                    Text(L.pick("规则（只读）", "Rules (read-only)"))
                         .font(Tokens.Typography.secondary)
                         .foregroundStyle(Tokens.Color.textSecondary)
                     ForEach(Array(model.policySlots.enumerated()), id: \.offset) { _, pair in
@@ -343,8 +346,8 @@ struct PolicyPage: View {
             // ---- 白名单（AC-03：加入后不再出现在候选清单）----
             Card {
                 VStack(alignment: .leading, spacing: Tokens.Spacing.xs) {
-                    SectionTitle(text: "白名单")
-                    Text("加入后该路径不再出现在候选清单中，也不会被自动删除。")
+                    SectionTitle(text: L.pick("白名单", "Allowlist"))
+                    Text(L.pick("加入后该路径不再出现在候选清单中，也不会被自动删除。", "Once added, this path no longer appears in the candidate list and won't be auto-deleted."))
                         .font(Tokens.Typography.secondary)
                         .foregroundStyle(Tokens.Color.textSecondary)
 
@@ -358,21 +361,21 @@ struct PolicyPage: View {
                                     .truncationMode(.middle)
                                 Spacer(minLength: Tokens.Spacing.xs)
                                 // **必须能撤回**：只增不减的白名单会变成新陷阱
-                                Button("移除") { onRemoveWhitelist(path) }
+                                Button(L.pick("移除", "Remove")) { onRemoveWhitelist(path) }
                                     .buttonStyle(SecondaryButtonStyle(enabled: !model.readOnly))
                                     .disabled(model.readOnly)
                             }
                             .frame(minHeight: 24)
                         }
                     } else {
-                        Text("还没有加入任何路径")
+                        Text(L.pick("还没有加入任何路径", "No paths added yet"))
                             .font(Tokens.Typography.secondary)
                             .foregroundStyle(Tokens.Color.textSecondary)
                     }
 
                     HStack(spacing: Tokens.Spacing.xs) {
-                        TokenTextField(placeholder: "输入要保护的路径", text: $whitelistDraft)
-                        Button("加入") {
+                        TokenTextField(placeholder: L.pick("输入要保护的路径", "Path to protect"), text: $whitelistDraft)
+                        Button(L.pick("加入", "Add")) {
                             onAddWhitelist(whitelistDraft)
                             whitelistDraft = ""
                         }
@@ -390,14 +393,14 @@ struct PolicyPage: View {
             if let scheduled = model.scheduledTaskSlot {
                 Card {
                     VStack(alignment: .leading, spacing: Tokens.Spacing.xs) {
-                        SectionTitle(text: "定时任务")
+                        SectionTitle(text: L.pick("定时任务", "Scheduled task"))
                         HStack(spacing: Tokens.Spacing.xs) {
                             SemanticSlotView(slot: scheduled)
                             Spacer(minLength: Tokens.Spacing.s)
                             if model.needsLoginItemApproval {
                                 // 只在 `.requiresApproval` 时给——其余三态给这个按钮
                                 // 等于把用户支使到一个解决不了问题的地方
-                                Button("去系统设置允许") { onOpenLoginSettings() }
+                                Button(L.pick("去系统设置允许", "Open System Settings")) { onOpenLoginSettings() }
                                     .buttonStyle(SecondaryButtonStyle())
                             }
                         }
@@ -408,9 +411,9 @@ struct PolicyPage: View {
             // ---- 语义位二：规则版本（**与上面不重叠、不同对象、不同命名**）----
             Card {
                 VStack(alignment: .leading, spacing: Tokens.Spacing.xxs) {
-                    SectionTitle(text: "规则版本")
+                    SectionTitle(text: L.pick("规则版本", "Rule version"))
                     if model.ruleVersionSlots.isEmpty {
-                        SemanticSlotView(slot: .text("首版规则集固定"), muted: true)
+                        SemanticSlotView(slot: .text(L.pick("首版规则集固定", "Rule set is fixed in the first release")), muted: true)
                     } else {
                         ForEach(Array(model.ruleVersionSlots.enumerated()), id: \.offset) { _, pair in
                             KeyValueRow(label: pair.0, slot: pair.1)
@@ -442,7 +445,7 @@ struct PrivacyPage: View {
 
             Card {
                 VStack(alignment: .leading, spacing: Tokens.Spacing.xs) {
-                    SectionTitle(text: "采集范围")
+                    SectionTitle(text: L.pick("采集范围", "Collection scope"))
                     Text(model.collectionScopeNotice)
                         .font(Tokens.Typography.secondary)
                         .foregroundStyle(Tokens.Color.textSecondary)
@@ -453,7 +456,7 @@ struct PrivacyPage: View {
             // ---- 四档采集与授权（AC-10 / AC-11 / AC-14 的界面落点）----
             Card {
                 VStack(alignment: .leading, spacing: Tokens.Spacing.xs) {
-                    SectionTitle(text: "采集档位与授权")
+                    SectionTitle(text: L.pick("采集档位与授权", "Collection tiers & authorization"))
                     ForEach(model.collectionTiers) { tier in
                         VStack(alignment: .leading, spacing: 0) {
                             HStack(spacing: Tokens.Spacing.xs) {
@@ -461,7 +464,7 @@ struct PrivacyPage: View {
                                     .font(Tokens.Typography.body)
                                     .foregroundStyle(Tokens.Color.textPrimary)
                                 // 授权状态（AC-11：四档独立授权）
-                                Text(tier.authorized ? "已授权" : "未授权")
+                                Text(tier.authorized ? L.pick("已授权", "Authorized") : L.pick("未授权", "Not authorized"))
                                     .font(Tokens.Typography.secondary)
                                     .foregroundStyle(Tokens.Color.textSecondary)
                                 Spacer(minLength: Tokens.Spacing.xs)
@@ -479,7 +482,7 @@ struct PrivacyPage: View {
 
             Card {
                 VStack(alignment: .leading, spacing: Tokens.Spacing.xs) {
-                    SectionTitle(text: "清除数据")
+                    SectionTitle(text: L.pick("清除数据", "Clear data"))
                     // **必须含「不重置观察期进度与 L0 误判记录」**
                     Text(UICopy.clearScopeNotice)
                         .font(Tokens.Typography.secondary)
@@ -487,7 +490,7 @@ struct PrivacyPage: View {
                         .fixedSize(horizontal: false, vertical: true)
 
                     if model.canClearLogs {
-                        Button("一键清除采集物与日志") { onClearLogs() }
+                        Button(L.pick("一键清除采集物与日志", "Clear collected data and logs")) { onClearLogs() }
                         // **危险色**（产品裁定 DAC-46b）：一键清除**不可逆**——
                         // 它的清除范围含 14 日内的执行记录，而 AC-13 的「恢复位置」
                         // 正在这些记录里 → 清完即**丧失 14 日恢复能力**。
@@ -534,7 +537,7 @@ struct ReportPage: View {
                     //    先前这两条文案只定义未引用（DAC-49/58 判不通过），此处接上。
                     SemanticSlotView(slot: .unavailable(reason: UICopy.readOnlyNoSettlement))
                 } else if model.reportProduced {
-                    SemanticSlotView(slot: .text("报告已产出"), muted: true)
+                    SemanticSlotView(slot: .text(L.pick("报告已产出", "Report produced")), muted: true)
                 } else {
                     // **报告未产出时不是「未达标」——那是假值**
                     SemanticSlotView(slot: .unavailable(reason: UICopy.notSettledThisRound))
@@ -568,7 +571,7 @@ struct ReportPage: View {
                             SemanticSlotView(
                                 slot: .unavailable(reason: UICopy.maintainedByNewerVersion)
                             )
-                            Text("数据由更高版本创建；本版本只显示结构，不显示数值。")
+                            Text(L.pick("数据由更高版本创建；本版本只显示结构，不显示数值。", "Data was created by a newer version; this version shows structure only, no values."))
                                 .font(Tokens.Typography.secondary)
                                 .foregroundStyle(Tokens.Color.textSecondary)
                         }
@@ -576,8 +579,8 @@ struct ReportPage: View {
                 }
             } else if model.reportRows.isEmpty {
                 EmptyStateView(
-                    message: "本轮尚无矩阵数据",
-                    hint: "观察期结束扫描完成后生成。"
+                    message: L.pick("本轮尚无矩阵数据", "No matrix data this round"),
+                    hint: L.pick("观察期结束扫描完成后生成。", "Generated after the observation period ends and the scan completes.")
                 )
             } else {
                 ReportMatrixView(rows: model.reportRows)
@@ -670,18 +673,23 @@ struct ReportMatrixView: View {
 
     /// 列宽（**加总必须 ≤ 可用宽度**，否则整页被撑宽、右侧截断）。
     ///
-    /// 可用宽度 = 1000（窗口）− 168（侧栏）− 1（分隔线）− 32（页内边距）
-    ///            − 24（矩阵内边距）≈ **775 pt**。
-    /// 7 列合计：100+70+150+70+90+140+80 = **700 pt**，留 75 pt 余量。
+    /// 可用宽度 = 1000（窗口）− 168（侧栏，英文 196）− 1（分隔线）− 32（页内边距）
+    ///            − 24（矩阵内边距）≈ **775 pt**（英文 ≈ 747 pt）。
+    /// 7 列合计：100+70+150+70+90+140+80 = **700 pt**，两种语言都留有余量。
+    ///
+    /// ⚠️ 按**列序**取值，不按列名。列名是多语言的（`ReportMatrix.columns`
+    /// 随 `L.current` 变化），拿中文列名去 `case` 匹配在英文界面下会全部落到
+    /// `default`，列宽退化成 90 —— 表头与数据列就错位了。
     private func columnWidth(for column: String) -> CGFloat {
-        switch column {
-        case "来源": return 100
-        case "判定域": return 70
-        case ReportMatrix.sampleColumnTitle: return ReportMatrix.sampleColumnWidth
-        case "门槛": return 70
-        case "观察期": return 90
-        case ReportMatrix.l0ColumnTitle: return ReportMatrix.l0SubWidth * 2 + Tokens.Spacing.xxs
-        case "结论": return 80
+        guard let idx = ReportMatrix.columns.firstIndex(of: column) else { return 90 }
+        switch idx {
+        case 0: return 100                              // 来源
+        case 1: return 70                               // 判定域
+        case 2: return ReportMatrix.sampleColumnWidth   // 样本 / 总量
+        case 3: return 70                               // 门槛
+        case 4: return 90                               // 观察期
+        case 5: return ReportMatrix.l0SubWidth * 2 + Tokens.Spacing.xxs
+        case 6: return 80                               // 结论
         default: return 90
         }
     }
@@ -699,13 +707,13 @@ struct ConfirmDrawer: View {
     var body: some View {
         VStack(alignment: .leading, spacing: Tokens.Spacing.m) {
 
-            SectionTitle(text: "确认清理")
+            SectionTitle(text: L.pick("确认清理", "Confirm cleanup"))
 
             // **语义（CR-023 裁定）**：⑥ 是**自动执行批次的预览**，不是手动删除入口。
             // 契约里没有「用户手动删文件」这条路径（AC-04 只写「到达定时执行点」）。
             // 所以这个按钮做的是「把本次定时批次提前执行」，**受 AC-04 全部门槛约束**——
             // 因此不存在「手动清理绕过观察期门槛」这回事（原 S-8 消解）。
-            Text("本次为定时执行批次的预览。执行时仍逐来源复核门槛；未达标的来源不会被执行。")
+            Text(L.pick("本次为定时执行批次的预览。执行时仍逐来源复核门槛；未达标的来源不会被执行。", "This is a preview of the scheduled batch. Each source's gate is re-checked at execution time; sources that don't qualify are not executed."))
                 .font(Tokens.Typography.secondary)
                 .foregroundStyle(Tokens.Color.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -725,20 +733,20 @@ struct ConfirmDrawer: View {
             // 本次将删除的规模（两个 `.metric`）
             HStack(spacing: Tokens.Spacing.xl) {
                 VStack(alignment: .leading, spacing: Tokens.Spacing.xxs) {
-                    Text("条目")
+                    Text(L.pick("条目", "Items"))
                         .font(Tokens.Typography.secondary)
                         .foregroundStyle(Tokens.Color.textSecondary)
                     SemanticSlotView(slot: model.confirmItemCount)
                 }
                 VStack(alignment: .leading, spacing: Tokens.Spacing.xxs) {
-                    Text("字节")
+                    Text(L.pick("字节", "Bytes"))
                         .font(Tokens.Typography.secondary)
                         .foregroundStyle(Tokens.Color.textSecondary)
                     SemanticSlotView(slot: model.confirmBytes)
                 }
                 // AC-15：顺延条目数（超出上限而未执行的部分）
                 VStack(alignment: .leading, spacing: Tokens.Spacing.xxs) {
-                    Text("顺延条目")
+                    Text(L.pick("顺延条目", "Deferred items"))
                         .font(Tokens.Typography.secondary)
                         .foregroundStyle(Tokens.Color.textSecondary)
                     SemanticSlotView(slot: model.deferredCountSlot)
@@ -748,13 +756,13 @@ struct ConfirmDrawer: View {
             Spacer()
 
             HStack(spacing: Tokens.Spacing.s) {
-                Button("取消", action: onCancel)
+                Button(L.pick("取消", "Cancel"), action: onCancel)
                     .buttonStyle(SecondaryButtonStyle())
 
                 // **同门槛**：未达线不得执行（AC-04 ③ 逐来源复核 + AC-08 组 B）。
                 // 门槛未过时按钮 disabled，并在下方显示原因 —— 不给「点了没反应」。
                 let canExecute = model.canLightUp && !model.readOnly
-                Button("立即执行本次清理", action: onConfirm)
+                Button(L.pick("立即执行本次清理", "Run this cleanup now"), action: onConfirm)
                     // **危险色**——这是全应用唯一该用危险色的主动作
                     .buttonStyle(DangerButtonStyle(enabled: canExecute))
                     .disabled(!canExecute)
@@ -764,7 +772,7 @@ struct ConfirmDrawer: View {
             if !model.canLightUp && !model.readOnly {
                 // 门槛未过 → **说明为什么不能点**，而不是让它静默 disabled
                 SemanticSlotView(
-                    slot: .unavailable(reason: "未达达标条件，暂不能执行（逐来源复核未通过）")
+                    slot: .unavailable(reason: L.pick("未达达标条件，暂不能执行（逐来源复核未通过）", "Gate not met; can't run yet (per-source re-check failed)"))
                 )
             }
         }
@@ -791,13 +799,13 @@ struct EvidencePage: View {
 
             // 工具条：导出（恢复入口在每行上）
             HStack(spacing: Tokens.Spacing.s) {
-                Text("执行记录")
+                Text(L.pick("执行记录", "Execution records"))
                     .font(Tokens.Typography.title)
                     .foregroundStyle(Tokens.Color.textPrimary)
 
                 Spacer()
 
-                Button("导出脱敏报告", action: onExport)
+                Button(L.pick("导出脱敏报告", "Export redacted report"), action: onExport)
                     .buttonStyle(SecondaryButtonStyle(enabled: !model.readOnly))
                     .disabled(model.readOnly)
             }
@@ -850,8 +858,8 @@ struct EvidencePage: View {
         VStack(alignment: .leading, spacing: 0) {
             if model.evidenceRows.isEmpty {
                 EmptyStateView(
-                    message: "还没有执行记录",
-                    hint: "自动删除启用并有条目被清理后，这里会出现记录。"
+                    message: L.pick("还没有执行记录", "No execution records yet"),
+                    hint: L.pick("自动删除启用并有条目被清理后，这里会出现记录。", "Records appear here after auto-delete is enabled and items are cleaned up.")
                 )
                 .frame(minHeight: 120)
             } else {
@@ -861,7 +869,7 @@ struct EvidencePage: View {
             // **举证链八字段**（AC-18：8 字段完整率 100%，无空白）
             if !model.evidenceFields.isEmpty {
                 VStack(alignment: .leading, spacing: Tokens.Spacing.xxs) {
-                    Text("举证链字段（8 项）")
+                    Text(L.pick("举证链字段（8 项）", "Evidence fields (8)"))
                         .font(Tokens.Typography.title)
                         .foregroundStyle(Tokens.Color.textPrimary)
                     ForEach(Array(model.evidenceFields.enumerated()), id: \.offset) { _, pair in
@@ -887,18 +895,18 @@ struct EvidencePage: View {
                     // 写成「执行次数须为 0」会造成字面冲突：表头说必须 0，
                     // 表内只读命令是 1 —— 用户会以为产品有问题，
                     // 或反过来以为这个指标不值得看。（查必究 B-1 复核指出）
-                    Text("上游命令（AC-19：删除类命令的执行次数须为 0）")
+                    Text(L.pick("上游命令（AC-19：删除类命令的执行次数须为 0）", "Upstream commands (AC-19: delete commands must execute 0 times)"))
                         .font(Tokens.Typography.title)
                         .foregroundStyle(Tokens.Color.textPrimary)
                     // 表头：两个数分列 —— 「调用」含被拒尝试，「执行」才是 AC-19 判的
                     HStack(spacing: Tokens.Spacing.xs) {
-                        Text("命令").font(Tokens.Typography.secondary)
+                        Text(L.pick("命令", "Command")).font(Tokens.Typography.secondary)
                             .foregroundStyle(Tokens.Color.textSecondary)
                         Spacer(minLength: Tokens.Spacing.s)
-                        Text("调用").font(Tokens.Typography.secondary)
+                        Text(L.pick("调用", "Invocations")).font(Tokens.Typography.secondary)
                             .foregroundStyle(Tokens.Color.textSecondary)
                             .frame(width: 56, alignment: .trailing)
-                        Text("执行").font(Tokens.Typography.secondary)
+                        Text(L.pick("执行", "Executed")).font(Tokens.Typography.secondary)
                             .foregroundStyle(Tokens.Color.textSecondary)
                             .frame(width: 56, alignment: .trailing)
                     }
@@ -946,7 +954,7 @@ struct EvidencePage: View {
                             // 按钮会出现而点了没反应 —— 那正是我们要消灭的形态
                             // （空实现检测会在 verify_a9 第九节报出来）。
                             if case .recoverable = row.label, row.record != nil {
-                                Button("恢复") {
+                                Button(L.pick("恢复", "Restore")) {
                                     if let rec = row.record {
                                         onRestore(rec)
                                     }

@@ -228,30 +228,36 @@ public enum DiagnosticCode: String, CaseIterable, Sendable, Equatable {
     /// 而「同一事实两处写」是这项目反复复发的病根。
     public var summary: String {
         switch self {
-        case .e101: return "路径变更"                 // + 来源名（由调用方补）
-        case .e102: return "无法写入"
-        case .e103: return "低电量已暂停"
-        case .e104: return "已取消"
-        case .e105: return "已超时，可续扫"
-        case .e106: return "需重新扫描"
-        case .e107: return "无法判定"
-        case .e108: return "来源无法读取"
-        case .e201: return "源已不存在"
-        case .e202: return "废纸篓不可写"
-        case .e203: return "跨卷，源仍在原位"
-        case .e204: return "不在允许范围，已跳过"
-        case .e205: return "原位置已有同名项，未覆盖"
-        case .e206: return "二次检查阻断"
-        case .e207: return "体积不可得，未删除"
-        case .e301: return "数据由更高版本创建，本版本只读"
-        case .e302: return "状态文件损坏，已备份为 .corrupt；请先导出报告"
-        case .e303: return "磁盘空间不足，状态未更新"
-        case .e304: return "数据校验失败；请导出报告"
-        case .e305: return "迁移空间不足"
-        case .e306: return "数据升级失败，仅可查看与导出"
-        case .e308: return "本次数据升级未完成，已回退到升级前的数据；观察期进度未受影响"
-        case .e401: return "导出失败"
-        case .e501: return "无法判定（无法枚举本用户进程）"
+        case .e101: return L.pick("路径变更", "Path changed")                 // + 来源名（由调用方补）
+        case .e102: return L.pick("无法写入", "Can’t write")
+        case .e103: return L.pick("低电量已暂停", "Paused: low battery")
+        case .e104: return L.pick("已取消", "Cancelled")
+        case .e105: return L.pick("已超时，可续扫", "Timed out; can resume")
+        case .e106: return L.pick("需重新扫描", "Full rescan required")
+        case .e107: return L.pick("无法判定", "Can’t determine")
+        case .e108: return L.pick("来源无法读取", "Source can’t be read")
+        case .e201: return L.pick("源已不存在", "Source no longer exists")
+        case .e202: return L.pick("废纸篓不可写", "Trash is not writable")
+        case .e203: return L.pick("跨卷，源仍在原位", "Cross-volume; source left in place")
+        case .e204: return L.pick("不在允许范围，已跳过", "Out of allowed scope; skipped")
+        case .e205: return L.pick("原位置已有同名项，未覆盖", "Same-name item exists at original path; not overwritten")
+        case .e206: return L.pick("二次检查阻断", "Blocked by second check")
+        case .e207: return L.pick("体积不可得，未删除", "Size unavailable; not deleted")
+        case .e301: return L.pick("数据由更高版本创建，本版本只读", "Data created by a newer version; this version is read-only")
+        case .e302: return L.pick(
+            "状态文件损坏，已备份为 .corrupt；请先导出报告",
+            "State file is corrupt; backed up as .corrupt. Export a report first"
+        )
+        case .e303: return L.pick("磁盘空间不足，状态未更新", "Not enough disk space; state not updated")
+        case .e304: return L.pick("数据校验失败；请导出报告", "Data verification failed; export a report")
+        case .e305: return L.pick("迁移空间不足", "Not enough space for migration")
+        case .e306: return L.pick("数据升级失败，仅可查看与导出", "Data upgrade failed; view and export only")
+        case .e308: return L.pick(
+            "本次数据升级未完成，已回退到升级前的数据；观察期进度未受影响",
+            "Data upgrade did not complete; rolled back to pre-upgrade data. Observation progress is unaffected"
+        )
+        case .e401: return L.pick("导出失败", "Export failed")
+        case .e501: return L.pick("无法判定（无法枚举本用户进程）", "Can’t tell (can’t enumerate this user’s processes)")
         }
     }
 
@@ -266,30 +272,33 @@ public enum DiagnosticCode: String, CaseIterable, Sendable, Equatable {
     /// 返回 `nil` 表示「本码不需要用户额外动作」（如「已取消」「已超时」）。
     public var suggestedAction: String? {
         switch self {
-        case .e101: return "请检查来源路径是否仍存在（应用升级后缓存目录可能已变更）"
-        case .e102: return "该卷为只读，请换到可写位置后重试"
-        case .e103: return "接上电源后会自动继续"
+        case .e101: return L.pick(
+            "请检查来源路径是否仍存在（应用升级后缓存目录可能已变更）",
+            "Check whether the source path still exists (cache directories may move after an app upgrade)"
+        )
+        case .e102: return L.pick("该卷为只读，请换到可写位置后重试", "This volume is read-only; switch to a writable location and retry")
+        case .e103: return L.pick("接上电源后会自动继续", "It will resume automatically once power is connected")
         case .e104: return nil
-        case .e105: return "可续扫，无需从头开始"
-        case .e106: return "请重新完整扫描"
-        case .e107: return "可在 ⑦ 页查看上游命令记录"
-        case .e108: return "请在系统设置中授予该来源的读取权限"
+        case .e105: return L.pick("可续扫，无需从头开始", "You can resume; no need to start over")
+        case .e106: return L.pick("请重新完整扫描", "Run a full scan again")
+        case .e107: return L.pick("可在 ⑦ 页查看上游命令记录", "See the upstream command log on page ⑦")
+        case .e108: return L.pick("请在系统设置中授予该来源的读取权限", "Grant read access to this source in System Settings")
         case .e201: return nil
-        case .e202: return "请检查废纸篓是否可写"
+        case .e202: return L.pick("请检查废纸篓是否可写", "Check whether Trash is writable")
         case .e203: return nil
         case .e204: return nil
-        case .e205: return "请先移走原位置的同名项，再重试恢复"
-        case .e206: return "该项已变化，将在下次扫描时重新判定"
+        case .e205: return L.pick("请先移走原位置的同名项，再重试恢复", "Move the same-name item at the original path away, then retry the restore")
+        case .e206: return L.pick("该项已变化，将在下次扫描时重新判定", "The item changed; it will be re-evaluated on the next scan")
         case .e207: return nil
-        case .e301: return "装回更高版本才能执行清理"
-        case .e302: return "请先导出报告"
-        case .e303: return "清理废纸篓或释放磁盘后重试"
-        case .e304: return "请导出报告"
-        case .e305: return "释放空间后重启应用会自动重试"
-        case .e306: return "请重装同版本或更高版本；可导出报告"
+        case .e301: return L.pick("装回更高版本才能执行清理", "Reinstall the newer version to run cleanup")
+        case .e302: return L.pick("请先导出报告", "Export a report first")
+        case .e303: return L.pick("清理废纸篓或释放磁盘后重试", "Empty Trash or free up disk space, then retry")
+        case .e304: return L.pick("请导出报告", "Export a report")
+        case .e305: return L.pick("释放空间后重启应用会自动重试", "Free up space, then restart the app to retry automatically")
+        case .e306: return L.pick("请重装同版本或更高版本；可导出报告", "Reinstall the same or a newer version; you can export a report")
         case .e308: return nil
-        case .e401: return "请先导出报告以便排查"
-        case .e501: return "请在系统设置中允许本应用访问"
+        case .e401: return L.pick("请先导出报告以便排查", "Export a report so the issue can be investigated")
+        case .e501: return L.pick("请在系统设置中允许本应用访问", "Allow this app access in System Settings")
         }
     }
 

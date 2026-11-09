@@ -92,8 +92,8 @@ public enum ExecutionMode: String, Codable, Sendable, CaseIterable {
 
     public var label: String {
         switch self {
-        case .reportOnly: return "仅报告"
-        case .autoDelete: return "自动删除"
+        case .reportOnly: return L.pick("仅报告", "Report only")
+        case .autoDelete: return L.pick("自动删除", "Auto-delete")
         }
     }
 }

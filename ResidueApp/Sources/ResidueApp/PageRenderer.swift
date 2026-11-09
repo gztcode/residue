@@ -82,7 +82,7 @@ enum PageRenderer {
         // 不是画一个假的 —— 每张都对应产品里真会出现的路径。
         var errorModel = model
         errorModel.statusSlot = .stateLabel(.error)
-        errorModel.errorMessageForRender = "E-303 · 磁盘空间不足，状态未更新。清理废纸篓或释放磁盘后重试"
+        errorModel.errorMessageForRender = L.pick("E-303 · 磁盘空间不足，状态未更新。清理废纸篓或释放磁盘后重试", "E-303 · Not enough disk space; state not updated. Empty Trash or free up disk and retry")
 
         var noPermModel = model
         noPermModel.collectionTiers = noPermModel.collectionTiers.map { tier in
@@ -90,11 +90,11 @@ enum PageRenderer {
                 name: tier.name,
                 authorized: tier.authorized,
                 state: .permissionBlocked(
-                    missing: "本用户进程 fd",
+                    missing: L.pick("本用户进程 fd", "this user's process fds"),
                     guideItemID: DiagnosticCode.e501.rawValue
                 ),
                 blockReason: .permissionBlocked(
-                    missing: "本用户进程 fd",
+                    missing: L.pick("本用户进程 fd", "this user's process fds"),
                     guideItemID: DiagnosticCode.e501.rawValue
                 )
             )
@@ -106,7 +106,7 @@ enum PageRenderer {
 
         var loadingModel = model
         loadingModel.loading = true
-        loadingModel.loadingMessage = "正在扫描 3 个来源 · 已扫描 12,847 条"
+        loadingModel.loadingMessage = L.pick("正在扫描 3 个来源 · 已扫描 12,847 条", "Scanning 3 sources · 12,847 items scanned")
 
         var envEmptyModel = model
         envEmptyModel.candidateRows = []
@@ -172,7 +172,7 @@ struct RenderWrapper: View {
                         Image(systemName: p.symbolName)
                             .font(.system(size: 12))
                             .frame(width: 16)
-                        Text(p.title)
+                        Text(p.navTitle)
                             .font(Tokens.Typography.body)
                         Spacer()
                     }
@@ -184,12 +184,12 @@ struct RenderWrapper: View {
 
                 Spacer()
 
-                Text("本机 · 零外发")
+                Text(L.pick("本机 · 零外发", "On-device · No outbound"))
                     .font(Tokens.Typography.secondary)
                     .foregroundStyle(Tokens.Color.textSecondary)
                     .padding(Tokens.Spacing.s)
             }
-            .frame(width: 168)
+            .frame(width: L.current == .en ? 196 : 168)
             .frame(maxHeight: .infinity, alignment: .top)
             .background(Tokens.Color.surface)
 

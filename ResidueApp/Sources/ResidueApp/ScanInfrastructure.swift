@@ -49,11 +49,17 @@ struct ScanProgress: Sendable, Equatable {
     /// 「已扫描 N 项 + 已用时」是**能如实说出口**的量。
     var displayText: String {
         guard isRunning else { return "" }
-        var parts = ["已扫描 \(filesScanned.formatted()) 项"]
+        var parts = [L.pick("已扫描 \(filesScanned.formatted()) 项", "\(filesScanned.formatted()) items scanned")]
         if candidatesFound > 0 {
-            parts.append("发现 \(candidatesFound.formatted()) 个可回收条目")
+            parts.append(L.pick(
+                "发现 \(candidatesFound.formatted()) 个可回收条目",
+                "\(candidatesFound.formatted()) reclaimable items found"
+            ))
         }
-        parts.append(String(format: "已用时 %.1f 秒", elapsed))
+        parts.append(L.pick(
+            String(format: "已用时 %.1f 秒", elapsed),
+            String(format: "%.1f s elapsed", elapsed)
+        ))
         return parts.joined(separator: " · ")
     }
 }

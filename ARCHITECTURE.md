@@ -31,11 +31,11 @@ ResidueApp/
 ├── Sources/
 │   ├── ResidueCore/           纯逻辑，可单测（无 UI 依赖）
 │   └── ResidueApp/            SwiftUI 界面 + IO 编排
-├── Tests/ResidueCoreTests/    276 个单测
+├── Tests/ResidueCoreTests/    283 个单测
 ├── scripts/
 │   ├── make_app.sh            打包 .app（含签名/公证/钉票的完整分支）
 │   ├── verify_a9.sh           72 项：页面结构 + 空实现检测 + 数据层接线
-│   ├── verify_a5.sh           36 项：产物结构 + C1/C9 发布链路顺序 + README 信任面
+│   ├── verify_a5.sh           42 项：产物结构 + dmg 载体 + C1/C9 发布链路顺序 + README 信任面
 │   └── verify_codes.py        11 项：错误码表 ↔ 文档一致性
 ├── Resources/                 Info.plist 模板 / entitlements / 图标
 └── design-renders/            16 张渲染产物（设计走查的证据基础）
@@ -119,12 +119,12 @@ ResidueApp/
 ```bash
 cd ResidueApp
 
-swift build && swift test          # 编译 + 276 单测
+swift build && swift test          # 编译 + 283 单测
 
 ./scripts/verify_codes.py          # 错误码表（11 项）
 ./scripts/verify_a9.sh             # 页面结构 + 空实现（72 项）
 ./scripts/make_app.sh              # 产出 .app
-./scripts/verify_a5.sh             # 产物结构（36 项，3 项因无签名身份如实标未覆盖）
+./scripts/verify_a5.sh             # 产物结构（42 项，3 项因无签名身份如实标未覆盖）
 
 swift run ResidueApp --verify-wiring /tmp/w      # 接线自检（45 项，真 IO）
 swift run ResidueApp --render-pages /tmp/pages   # 重新渲染 16 张设计稿
@@ -133,7 +133,7 @@ cd .. && ./tests/contract/check_all.sh && python3 tests/contract/verify_r2.py
 #         PRD 191 + 47 项 + R2 123 项（脚本从自身位置推导仓库根，可在任意 cwd 调用）
 ```
 
-`--verify-wiring` 是这里最重要的一条：它**真的走一遍**「首启落盘 → 扫描 → 门槛链 → 导出脱敏 → 清除 → 定时任务」，靠文件系统事实而不是读代码判断。276 个单测永远替代不了它——单测验的是各模块自身契约，**没人验「模块之间接对了没有」**。
+`--verify-wiring` 是这里最重要的一条：它**真的走一遍**「首启落盘 → 扫描 → 门槛链 → 导出脱敏 → 清除 → 定时任务」，靠文件系统事实而不是读代码判断。283 个单测永远替代不了它——单测验的是各模块自身契约，**没人验「模块之间接对了没有」**。
 
 ---
 

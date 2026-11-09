@@ -19,6 +19,14 @@
 <dict>
     <key>CFBundleDevelopmentRegion</key>
     <string>zh_CN</string>
+    <!-- 声明支持的语言。macOS 的「系统设置 → 通用 → 语言与地区 → 应用程序」
+         只列出这里登记过的语言；不登记就没有「单独给本应用设语言」这一项。
+         文案本身不放在 .lproj 里，而是编译进二进制（见 Core/Localization.swift）。 -->
+    <key>CFBundleLocalizations</key>
+    <array>
+        <string>zh-Hans</string>
+        <string>en</string>
+    </array>
     <key>CFBundleExecutable</key>
     <string>Residue</string>
     <key>CFBundleIdentifier</key>
