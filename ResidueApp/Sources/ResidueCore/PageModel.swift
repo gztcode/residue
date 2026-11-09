@@ -32,13 +32,25 @@ public enum Page: Int, CaseIterable, Identifiable, Sendable {
 
     public var title: String {
         switch self {
-        case .overview: return "存储总览"
-        case .environments: return "环境与候选"
-        case .policy: return "清理策略"
-        case .privacy: return "授权与隐私"
-        case .report: return "观察期报告"
-        case .confirm: return "确认清理"
-        case .evidence: return "举证链与日志"
+        case .overview: return L.pick("存储总览", "Storage overview")
+        case .environments: return L.pick("环境与候选", "Environments & candidates")
+        case .policy: return L.pick("清理策略", "Cleanup policy")
+        case .privacy: return L.pick("授权与隐私", "Permissions & privacy")
+        case .report: return L.pick("观察期报告", "Observation report")
+        case .confirm: return L.pick("确认清理", "Confirm cleanup")
+        case .evidence: return L.pick("举证链与日志", "Evidence & logs")
+        }
+    }
+
+    /// 侧栏用的短标题。
+    ///
+    /// 页头可以放全称（`title`），但侧栏只有 168/196 pt：英文全称会截成
+    /// 「Environments & can…」。导航项的作用是**找得到**，不是把话说全。
+    public var navTitle: String {
+        switch self {
+        case .environments: return L.pick("环境与候选", "Environments")
+        case .privacy: return L.pick("授权与隐私", "Permissions")
+        default: return title
         }
     }
 
@@ -64,7 +76,7 @@ public struct PageModel: Sendable {
     /// 是否正在加载。
     public var loading: Bool = false
     /// 加载进度文案。
-    public var loadingMessage: String = "正在扫描…"
+    public var loadingMessage: String = L.pick("正在扫描…", "Scanning…")
 
     /// ① 页三区块。
     public var overviewBlocks: [OverviewBlock] = []
@@ -109,7 +121,7 @@ public struct PageModel: Sendable {
     /// L2 只有否决权、无许可权（决策 ⑦）。
     public var l2Inferred: SemanticSlot = .metric(0, unit: .items)
     /// ① 页：**L2 的标识文案**（AC-02 判定要求「非空」）。
-    public var l2Label: String = "推断 · 不作为删除依据"
+    public var l2Label: String = L.pick("推断 · 不作为删除依据", "Inferred · not a basis for deletion")
     /// ① 页：**「可删除量」独立展示元素**，其值 = L1 值（AC-02 判定）。
     ///
     /// 为什么单独一个字段而不是直接复用 `l1Confirmed`：
@@ -294,8 +306,8 @@ public enum CandidateParticipation: Sendable {
 
     public var label: String {
         switch self {
-        case .autoDeletable: return "可参与自动删除"
-        case .reportOnly: return "仅报告"
+        case .autoDeletable: return L.pick("可参与自动删除", "Eligible for auto-delete")
+        case .reportOnly: return L.pick("仅报告", "Report only")
         }
     }
 
@@ -374,9 +386,9 @@ public enum EvidenceLabel: Sendable {
 
     public var text: String {
         switch self {
-        case .recoverable: return "可恢复"
-        case .restored: return "已恢复"
-        case .blocked: return "已阻断"
+        case .recoverable: return L.pick("可恢复", "Recoverable")
+        case .restored: return L.pick("已恢复", "Restored")
+        case .blocked: return L.pick("已阻断", "Blocked")
         }
     }
 
@@ -394,16 +406,33 @@ public enum EvidenceLabel: Sendable {
 
 /// ⑤ 页矩阵列定义（**七项，顺序唯一**）。
 public enum ReportMatrix {
-    public static let columns = ["来源", "判定域", "样本 / 总量", "门槛", "观察期", "L0 误判 · 检查", "结论"]
+    public static var columns: [String] {
+        [
+            L.pick("来源", "Source"),
+            L.pick("判定域", "In domain"),
+            sampleColumnTitle,
+            L.pick("门槛", "Threshold"),
+            L.pick("观察期", "Observation"),
+            l0ColumnTitle,
+            L.pick("结论", "Conclusion"),
+        ]
+    }
 
     /// ③ 列的两个冻结时点——**列级元数据，在表头内分行标注**（v1.1 · B1）。
     ///
     /// 放在这里而不是 `ReportRow` 里，是因为它**每行都相同**：
     /// 逐行重复等于让用户把同一句话读七遍。列级的东西就放在列上。
-    public static let freezeNotes = ["总量冻结：开轮时", "样本冻结：报告产出时"]
+    public static var freezeNotes: [String] {
+        [
+            L.pick("总量冻结：开轮时", "Total frozen: at round start"),
+            L.pick("样本冻结：报告产出时", "Samples frozen: when report is produced"),
+        ]
+    }
 
     /// ③ 列的列名（表头第一行）。
-    public static let sampleColumnTitle = "样本 / 总量"
+    public static var sampleColumnTitle: String {
+        L.pick("样本 / 总量", "Samples / Total")
+    }
 
     /// 表头块高（v1.1 · B1：60 pt，**不计入数据行高**）。
     ///
@@ -415,14 +444,18 @@ public enum ReportMatrix {
     public static let sampleColumnWidth: CGFloat = 150
 
     /// ⑥ 列的列名。
-    public static let l0ColumnTitle = "L0 误判 · 检查"
+    public static var l0ColumnTitle: String {
+        L.pick("L0 误判 · 检查", "L0 misjudgment · Checks")
+    }
 
     /// ⑥ 列的两个子标——**同样是列级元数据，放表头**（v1.1 · B1 原则的延伸）。
     ///
     /// 为什么需要：`a` 与 `b` 是两个独立数值（不能拼成一个字符串），
     /// 而数据行固定 32 pt 装不下两行带标文字 → 两个裸数字堆叠会让用户
     /// 分不清哪个是 `a`、哪个是 `b`。按 B1 的同一逻辑，子标放表头。
-    public static let l0SubLabels = ["误判", "检查"]
+    public static var l0SubLabels: [String] {
+        [L.pick("误判", "Misses"), L.pick("检查", "Checks")]
+    }
 
     /// ⑥ 列两个子值的宽度（用于表头子标与数据格左右对齐）。
     public static let l0SubWidth: CGFloat = 62

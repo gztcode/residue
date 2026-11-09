@@ -21,13 +21,16 @@ public enum LoginItemState: Equatable, Sendable {
     public var label: String {
         switch self {
         case .enabled:
-            return "定时任务已启用"
+            return L.pick("定时任务已启用", "Scheduled task enabled")
         case .requiresApproval:
-            return "待你在系统设置中允许（系统设置 → 通用 → 登录项）"
+            return L.pick(
+                "待你在系统设置中允许（系统设置 → 通用 → 登录项）",
+                "Waiting for your approval in System Settings (System Settings → General → Login Items)"
+            )
         case .notRegistered:
-            return "未注册为登录项"
+            return L.pick("未注册为登录项", "Not registered as a login item")
         case .notFound:
-            return "登录项注册丢失，需重新安装"
+            return L.pick("登录项注册丢失，需重新安装", "Login item registration is missing; reinstall required")
         }
     }
 

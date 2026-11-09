@@ -128,7 +128,10 @@ else
   bad "codesign --verify 失败（签名损坏）"
 fi
 
-if codesign -d --verbose=2 "$APP" 2>&1 | grep -q "flags=.*runtime"; then
+# 注意 `grep -q` 与 `pipefail` 的冲突（本脚本也开了 pipefail）：
+# `grep -q` 命中后立即退出，上游写管道时收到 SIGPIPE（141），
+# 整条管道被判成失败 → 明明匹配却走 else 分支。全部改成 `grep … >/dev/null`。
+if codesign -d --verbose=2 "$APP" 2>&1 | grep "flags=.*runtime" >/dev/null; then
   ok "Hardened Runtime 已启用（公证前提）"
 else
   bad "Hardened Runtime 未启用 → 公证必被拒"
@@ -137,7 +140,7 @@ fi
 # 逐 Mach-O 都被签（ADR-10「逐 Mach-O 签名」）
 MACHO_UNSIGNED=0
 while IFS= read -r -d '' f; do
-  if file "$f" | grep -q "Mach-O"; then
+  if file "$f" | grep "Mach-O" >/dev/null; then
     if ! codesign --verify "$f" > /dev/null 2>&1; then
       MACHO_UNSIGNED=$((MACHO_UNSIGNED+1))
       echo "      未签: ${f#$APP/}"
@@ -148,12 +151,12 @@ if [ "$MACHO_UNSIGNED" -eq 0 ]; then ok "bundle 内所有 Mach-O 均已签名"; 
 
 # entitlements：不得含 get-task-allow=true，不得含 com.apple.security.*
 ENT="$(codesign -d --entitlements :- "$APP" 2>/dev/null || true)"
-if echo "$ENT" | grep -A1 "get-task-allow" 2>/dev/null | grep -q "<true/>"; then
+if echo "$ENT" | grep -A1 "get-task-allow" 2>/dev/null | grep "<true/>" >/dev/null; then
   bad "entitlements 含 get-task-allow=true（公证必被拒）"
 else
   ok "无 get-task-allow=true"
 fi
-if echo "$ENT" | grep -q "com.apple.security"; then
+if echo "$ENT" | grep "com.apple.security" >/dev/null; then
   bad "entitlements 含 com.apple.security.*（首版应为空：非沙盒 + 零外发）"
 else
   ok "无 com.apple.security.*（非沙盒、零外发）"
@@ -195,24 +198,37 @@ fi
 echo ""
 echo "--- 六、分发载体（§10.1 第 3 条）---"
 # ---------------------------------------------------------------------------
-ZIP="build/Residue.app.zip"
-if [ -f "$ZIP" ]; then
-  ok "存在分发载体 .zip"
-  # zip 必须保留签名：解开后仍能 verify
-  TMP="$(mktemp -d)"
-  if ditto -x -k "$ZIP" "$TMP" 2>/dev/null; then
-    if codesign --verify --deep --strict "$TMP/Residue.app" > /dev/null 2>&1; then
-      ok "zip 解开后签名完好（ditto 保留了签名）"
+DMG="build/Residue.app.dmg"
+if [ -f "$DMG" ]; then
+  ok "存在分发载体 .dmg"
+  # dmg 必须保留签名：挂载后 .app 仍能 verify。
+  # 用只读 + nobrowse 挂载，验完立刻卸载，不留挂载点。
+  MNT="$(mktemp -d)"
+  if hdiutil attach "$DMG" -mountpoint "$MNT" -nobrowse -readonly -quiet 2>/dev/null; then
+    if [ -d "$MNT/Residue.app" ]; then
+      ok "dmg 内含 Residue.app"
+      if codesign --verify --deep --strict "$MNT/Residue.app" > /dev/null 2>&1; then
+        ok "dmg 内 .app 签名完好（挂载后仍可 verify）"
+      else
+        bad "dmg 内 .app 签名损坏（打包方式破坏了签名）"
+      fi
+      # 拖拽安装的前提：Applications 快捷方式必须在根上
+      if [ -L "$MNT/Applications" ]; then
+        ok "dmg 含 /Applications 快捷方式（可直接拖拽安装）"
+      else
+        bad "dmg 缺 Applications 快捷方式（用户需手动找「应用程序」）"
+      fi
     else
-      bad "zip 解开后签名损坏（打包方式破坏了签名）"
+      bad "dmg 内缺 Residue.app"
     fi
-    rm -rf "$TMP"
+    hdiutil detach "$MNT" -quiet 2>/dev/null || true
   else
-    bad "zip 无法解开"
+    bad "dmg 无法挂载"
   fi
-  echo "     SHA-256: $(shasum -a 256 "$ZIP" | awk '{print $1}')"
+  rmdir "$MNT" 2>/dev/null || true
+  echo "     SHA-256: $(shasum -a 256 "$DMG" | awk '{print $1}')"
 else
-  bad "缺分发载体 .zip"
+  bad "缺分发载体 .dmg"
 fi
 
 # ---------------------------------------------------------------------------
@@ -220,7 +236,7 @@ echo ""
 echo "--- 七、A-5 验收口径逐条落状态 ---"
 # ---------------------------------------------------------------------------
 IDENTITY_OK=false
-if security find-identity -v -p codesigning 2>/dev/null | grep -q "Developer ID Application"; then
+if security find-identity -v -p codesigning 2>/dev/null | grep "Developer ID Application" >/dev/null; then
   IDENTITY_OK=true
 fi
 
@@ -287,26 +303,29 @@ else
   bad "make_app.sh 里找不到 timestamp 处理"
 fi
 
-# C9：钉票后必须重打 zip + 重算 SHA-256；真身份未公证时 zip 须改名
+# C9：先提公证 → 对 dmg 钉票 → 重算 SHA-256；真身份未公证时 dmg 须改名
 CONTRACT_CHECK=$(
   python3 - "scripts/make_app.sh" <<'PYEOF' 2>/dev/null || echo FAIL
 import sys
 src = open(sys.argv[1], encoding='utf-8').read()
+i_submit = src.find('notarytool submit')
 i_staple = src.find('stapler staple')
 i_unnotarized = src.find('UNNOTARIZED')
-if i_staple < 0 or i_unnotarized < 0:
+if min(i_submit, i_staple, i_unnotarized) < 0:
     print('FAIL'); raise SystemExit
-i_reditto = src.find('ditto -c -k', i_staple)
-i_hash2 = src.find('SHA256="$(shasum', i_staple)
-ok = i_reditto > i_staple and i_hash2 > i_staple and i_reditto < i_hash2
+# 钉票对象必须是 dmg（票据在分发载体外层），不能是裸 .app
+staple_dmg = src.find('stapler staple "$DMG"', i_staple) >= 0
+# 钉票会改写 dmg → 哈希必须在其后重算
+i_hash2 = src.find('SHA256="$(shasum', i_staple) >= 0
+ok = staple_dmg and i_submit < i_staple and i_hash2
 print('PASS' if ok else 'FAIL')
 PYEOF
 )
 if [ "$CONTRACT_CHECK" = "PASS" ]; then
-  ok "钉票 → 重打 zip → 重算 SHA-256 顺序正确（C9）"
-  ok "真身份但未公证时 zip 改名为 UNNOTARIZED（用名字阻止误传，不只靠注释）"
+  ok "提交公证 → 对 dmg 钉票 → 重算 SHA-256 顺序正确（C9）"
+  ok "真身份但未公证时 dmg 改名为 UNNOTARIZED（用名字阻止误传，不只靠注释）"
 else
-  bad "钉票后的重打/重算顺序不对，或缺 UNNOTARIZED 改名（会发出无票据的 zip）"
+  bad "公证/钉票顺序不对，或缺 UNNOTARIZED 改名（会发出无票据的 dmg）"
 fi
 
 # ---------------------------------------------------------------------------

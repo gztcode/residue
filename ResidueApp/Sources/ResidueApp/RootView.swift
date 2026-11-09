@@ -24,8 +24,10 @@ struct RootView: View {
         HStack(spacing: 0) {
 
             // ---- 侧边导航 ----
+            // 英文页名比中文长（「Environments & candidates」），168 会截成
+            // 「Environments…」。中文保持视觉基线宽度，英文放宽到 196。
             sidebar
-                .frame(width: 168)
+                .frame(width: L.current == .en ? 196 : 168)
 
             DividerLine()
                 .frame(width: 1)
@@ -97,7 +99,7 @@ struct RootView: View {
             Spacer()
 
             // 底部状态（不占信号色——信号色留给主行动）
-            Text("本机 · 零外发")
+            Text(L.pick("本机 · 零外发", "On-device · No outbound"))
                 .font(Tokens.Typography.secondary)
                 .foregroundStyle(Tokens.Color.textSecondary)
                 .padding(Tokens.Spacing.s)
@@ -136,7 +138,7 @@ struct RootView: View {
             }
 
             // 扫描（真实触发 ScanEngine；只读态禁用）
-            Button(app.isScanning ? "扫描中…" : "扫描") {
+            Button(app.isScanning ? L.pick("扫描中…", "Scanning…") : L.pick("扫描", "Scan")) {
                 Task { await app.runScan() }
             }
             .buttonStyle(SecondaryButtonStyle(enabled: !app.isScanning && !model.readOnly))
@@ -147,14 +149,14 @@ struct RootView: View {
             // 契约：`E-104`「用户取消」—— **取消不是失败**，
             // 它落断点、且**不计入计数日**（M1）。
             if app.isScanning {
-                Button("取消") { app.cancelScan() }
+                Button(L.pick("取消", "Cancel")) { app.cancelScan() }
                     .buttonStyle(SecondaryButtonStyle(enabled: true))
             }
 
             if selection == .confirm {
                 // ⚠️ 不用 `.borderedProminent`：系统样式自带配色与圆角，
                 // token 不起作用；且它在离屏渲染下会退化成占位符（申必过 C5 也提过）。
-                Button("清理…") { showConfirmDrawer = true }
+                Button(L.pick("清理…", "Clean up…")) { showConfirmDrawer = true }
                     .buttonStyle(PrimaryButtonStyle(enabled: !model.readOnly))
                     .disabled(model.readOnly)
             }
@@ -220,7 +222,7 @@ struct NavRow: View {
                 Image(systemName: page.symbolName)
                     .font(.system(size: 12))
                     .frame(width: 16)
-                Text(page.title)
+                Text(page.navTitle)
                     .font(Tokens.Typography.body)
                 Spacer()
             }

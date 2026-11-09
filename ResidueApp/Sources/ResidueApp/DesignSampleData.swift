@@ -55,17 +55,17 @@ extension PageModel {
         )
         m.remainingDays = .duration(days: 0)   // 观察期已满 → 14 − 14 = 0（此时「0 天」是正确值）
         m.policySlots = [
-            ("首次上限（5 GB 与来源 10% 取小）", .metric(5_000_000_000, unit: .bytes)),
-            ("稳定后比例", .text("20%")),
+            (L.pick("首次上限（5 GB 与来源 10% 取小）", "First-run cap (lesser of 5 GB and 10% of source)"), .metric(5_000_000_000, unit: .bytes)),
+            (L.pick("稳定后比例", "Steady-state ratio"), .text("20%")),
         ]
         m.ruleVersionSlots = [
-            ("当前规则版本", .text("R1（固定）")),
-            ("可退回版本", .unavailable(reason: "本版不提供")),
+            (L.pick("当前规则版本", "Current rule version"), .text(L.pick("R1（固定）", "R1 (fixed)"))),
+            ("可退回版本", .unavailable(reason: L.pick("本版不提供", "Not available in this version"))),
         ]
 
         // ④
-        m.collectionScopeNotice = "四档信号：缓存目录 / 临时环境 / 构建产物 / 会话痕迹。"
-            + "后两档默认关闭；不读取文件内容。"
+        m.collectionScopeNotice = L.pick("四档信号：缓存目录 / 临时环境 / 构建产物 / 会话痕迹。", "Four signal tiers: cache directories / temporary environments / build artifacts / session traces.")
+            + L.pick("后两档默认关闭；不读取文件内容。", "The last two are off by default; file contents are never read.")
         m.canClearLogs = true
         // L1 / L2 / 可删除量（AC-02）：**三个数分开**，L2 不并入
         // AC-03 四项 + 白名单
@@ -80,10 +80,10 @@ extension PageModel {
 
         // 四档采集与授权（AC-10 / AC-11 / AC-14）
         m.collectionTiers = [
-            CollectionTier(name: "缓存目录", authorized: true, state: .text("运行中")),
-            CollectionTier(name: "临时环境", authorized: true, state: .text("运行中")),
-            CollectionTier(name: "构建产物", authorized: false, state: .text("未采集")),
-            CollectionTier(name: "会话痕迹", authorized: false, state: .text("未采集")),
+            CollectionTier(name: L.pick("缓存目录", "Cache directories"), authorized: true, state: .text(L.pick("运行中", "Running"))),
+            CollectionTier(name: L.pick("临时环境", "Temporary environments"), authorized: true, state: .text(L.pick("运行中", "Running"))),
+            CollectionTier(name: L.pick("构建产物", "Build artifacts"), authorized: false, state: .text(L.pick("未采集", "Not collected"))),
+            CollectionTier(name: L.pick("会话痕迹", "Session traces"), authorized: false, state: .text(L.pick("未采集", "Not collected"))),
         ]
 
         // ⑤ 七项矩阵（`K` / `T` 分别来自快照与样本，界面不自己算差）
@@ -95,12 +95,12 @@ extension PageModel {
                 source: "uv cache",
                 slots: [
                     .text("uv cache"),
-                    .text("在域"),
+                    .text(L.pick("在域", "In domain")),
                     .ratio(27, 30),
                     .metric(30, unit: .none),
                     .metric(2, unit: .none),          // 观察期：第几轮（数值）
                     .metric(0, unit: .times),         // L0 误判 a
-                    .text("未达标"),
+                    .text(L.pick("未达标", "Not qualified")),
                 ],
                 multiSlotColumn: 5,
                 extraSlots: [.metric(12, unit: .times)]   // 检查次数 b
@@ -109,12 +109,12 @@ extension PageModel {
                 source: "npm/_npx",
                 slots: [
                     .text("npm/_npx"),
-                    .text("在域"),
+                    .text(L.pick("在域", "In domain")),
                     .ratio(30, 30),
                     .metric(30, unit: .none),
                     .metric(2, unit: .none),
                     .metric(0, unit: .times),
-                    .text("达标"),
+                    .text(L.pick("达标", "Qualified")),
                 ],
                 multiSlotColumn: 5,
                 extraSlots: [.metric(9, unit: .times)]
@@ -123,12 +123,12 @@ extension PageModel {
                 source: "pipx run",
                 slots: [
                     .text("pipx run"),
-                    .text("仅报告"),
+                    .text(L.pick("仅报告", "Report only")),
                     .ratio(0, 0),
-                    .text("不适用"),
+                    .text(L.pick("不适用", "N/A")),
                     .metric(2, unit: .none),
                     .metric(0, unit: .times),
-                    .text("仅报告"),
+                    .text(L.pick("仅报告", "Report only")),
                 ],
                 multiSlotColumn: 5,
                 extraSlots: [.metric(0, unit: .times)]
@@ -136,7 +136,7 @@ extension PageModel {
         ]
         // 页级状态行**必须与 M1 同构**（前置数字式），否则 DAC-55 判不通过
         m.pageLevelSlot = .text(
-            UICopy.pageLevelVerdict(round: 2, reason: "uv cache 样本不足")
+            UICopy.pageLevelVerdict(round: 2, reason: L.pick("uv cache 样本不足", "uv cache: insufficient samples"))
         )
         // 「上一轮」行同样前置数字式；轮次 = 2 → 显示
         m.previousRoundSlot = .text(UICopy.previousRound(round: 2))
@@ -153,14 +153,14 @@ extension PageModel {
         // ⑦
         // 举证链八字段（AC-18）
         m.evidenceFields = [
-            ("来源", .text("uv cache")),
-            ("路径", .text("~/Library/Caches/uv/archive-v0/3f9a…")),
-            ("字节", .metric(180_000_000, unit: .bytes)),
-            ("L0 检查时刻", .text("首次 09:12 · 二次 09:14")),
-            ("四组信号位", .text("T1 命中 · L2 无通道")),
-            ("L2 各信号取值", .unavailable(reason: "不适用（L2 无观测通道）")),
-            ("执行动作", .text("rename_to_trash")),
-            ("恢复位置", .text("~/.Trash/…3f9a.1700000000")),
+            (L.pick("来源", "Source"), .text("uv cache")),
+            (L.pick("路径", "Path"), .text("~/Library/Caches/uv/archive-v0/3f9a…")),
+            (L.pick("字节", "Bytes"), .metric(180_000_000, unit: .bytes)),
+            (L.pick("L0 检查时刻", "L0 check time"), .text("首次 09:12 · 二次 09:14")),
+            (L.pick("四组信号位", "Four signal bits"), .text("T1 命中 · L2 无通道")),
+            (L.pick("L2 各信号取值", "L2 signal values"), .unavailable(reason: L.pick("不适用（L2 无观测通道）", "Not applicable (L2 has no observation channel)"))),
+            (L.pick("执行动作", "Action"), .text("rename_to_trash")),
+            (L.pick("恢复位置", "Restore location"), .text("~/.Trash/…3f9a.1700000000")),
         ]
         // 上游命令（AC-19）
         m.upstreamCommands = [

@@ -17,7 +17,7 @@ SwiftPM 命令在 `ResidueApp/` 目录下执行（SwiftPM 包根）；文档基�
 ```bash
 swift build                      # 编译
 swift build -c release           # Release 会裁掉 #if DEBUG 的自检入口，必须单独验
-swift test                       # 全部单测（当前 276 个）
+swift test                       # 全部单测（当前 283 个）
 swift test --filter "MetricsTests"                                    # 跑一个测试类
 swift test --filter "ResidueCoreTests.MetricsTests/testThresholdIsMinOf30AndTotal"  # 跑单个用例
 

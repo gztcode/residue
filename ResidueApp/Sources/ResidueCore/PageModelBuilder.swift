@@ -237,18 +237,22 @@ var model = PageModel()
         model.locationWarning = input.locationWarning
 
         model.policySlots = [
-            ("首次上限（5 GB 与来源 10% 取小）", .metric(5_000_000_000, unit: .bytes)),
-            ("稳定后比例", .text("20%")),
+            (L.pick("首次上限（5 GB 与来源 10% 取小）", "First-run cap (lesser of 5 GB and 10% of source)"),
+             .metric(5_000_000_000, unit: .bytes)),
+            (L.pick("稳定后比例", "Steady-state ratio"), .text("20%")),
         ]
         model.ruleVersionSlots = [
-            ("当前规则版本", .text("R1（固定）")),
-            ("可退回版本", .unavailable(reason: "本版不提供")),
+            (L.pick("当前规则版本", "Current rule version"), .text(L.pick("R1（固定）", "R1 (fixed)"))),
+            (L.pick("可退回版本", "Rollback version"), .unavailable(reason: L.pick("本版不提供", "Not available in this version"))),
         ]
 
         // ---------- ④ 采集范围 ----------
-        model.collectionScopeNotice =
+        model.collectionScopeNotice = L.pick(
             "四档信号：缓存目录 / 临时环境 / 构建产物 / 会话痕迹。"
-            + "后两档默认关闭；不读取文件内容。"
+            + "后两档默认关闭；不读取文件内容。",
+            "Four signal tiers: cache directories / temporary environments / build artifacts / session traces. "
+            + "The last two are off by default; file contents are never read."
+        )
         model.canClearLogs = true
 
         // ---- ① 页 L1 / L2 / 可删除量（AC-02）----
@@ -267,7 +271,12 @@ var model = PageModel()
 
         // ---- ④ 四档采集与授权（AC-10 / AC-11 / AC-14 的界面落点）----
         // 档位名与 AC-11 组 A 的「四档」一致；状态词取 P4 封闭值域。
-        let tierNames = ["缓存目录", "临时环境", "构建产物", "会话痕迹"]
+        let tierNames = [
+            L.pick("缓存目录", "Cache directories"),
+            L.pick("临时环境", "Temporary environments"),
+            L.pick("构建产物", "Build artifacts"),
+            L.pick("会话痕迹", "Session traces"),
+        ]
         // **采集是否已被关闭**（AC-10：When = 用户关闭自动删除）。
         //
         // 注意与 `authorized` 的区别：
@@ -287,20 +296,20 @@ var model = PageModel()
             let state: SemanticSlot
             if collectionStopped {
                 // **AC-10：四档逐一「已停止」**，包括默认关的后两档
-                state = .text("已停止")
+                state = .text(L.pick("已停止", "Stopped"))
             } else if !authorized {
                 // 从未启用过 → 采集没开始过，显示「未采集」而不是「已停止」
-                state = .text("未采集")
+                state = .text(L.pick("未采集", "Not collected"))
             } else if input.degraded {
                 // AC-14：受阻时给「所缺权限」+ 授权指引条目 ID（三个要素齐）
                 // **授权指引条目 ID 必须取码表的 `rawValue`**，不能手写 "E-501"：
                 // 手写等于把码复制一份到界面数据里，码表改了它不会跟着改。
                 state = .permissionBlocked(
-                    missing: "本用户进程 fd",
+                    missing: L.pick("本用户进程 fd", "this user's process fds"),
                     guideItemID: DiagnosticCode.e501.rawValue
                 )
             } else {
-                state = .text("运行中")
+                state = .text(L.pick("运行中", "Running"))
             }
             return CollectionTier(
                 name: name,
@@ -308,7 +317,7 @@ var model = PageModel()
                 state: state,
                 blockReason: input.degraded && authorized
                     ? .permissionBlocked(
-                        missing: "本用户进程 fd",
+                        missing: L.pick("本用户进程 fd", "this user's process fds"),
                         guideItemID: DiagnosticCode.e501.rawValue
                     )
                     : nil
@@ -324,7 +333,9 @@ var model = PageModel()
         model.pageLevelSlot = .text(
             UICopy.pageLevelVerdict(
                 round: header.round,
-                reason: qualified ? "已达标" : (unmetReason(unmet) ?? "未达标")
+                reason: qualified
+                    ? L.pick("已达标", "Gate met")
+                    : (unmetReason(unmet) ?? L.pick("未达标", "Gate not met"))
             )
         )
         // 「上一轮」行**仅轮次 ≥ 2 时显示**（首轮不显示，不是显示「—」）
@@ -335,14 +346,14 @@ var model = PageModel()
         // ---------- ⑦ 举证链八字段（AC-18） ----------
         // V4 的 8 个顶层字段；**没有值时显示「不适用 + 原因」，不显示空白**
         model.evidenceFields = [
-            ("来源", .text("—")),
-            ("路径", .text("—")),
-            ("字节", .unavailable(reason: "未选择记录")),
-            ("L0 检查时刻", .unavailable(reason: "未选择记录")),
-            ("四组信号位", .unavailable(reason: "未选择记录")),
-            ("L2 各信号取值", .unavailable(reason: "不适用（L2 无观测通道）")),
-            ("执行动作", .text("—")),
-            ("恢复位置", .unavailable(reason: "未选择记录")),
+            (L.pick("来源", "Source"), .text("—")),
+            (L.pick("路径", "Path"), .text("—")),
+            (L.pick("字节", "Bytes"), .unavailable(reason: L.pick("未选择记录", "No record selected"))),
+            (L.pick("L0 检查时刻", "L0 check time"), .unavailable(reason: L.pick("未选择记录", "No record selected"))),
+            (L.pick("四组信号位", "Four signal bits"), .unavailable(reason: L.pick("未选择记录", "No record selected"))),
+            (L.pick("L2 各信号取值", "L2 signal values"), .unavailable(reason: L.pick("不适用（L2 无观测通道）", "Not applicable (L2 has no observation channel)"))),
+            (L.pick("执行动作", "Action"), .text("—")),
+            (L.pick("恢复位置", "Restore location"), .unavailable(reason: L.pick("未选择记录", "No record selected"))),
         ]
 
         // ---------- ⑦ 上游命令（AC-19） ----------
@@ -424,23 +435,33 @@ var model = PageModel()
                 ).replacingOccurrences(of: "0 / 0", with: entry.source.displayName)
             case .l0Misjudged(_, _, let undetermined):
                 return undetermined
-                    ? "\(first.source.displayName) · L0 未判定（无法枚举本用户进程）"
-                    : "\(first.source.displayName) · L0 误判"
+                    ? L.pick(
+                        "\(first.source.displayName) · L0 未判定（无法枚举本用户进程）",
+                        "\(first.source.displayName) · L0 undetermined (can't enumerate this user's processes)"
+                    )
+                    : L.pick(
+                        "\(first.source.displayName) · L0 误判",
+                        "\(first.source.displayName) · L0 misjudgment"
+                    )
             }
         }
-        return "已达达标条件"
+        return L.pick("已达达标条件", "Gate conditions met")
     }
 
     /// 页级「否」的原因（AC-09 的五级优先级里取前两级即可）。
     private static func unmetReason(_ unmet: UnmetItems) -> String? {
-        if unmet.global != nil { return "观察期未满" }
+        if unmet.global != nil { return L.pick("观察期未满", "Observation period incomplete") }
         if let first = unmet.bySource.first {
             switch first.item {
-            case .insufficientSample: return "\(first.source.displayName) 样本不足"
+            case .insufficientSample:
+                return L.pick(
+                    "\(first.source.displayName) 样本不足",
+                    "\(first.source.displayName): insufficient samples"
+                )
             case .l0Misjudged(_, _, let undetermined):
                 return undetermined
-                    ? "\(first.source.displayName) 未判定"
-                    : "\(first.source.displayName) L0 误判"
+                    ? L.pick("\(first.source.displayName) 未判定", "\(first.source.displayName) undetermined")
+                    : L.pick("\(first.source.displayName) L0 误判", "\(first.source.displayName) L0 misjudgment")
             }
         }
         return nil
@@ -463,11 +484,11 @@ var model = PageModel()
         // ④ 门槛：`H` 为 null（未取快照）或非判定域 → 不适用
         let thresholdSlot: SemanticSlot
         if !inDomain {
-            thresholdSlot = .text("不适用")
+            thresholdSlot = .text(L.pick("不适用", "N/A"))
         } else if let h = entry.H {
             thresholdSlot = .metric(h, unit: .none)
         } else {
-            thresholdSlot = .unavailable(reason: "未取快照")
+            thresholdSlot = .unavailable(reason: L.pick("未取快照", "No snapshot taken"))
         }
 
         // ⑥ L0 误判 / 检查：**两个独立 metric**（不拼字符串）
@@ -484,20 +505,20 @@ var model = PageModel()
         // ⑦ 结论（值域封闭三值）
         let conclusionSlot: SemanticSlot
         if !inDomain {
-            conclusionSlot = .text("仅报告")
+            conclusionSlot = .text(L.pick("仅报告", "Report only"))
         } else if !produced {
             conclusionSlot = .unavailable(reason: UICopy.notSettledThisRound)
         } else {
             let k = entry.K ?? 0, t = entry.T ?? 0
             let qualified = k >= Threshold.h(forTotal: t) && entry.a == 0 && entry.b >= 1
-            conclusionSlot = .text(qualified ? "达标" : "未达标")
+            conclusionSlot = .text(qualified ? L.pick("达标", "Qualified") : L.pick("未达标", "Not qualified"))
         }
 
         return ReportRow(
             source: entry.source.displayName,
             slots: [
                 .text(entry.source.displayName),
-                .text(inDomain ? "在域" : "仅报告"),
+                .text(inDomain ? L.pick("在域", "In domain") : L.pick("仅报告", "Report only")),
                 sampleSlot,
                 thresholdSlot,
                 .metric(round, unit: .none),

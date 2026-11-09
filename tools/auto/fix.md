@@ -62,7 +62,7 @@ python3 tests/contract/verify_counts.py
   "files_changed": ["ResidueApp/Sources/ResidueCore/Xxx.swift"],
   "tests_changed": ["ResidueApp/Tests/ResidueCoreTests/XxxTests.swift"],
   "verification": {
-    "swift_test": "276 tests, 0 failures",
+    "swift_test": "283 tests, 0 failures",
     "verify_a9": "72/0",
     "verify_codes": "11",
     "verify_wiring": "45/0",
