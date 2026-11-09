@@ -385,6 +385,64 @@ fi
 
 # ---------------------------------------------------------------------------
 echo ""
+echo "--- 八、README 的并发承诺必须与实现一致（CR-030）---"
+# ---------------------------------------------------------------------------
+# README 是**唯一信任面**（CR-003 裁决：无官网）。
+# 它现在承诺「扫描在后台线程跑 / 实时显示进度 / 可取消」——
+# 这三条**每一条都要能在实现里指出来**，否则就是文档骗人。
+
+README2="../README.md"
+if [ -f "$README2" ]; then
+  if grep -q "后台线程" "$README2" 2>/dev/null; then
+    # 承诺 ①：后台线程 → 实现里必须有 Task.detached
+    #
+    # ⚠️ **只查非注释行**。
+    # `AppModel` 的文档注释里写着「重活进 `Task.detached`」——
+    # 若连注释一起 grep，**注释本身就满足了判据**，
+    # 于是「代码里根本没有 detached」也照样绿。
+    #
+    # 这与本项目此前 4 次「校验脚本自己说谎」同类：
+    # **判据命中了不该命中的东西 → 假绿。**
+    LIVE_DETACHED=$(grep -v '^[[:space:]]*//' "Sources/ResidueApp/AppModel.swift" 2>/dev/null \
+                    | grep -cF 'Task.detached' || true)
+    if [ "${LIVE_DETACHED:-0}" -gt 0 ]; then
+      ok "README 承诺「后台线程」→ 实现确有 Task.detached（活的代码行）"
+    else
+      bad "README 说后台线程，实现里没有活的 Task.detached（**文档骗人**）"
+    fi
+  fi
+
+  if grep -q "已扫描" "$README2" 2>/dev/null; then
+    # 承诺 ②：实时显示进度 → 实现里必须有进度回调 + 界面显示
+    if grep -qF 'progressEvery' "Sources/ResidueCore/ScanEngine.swift" 2>/dev/null \
+       && grep -qF 'scanProgress.displayText' "Sources/ResidueApp/RootView.swift" 2>/dev/null; then
+      ok "README 承诺「实时显示已扫描 N 项」→ 引擎有进度回调且界面有显示"
+    else
+      bad "README 承诺实时进度，实现里找不到进度回调或界面显示（**文档骗人**）"
+    fi
+  fi
+
+  if grep -q "随时取消" "$README2" 2>/dev/null; then
+    # 承诺 ③：可取消 → 实现里必须有取消令牌 + 取消入口
+    if grep -qF 'CancelBox' "Sources/ResidueApp/ScanInfrastructure.swift" 2>/dev/null \
+       && grep -qF 'app.cancelScan()' "Sources/ResidueApp/RootView.swift" 2>/dev/null; then
+      ok "README 承诺「随时取消」→ 实现有取消令牌与取消按钮"
+    else
+      bad "README 承诺可取消，实现里找不到取消机制（**文档骗人**）"
+    fi
+  fi
+
+  # **诚实性**：README 必须承认「扫描本身仍要十几秒」
+  # —— 只说「不卡」而不说「仍然慢」，那是**避重就轻**。
+  if grep -q "扫描本身要十几秒" "$README2" 2>/dev/null; then
+    ok "README 如实写明「扫描本身仍要十几秒」（不避重就轻）"
+  else
+    bad "README 只说界面不卡、没说扫描本身仍慢 → **避重就轻**，等于误导"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
 echo "=============================================="
 echo "通过 $PASS 项 / 失败 $FAIL 项 / 未覆盖 $SKIP 项"
 if [ "$SKIP" -gt 0 ]; then
