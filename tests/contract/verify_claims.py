@@ -20,6 +20,13 @@
 """
 import sys, re
 
+# ── 目录重组：切到 docs/contract/，使脚本内的相对文件名继续有效 ──
+import os as _os
+_HERE = _os.path.dirname(_os.path.abspath(__file__))
+_CONTRACT = _os.path.join(_os.path.dirname(_os.path.dirname(_HERE)), 'docs', 'contract')
+if _os.path.isdir(_CONTRACT):
+    _os.chdir(_CONTRACT)
+
 # 默认：自动选目录下版本号最大的 Residue-PRD-v*.md
 # （踩过的坑：写死 v5.1 会核旧稿却打印「全部通过」——见第 18 轮 S18-07）
 def _latest_prd():

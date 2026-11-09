@@ -13,13 +13,26 @@ PRD 那边已有 verify_claims.py，R2 这边没有，故补此脚本。
 """
 import sys, re, os, glob
 
+# 目录重组：契约文档在 docs/contract/。从**脚本自身位置**推导仓库根，
+# 不依赖调用者的 cwd（CI 从仓库根调用，本脚本在 tests/contract/）。
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_ROOT = os.path.dirname(os.path.dirname(_HERE))          # tests/contract → 仓库根
+_CONTRACT = os.path.join(_ROOT, 'docs', 'contract')
+
 def latest(prefix):
     cands = sorted(glob.glob(prefix), key=lambda p: [int(x) for x in re.findall(r'[0-9]+', p)])
     return cands[-1] if cands else None
 
-TECH = sys.argv[1] if len(sys.argv) > 1 else latest('Residue-R2-技术方案-v*.md')
-CHK  = 'Residue-R2-安全合规检查表-v1.0.md'
-BURY = 'Residue-R2-埋点与指标可测性-v1.0.md'
+def _resolve(p):
+    """显式传入的裸文件名按 docs/contract/ 解析；绝对/相对路径原样使用。"""
+    if os.path.exists(p):
+        return p
+    cand = os.path.join(_CONTRACT, p)
+    return cand if os.path.exists(cand) else p
+
+TECH = _resolve(sys.argv[1]) if len(sys.argv) > 1 else latest(os.path.join(_CONTRACT, 'Residue-R2-技术方案-v*.md'))
+CHK  = os.path.join(_CONTRACT, 'Residue-R2-安全合规检查表-v1.0.md')
+BURY = os.path.join(_CONTRACT, 'Residue-R2-埋点与指标可测性-v1.0.md')
 FAILS = []
 
 def must(cond, msg):

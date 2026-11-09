@@ -1,6 +1,13 @@
 # -*- coding: utf-8 -*-
 """v3.9 验收：跑矩阵六条判据 + 算术走查 + 符号唯一性（不跑字符串自查为主）"""
 import re
+
+# ── 目录重组：切到 docs/contract/，使脚本内的相对文件名继续有效 ──
+import os as _os
+_HERE = _os.path.dirname(_os.path.abspath(__file__))
+_CONTRACT = _os.path.join(_os.path.dirname(_os.path.dirname(_HERE)), 'docs', 'contract')
+if _os.path.isdir(_CONTRACT):
+    _os.chdir(_CONTRACT)
 new = open('Residue-PRD-v3.9.md', encoding='utf-8').read().split('\n')
 fail = []
 

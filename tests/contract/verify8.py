@@ -1,6 +1,13 @@
 # -*- coding: utf-8 -*-
 import re
-new = open('Residue-PRD-v4.0.md', encoding='utf-8').read().split('\n')
+
+# ── 目录重组：切到 docs/contract/，使脚本内的相对文件名继续有效 ──
+import os as _os
+_HERE = _os.path.dirname(_os.path.abspath(__file__))
+_CONTRACT = _os.path.join(_os.path.dirname(_os.path.dirname(_HERE)), 'docs', 'contract')
+if _os.path.isdir(_CONTRACT):
+    _os.chdir(_CONTRACT)
+new = open('Residue-PRD-v4.1.md', encoding='utf-8').read().split('\n')
 fail = []
 def body():
     out, skip = [], False
@@ -30,16 +37,29 @@ for tag, s in [('AC-16 本期不交付', 'CR-009 收窄：整条本期不交付'
     c = C(s); print('  [%s] %-24s %d' % ('OK ' if c >= 1 else 'MISS', tag, c))
     if c < 1: fail.append(tag)
 print()
-print('【3】AC-08 四维版')
-for tag, s in [('三条用例', '三条独立用例'),
-               ('全局项只含观察期', '`观察期未满`。**其定义 = 已观察天数 < 14 天，或该次扫描尚未产出 AC-09 报告**'),
-               ('无结算中未达项', '不另设状态'),
-               ('空域成因二选一', '按空域实际成因呈现 §8「空」类对应义项'),
-               ('文案三基数', '样本 27 / 总量 30（门槛 30，其中失联 3）')]:
-    c = C(s); print('  [%s] %-22s %d' % ('OK ' if c >= 1 else 'MISS', tag, c))
-    if c < 1: fail.append(tag)
-c = C('`结算中` 处理'); print('  [%s] %-22s %d' % ('OK ' if c == 0 else 'LEFT', '「结算中」残留', c))
-if c: fail.append('结算中残留')
+print('【3】v4.1 新增基础定义')
+checks3 = [
+  ('观察期终点=日历事件', '**观察期结束扫描** = 第 14 个自然日结束后的**第一次成功扫描**'),
+  ('未达标自动开下一轮', '若该轮未达标（存在任一来源 `K < H`），自动开启下一轮'),
+  ('失联是派生量', '`J = T − K − 本轮重建命中数`'),
+  ('inode 判据已删', '**该判据已删**'),
+  ('pipx 行取值', '**`pipx` run 行（非判定域）的取值**'),
+  ('期内不展示 KTJ', '**期内不展示 `K` / `T` / `J`**'),
+  ('空域成因分界', 'CLI 缺失或探测失败一律归「错误」、空态不出现'),
+  ('点亮后果告知', '本版本点亮后不会自动回退'),
+  ('b >= 1', 'L0 检查次数 `b ≥ 1`'),
+  ('H 不上界面', '**不把公式画到界面上**'),
+]
+for tag, s2 in checks3:
+    c = C(s2); print('  [%s] %-20s %d' % ('OK ' if c>=1 else 'MISS', tag, c))
+    if c<1: fail.append(tag)
+c = C('inode 与 birthtime 均不匹配 → 归「目录拆分合并」')
+print('  [%s] %-20s %d' % ('OK ' if c==0 else 'LEFT', '旧 inode 判据残留', c))
+if c: fail.append('旧 inode 判据残留')
+c = C('截至今日 样本 29')
+print('  [%s] %-20s %d' % ('OK ' if c==0 else 'LEFT', '期内示例残留', c))
+if c: fail.append('期内示例残留')
+print()
 print()
 print('【4】算术走查')
 for label, ok, why in [

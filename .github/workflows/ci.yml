@@ -135,11 +135,11 @@ jobs:
       # ── 文档基线校验 ────────────────────────────────────────
       - name: Verify PRD baseline
         # 40 项：PRD v5.5 的结构 / 落点 / 归零 / 一致性 / 自洽
-        run: ./check_all.sh
+        run: ./tests/contract/check_all.sh
 
       - name: Verify R2 baseline
         # 124 项：R2 v1.7 的结构 30 + 落地 65 + 归零 16 + 一致 10 + 自洽 2
-        run: python3 verify_r2.py
+        run: python3 tests/contract/verify_r2.py
 
       # ── 设计走查产物 ────────────────────────────────────────
       - name: Render design pages

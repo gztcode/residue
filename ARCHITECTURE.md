@@ -1,8 +1,25 @@
 # 仓库结构
 
-这个仓库有两部分：**代码**（`ResidueApp/`）与**支撑它的契约文档**（根目录 129 个 `.md`）。
+这个仓库有三部分：**代码**（`ResidueApp/`）、**契约文档**（`docs/`）与**契约校验**（`tests/contract/`）。
 
 文档不是"顺便留的笔记"——它们是这个项目的**验收依据**。代码里每一条硬约束都能在文档里找到出处，每一条文档里的判据都有对应的机器校验。**两边对不上就是缺陷**，不是"文档过时了"。
+
+```
+/
+├── README.md                  产品说明与安装（唯一信任面）
+├── ARCHITECTURE.md            本文件
+├── CLAUDE.md                  AI 协作导航
+├── docs/
+│   ├── contract/              契约基线（PRD / R2 / 视觉基线 / DAC / B1 …）
+│   ├── changes/               变更单 CR-*（冻结后的唯一修改入口）
+│   ├── reviews/               评审单 / 决策材料 / 交底单
+│   └── ledger/                运行期记录（闸门台账 / 发布准入执行单）
+├── tests/contract/            契约校验脚本（check_all.sh + verify*.py）
+└── ResidueApp/                Swift 包
+```
+
+> **历史文档保持原样。** `docs/` 里的历史文件内部互相引用的仍是裸文件名（如「基线 = `Residue-PRD-v4.2.md`」），
+> 它们是**当时决策的记录**，不随目录迁移改写。
 
 ---
 
@@ -14,10 +31,10 @@ ResidueApp/
 ├── Sources/
 │   ├── ResidueCore/           纯逻辑，可单测（无 UI 依赖）
 │   └── ResidueApp/            SwiftUI 界面 + IO 编排
-├── Tests/ResidueCoreTests/    243 个单测
+├── Tests/ResidueCoreTests/    276 个单测
 ├── scripts/
 │   ├── make_app.sh            打包 .app（含签名/公证/钉票的完整分支）
-│   ├── verify_a9.sh           51 项：页面结构 + 空实现检测 + 数据层接线
+│   ├── verify_a9.sh           72 项：页面结构 + 空实现检测 + 数据层接线
 │   ├── verify_a5.sh           36 项：产物结构 + C1/C9 发布链路顺序 + README 信任面
 │   └── verify_codes.py        11 项：错误码表 ↔ 文档一致性
 ├── Resources/                 Info.plist 模板 / entitlements / 图标
@@ -43,29 +60,31 @@ ResidueApp/
 
 ---
 
-## 二、文档（按用途分四类）
+## 二、文档（按用途分四类，各占一个目录）
 
-### ① 契约基线（**改它需要变更单**）
+### ① 契约基线 → `docs/contract/`（**改它需要变更单**）
 
 | 文件 | 是什么 |
 |---|---|
 | `Residue-PRD-v5.5.md` | 需求契约。AC-01~AC-20 + M1–M6 指标定义 + §8 状态码 + 安全触发项 |
-| `Residue-R2-技术方案-v1.7.md` | 技术契约。ADR-01~10 + IF-01~12 + 错误码表 + 容量预算 + 发布准入 |
+| `Residue-R2-技术方案-v1.8.md` | 技术契约。ADR-01~10 + IF-01~12 + 错误码表 + 容量预算 + 发布准入 |
 | `Residue-视觉基线-v1.1.md` | 视觉最小集。排版刻度 / 两档语义色 / 八态映射 / 七页骨架 |
 | `Residue-DAC-v2.0.md` | 107 条可测量的设计验收标准。R3.8 走查的唯一依据 |
 | `Residue-B1-功能用例集-v1.0.md` | 98+8 条功能用例 + 20 条冒烟 + 21 条回归 |
 | `Residue-R2-安全合规检查表-v1.0.md` | 12 项安全风险逐项结论 |
 | `Residue-安全验证移交清单-v1.0.md` | 27 条安全风险 → 归属人 → 验证方法 |
 
-### ② 评审单（**谁评的、评出什么**）
+> `check_all.sh` / `verify_r2.py` / `verify_codes.py` 都从 `docs/contract/` 自动发现最新版本。
 
-`Residue-R1.5-第1轮-AC覆盖评审.md`、`Residue-R2-*评审*.md`、`Residue-CR-009-终审单-架构-第9~16轮.md` 等。
+### ② 评审单 → `docs/reviews/`（**谁评的、评出什么**）
+
+`Residue-R1.5-第1轮-AC覆盖评审.md`、`Residue-R2-评审单-*.md`、`Residue-CR-009-终审单-*.md`、决策材料与交底单等 25 份。
 
 评审单只有两个结论：**通过 / 不通过**。没有"有条件通过"。判据是「未关闭阻塞项 = 0 且未处置建议项 = 0」。
 
-### ③ 变更单（`CR-*`，**冻结后的唯一修改入口**）
+### ③ 变更单 → `docs/changes/`（`CR-*`，**冻结后的唯一修改入口**）
 
-23 张。每张都写了：改什么、为什么、影响面、工时、谁批。
+57 份文件 / 19 个单号。每张都写了：改什么、为什么、影响面、工时、谁批。
 
 值得单独看的几张：
 
@@ -75,12 +94,23 @@ ResidueApp/
 | `CR-024` | 错误码表代码化。含一处**静默错**：`NSError.code` 在 `NSCocoaErrorDomain` 下不是 errno |
 | `CR-026` | 三处串联缺陷让产品退化成只读扫描器。含一句值得记的话：**「一句听起来对的话，可以掩护一个没做的事」** |
 
-### ④ 运行期记录
+### ④ 运行期记录 → `docs/ledger/`
 
 | 文件 | 是什么 |
 |---|---|
 | `Residue-Phase3-闸门台账.md` | **当前真实状态**。谁做了什么、什么还没关、卡在谁身上 |
 | `Residue-A10-发布准入执行单-v1.0.md` | 九步发布准入的逐步命令 + 失败处置 |
+
+### ⑤ 契约校验 → `tests/contract/`
+
+| 脚本 | 项数 | 读什么 |
+|---|---|---|
+| `check_all.sh` | 191 + 47 | PRD 全文（自动发现最新版本） |
+| `verify_r2.py` | 123 | R2 技术方案 + 安全合规检查表 + 埋点文档 |
+| `verify18.py` / `verify_claims.py` / `verify_single_def.py` / `verify_cr022.py` | 见各自输出 | 由 `check_all.sh` 串跑 |
+| `verify3~17.py` | — | 历史版本的一次性校验，保留备查 |
+
+这些脚本**从自身位置推导仓库根**，可在任意 cwd 调用。
 
 ---
 
@@ -89,20 +119,21 @@ ResidueApp/
 ```bash
 cd ResidueApp
 
-swift build && swift test          # 编译 + 243 单测
+swift build && swift test          # 编译 + 276 单测
 
 ./scripts/verify_codes.py          # 错误码表（11 项）
-./scripts/verify_a9.sh             # 页面结构 + 空实现（51 项）
+./scripts/verify_a9.sh             # 页面结构 + 空实现（72 项）
 ./scripts/make_app.sh              # 产出 .app
 ./scripts/verify_a5.sh             # 产物结构（36 项，3 项因无签名身份如实标未覆盖）
 
-swift run ResidueApp --verify-wiring /tmp/w      # 接线自检（36 项，真 IO）
+swift run ResidueApp --verify-wiring /tmp/w      # 接线自检（45 项，真 IO）
 swift run ResidueApp --render-pages /tmp/pages   # 重新渲染 16 张设计稿
 
-cd .. && ./check_all.sh && python3 verify_r2.py  # PRD 40 项 + R2 124 项
+cd .. && ./tests/contract/check_all.sh && python3 tests/contract/verify_r2.py
+#         PRD 191 + 47 项 + R2 123 项（脚本从自身位置推导仓库根，可在任意 cwd 调用）
 ```
 
-`--verify-wiring` 是这里最重要的一条：它**真的走一遍**「首启落盘 → 扫描 → 门槛链 → 导出脱敏 → 清除 → 定时任务」，靠文件系统事实而不是读代码判断。243 个单测永远替代不了它——单测验的是各模块自身契约，**没人验「模块之间接对了没有」**。
+`--verify-wiring` 是这里最重要的一条：它**真的走一遍**「首启落盘 → 扫描 → 门槛链 → 导出脱敏 → 清除 → 定时任务」，靠文件系统事实而不是读代码判断。276 个单测永远替代不了它——单测验的是各模块自身契约，**没人验「模块之间接对了没有」**。
 
 ---
 
