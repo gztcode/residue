@@ -349,7 +349,7 @@ final class TrashExecutorTests: XCTestCase {
             capacityCap: 150 * 1024,
             countCap: 100,
             // 预检值说 200 KB → 超过 150 KB 上限 → 应顺延
-            preflightBytes: [a.id: 200 * 1024]
+            preflightBytes: [a.id: Int64(200 * 1024)]
         )
 
         XCTAssertEqual(
@@ -551,7 +551,7 @@ final class TrashExecutorTests: XCTestCase {
             capacityCap: .max,
             countCap: 10,
             // 预检值说只有 10 KB（首检时刻的样子）
-            preflightBytes: [dir.id: 10 * 1024]
+            preflightBytes: [dir.id: Int64(10 * 1024)]
         )
 
         XCTAssertEqual(outcome.records.count, 1)
@@ -581,7 +581,7 @@ final class TrashExecutorTests: XCTestCase {
             source: .uvCache,
             capacityCap: 50 * 1024,      // 上限 50 KB
             countCap: 10,
-            preflightBytes: [dir.id: 10 * 1024]   // 预检说 10 KB → 预检放行
+            preflightBytes: [dir.id: Int64(10 * 1024)]   // 预检说 10 KB → 预检放行
         )
 
         // ① 必须被移回原位
@@ -598,7 +598,7 @@ final class TrashExecutorTests: XCTestCase {
         // ③ 动作必须是 `blocked_cap`，且原因串是「实测」那一条
         XCTAssertEqual(outcome.records.count, 1)
         let rec = outcome.records[0]
-        XCTAssertEqual(rec.action, .blockedCap, "动作必须是 blocked_cap（不是 rename_to_trash）")
+        XCTAssertEqual(rec.action, ExecutionAction.blockedCap, "动作必须是 blocked_cap（不是 rename_to_trash）")
         XCTAssertEqual(
             rec.blockedReason, "实测超上限，已移回原位",
             "原因串必须区分「实测超上限」与「预检超上限」（IF-08：同一动作值、不同原因串）"
@@ -616,7 +616,7 @@ final class TrashExecutorTests: XCTestCase {
             source: .uvCache,
             capacityCap: 50 * 1024,     // 上限 50 KB
             countCap: 10,
-            preflightBytes: [dir.id: 100 * 1024]   // 预检就说超了
+            preflightBytes: [dir.id: Int64(100 * 1024)]   // 预检就说超了
         )
 
         // 预检就拦下了 → **没有发生 rename** → 不该有 blocked_cap 记录
@@ -641,7 +641,7 @@ final class TrashExecutorTests: XCTestCase {
             capacityCap: 150 * 1024,
             countCap: 10,
             // 预检值都很小 → 三条都能过预检
-            preflightBytes: [a.id: 1, b.id: 1, c.id: 1]
+            preflightBytes: [a.id: Int64(1), b.id: Int64(1), c.id: Int64(1)]
         )
 
         // 第一条：实测 100 KB，累计 100 KB ≤ 150 KB → 删
@@ -649,7 +649,7 @@ final class TrashExecutorTests: XCTestCase {
         // 第三条：**根本没轮到**（本轮已停）
         XCTAssertEqual(outcome.records.count, 2, "第一条删掉、第二条记 blocked_cap")
         XCTAssertEqual(outcome.records[0].action, .renameToTrash, "第一条正常删")
-        XCTAssertEqual(outcome.records[1].action, .blockedCap, "第二条被回滚")
+        XCTAssertEqual(outcome.records[1].action, ExecutionAction.blockedCap, "第二条被回滚")
         XCTAssertEqual(outcome.deletedBytes, 100 * 1024, "实际删除量 = 第一条")
 
         // 第二、第三条都必须在原位
