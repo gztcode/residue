@@ -2,6 +2,13 @@
 """CR-008 机械自查（7 项，能抓语义的版本）"""
 import re, difflib
 
+# ── 目录重组：切到 docs/contract/，使脚本内的相对文件名继续有效 ──
+import os as _os
+_HERE = _os.path.dirname(_os.path.abspath(__file__))
+_CONTRACT = _os.path.join(_os.path.dirname(_os.path.dirname(_HERE)), 'docs', 'contract')
+if _os.path.isdir(_CONTRACT):
+    _os.chdir(_CONTRACT)
+
 old = open('Residue-PRD-v3.5.md', encoding='utf-8').read().split('\n')
 new = open('Residue-PRD-v3.6.md', encoding='utf-8').read().split('\n')
 fail = []

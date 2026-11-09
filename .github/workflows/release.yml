@@ -81,8 +81,8 @@ jobs:
 
       - name: Pre-flight — baseline docs
         run: |
-          ./check_all.sh
-          python3 verify_r2.py
+          ./tests/contract/check_all.sh
+          python3 tests/contract/verify_r2.py
 
       # ── 打包 ────────────────────────────────────────────────
       - name: Package .app (ad-hoc signed)

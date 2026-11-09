@@ -57,7 +57,7 @@ def find_r2():
     """自动发现最新的 R2 技术方案（不写死版本号）。"""
     if len(sys.argv) > 1:
         return sys.argv[1]
-    cands = sorted(glob.glob(os.path.join(REPO, 'Residue-R2-技术方案-v*.md')))
+    cands = sorted(glob.glob(os.path.join(REPO, 'docs', 'contract', 'Residue-R2-技术方案-v*.md')))
     if not cands:
         return None
     # 按版本号排序（v1.10 > v1.9）

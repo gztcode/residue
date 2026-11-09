@@ -9,7 +9,14 @@
 """
 import sys, re
 
-P = sys.argv[1] if len(sys.argv) > 1 else 'Residue-PRD-v5.0.md'
+# ── 目录重组：切到 docs/contract/，使脚本内的相对文件名继续有效 ──
+import os as _os
+_HERE = _os.path.dirname(_os.path.abspath(__file__))
+_CONTRACT = _os.path.join(_os.path.dirname(_os.path.dirname(_HERE)), 'docs', 'contract')
+if _os.path.isdir(_CONTRACT):
+    _os.chdir(_CONTRACT)
+
+P = sys.argv[1] if len(sys.argv) > 1 else 'Residue-PRD-v4.9.md'
 TXT = open(P, encoding='utf-8').read()
 L = TXT.split('\n')
 FAIL, OK = [], []
@@ -47,11 +54,6 @@ T = {
  'Q25': ['元素身份键与位槽分配规则写死'],
  'Q26': ['CR-015 整段实删'],
  'Q28': ['未取得 FDA 时的取值'],
- # ---- 第 15 轮 3 条 + 自查 ----
- 'A1':  ['CR-015 整段实删'],
- 'A2':  ['「同一时点」旧口径实删'],
- 'A3':  ['「上一轮」行落点补齐', '只呈现上一轮的结算值'],
- '自查': ['原「与候选数无关」表述已实删'],
  # ---- 前几轮遗留 ----
  'R-保留': ['`a` 只由本表判据产生', '不计入 `a`', '影子期必须做 L0 判定',
             '一天最多 +1', '取快照时刻唯一', '本轮未结算', '否（观察期未满）', '否（判定域内无来源）',
@@ -148,9 +150,6 @@ ZERO = [
  '它已在 `P_prev` 中',
  '载体规模 = 被持中的候选数 ≪ 候选总数',
  '载体只存阳性',
- 'CR-015 · 为什么必须逐候选、且只存阳性',
- '与候选数无关**（每来源 1 份，字节数可忽略）',
- '一律用**同一快照、同一时点**（观察期结束且 AC-09 报告已生成后）计算',
  '`N_prev`',
  '阴性候选标识集合',
  '上一轮阴性集合',

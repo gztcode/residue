@@ -9,6 +9,13 @@
 """
 import sys, re
 
+# ── 目录重组：切到 docs/contract/，使脚本内的相对文件名继续有效 ──
+import os as _os
+_HERE = _os.path.dirname(_os.path.abspath(__file__))
+_CONTRACT = _os.path.join(_os.path.dirname(_os.path.dirname(_HERE)), 'docs', 'contract')
+if _os.path.isdir(_CONTRACT):
+    _os.chdir(_CONTRACT)
+
 P = sys.argv[1] if len(sys.argv) > 1 else 'Residue-PRD-v4.6.md'
 TXT = open(P, encoding='utf-8').read()
 L = TXT.split('\n')

@@ -19,6 +19,13 @@ CR-022 变更单 `Residue-CR-022-七条偏差受理.md` 的「三、落点穷举
 """
 import sys, re, os
 
+# ── 目录重组：切到 docs/contract/，使脚本内的相对文件名继续有效 ──
+import os as _os
+_HERE = _os.path.dirname(_os.path.abspath(__file__))
+_CONTRACT = _os.path.join(_os.path.dirname(_os.path.dirname(_HERE)), 'docs', 'contract')
+if _os.path.isdir(_CONTRACT):
+    _os.chdir(_CONTRACT)
+
 def _latest_prd():
     import glob as _g
     cands = sorted(_g.glob('Residue-PRD-v*.md'),
