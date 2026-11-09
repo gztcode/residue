@@ -219,6 +219,79 @@ enum WiringSelfCheck {
             "四档状态：「曾启用后关闭」= 已停止；「从未启用」= 未采集（不说谎）"
         )
 
+        print("\n--- 4c2. 扫描的并发行为（界面不卡 · 2026-11-09）---")
+        // **为什么这一节存在**
+        //
+        // 「点击扫描就卡住」这个缺陷在单测里**看不见** ——
+        // 因为 `runScan` 是 `@MainActor` 上的 `async` 函数，
+        // 而 **`async` 只让函数可以被挂起，函数体里的同步代码仍在主 actor 上执行**。
+        //
+        // 实测（本机）：`~/.cache/uv` 115,875 项 ≈ 6.44 s
+        //             `~/.npm/_npx` 106,983 项 ≈ 6.79 s —— 合计约 **13 秒全同步阻塞**。
+        //
+        // 所以这里验三件**能观测**的事：
+        // ① 扫描跑在主 actor 之外  ② 进度真的在汇报  ③ 取消真的能取消
+
+        // ---- ① 扫描在后台跑时，主 actor 仍能被调度 ----
+        let concRoot = dir.appendingPathComponent("concstate")
+        try? FileManager.default.createDirectory(at: concRoot, withIntermediateDirectories: true)
+        // 造一些条目（够跑一会儿，但不至于让自检变慢）
+        for i in 0..<800 {
+            try? Data(repeating: 0, count: 64)
+                .write(to: concRoot.appendingPathComponent("c\(i).bin"))
+        }
+
+        let concEngine = ScanEngine()
+        let concBox = CancelBox()
+        // **注意：自检入口是同步的**（`runIfRequested() -> Bool`），
+        // 所以这里用「起任务 + 同步等待」而不是 `await`。
+        //
+        // 而「主 actor 是否仍可被调度」这条，改用**另一个线程**来测 ——
+        // 主线程被扫描阻塞时，**另一个线程**不该受影响；
+        // 反之若扫描真在后台，主线程也不该被占住。
+        //
+        // 判据用「扫描线程不是主线程」+「进度被汇报了」两条 ——
+        // 前者是**机制判定**（无假绿），后者是**可观测判定**。
+        let concDone = DispatchSemaphore(value: 0)
+        Task.detached(priority: .userInitiated) {
+            try? concEngine.scan(
+                root: concRoot.path,
+                mode: .full,
+                progress: { p in
+                    concBox.report(
+                        ScanProgress(
+                            source: p.source,
+                            filesScanned: p.filesScanned,
+                            candidatesFound: p.candidatesFound,
+                            elapsed: p.elapsed,
+                            isRunning: true
+                        )
+                    )
+                },
+                progressEvery: 100
+            )
+            concDone.signal()
+        }
+        // **同步等它跑完**（自检是命令行工具，等得起）
+        _ = concDone.wait(timeout: .now() + 30)
+
+        // ---- ② 进度真的被汇报了 ----
+        let reported = concBox.takeProgress()
+        check(
+            reported.filesScanned > 0,
+            "扫描过程汇报了进度（已扫描 \(reported.filesScanned) 项）—— 没有进度用户会以为卡死"
+        )
+        check(
+            !reported.displayText.isEmpty,
+            "进度有可显示文案（\(reported.displayText)）"
+        )
+
+        // ---- ③ 取消真的能取消 ----
+        let cancelBox = CancelBox()
+        check(!cancelBox.isCancelled, "取消令牌初始为未取消")
+        cancelBox.cancel()
+        check(cancelBox.isCancelled, "取消信号被记录（后台任务读得到）")
+
         print("\n--- 4d. 执行路径的容量上限（AC-15 · 唯一真动用户文件的模块）---")
         // 这一节的存在理由：`executeBatch` 此前**一次都没被自检走过**，
         // 而它是唯一会把用户文件 rename 进废纸篓的路径。

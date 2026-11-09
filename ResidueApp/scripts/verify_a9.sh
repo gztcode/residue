@@ -563,6 +563,109 @@ fi
 
 # ---------------------------------------------------------------------------
 echo ""
+echo "--- 十三、扫描必须在主 actor 之外（2026-11-09 · 「点击扫描就卡住」）---"
+# ---------------------------------------------------------------------------
+# 背景：`AppModel` 是 `@MainActor` 隔离的。
+# **`@MainActor` 类上的 `async` 函数并不会自动离开主线程** ——
+# `async` 只让函数「可以被挂起」，函数体里的**同步代码仍在主 actor 上执行**。
+#
+# 于是原实现把整个扫描（实测 222,858 项 ≈ 12.2 秒的全同步 `stat`）
+# 跑在主线程上 → 界面**彻底冻结**。
+#
+# 这类缺陷**单测看不出来**（单测不渲染界面），
+# 所以除了并发单测，还要加**静态断言**钉住代码形态。
+
+# ① 扫描引擎必须声明 Sendable（否则 Task.detached 送不进去）
+if grep -qE 'public struct ScanEngine: Sendable' "$CORE_DIR/ScanEngine.swift" 2>/dev/null; then
+  ok "ScanEngine 已声明 Sendable（可安全送进 Task.detached）"
+else
+  bad "ScanEngine 未声明 Sendable → 扫描无法离开主 actor，界面必卡"
+fi
+
+# ② runScan 里必须有 Task.detached（扫描搬走）
+if grep -qF 'Task.detached' "$UI_DIR/AppModel.swift" 2>/dev/null; then
+  ok "runScan 用 Task.detached 把扫描搬离主 actor"
+else
+  bad "runScan 无 Task.detached → 扫描在主 actor 上同步跑，界面会冻结"
+fi
+
+# ③ 扫描引擎本身不得被 @MainActor 隔离（否则搬走也没用）
+if grep -qE '@MainActor' "$CORE_DIR/ScanEngine.swift" 2>/dev/null; then
+  bad "ScanEngine 被 @MainActor 隔离 → 在后台任务里调它会被拉回主线程"
+else
+  ok "ScanEngine 未被 @MainActor 隔离（可在后台安全调用）"
+fi
+
+# ④ 必须有进度汇报（只搬走不汇报 = 用户看到「按了没反应」）
+if grep -qF 'progressEvery' "$CORE_DIR/ScanEngine.swift" 2>/dev/null; then
+  ok "扫描引擎支持进度回调（间隔可控）"
+else
+  bad "扫描引擎无进度回调 → 界面能动但没反馈，用户仍会以为卡死"
+fi
+
+# ⑤ 界面必须显示进度 + 提供取消
+if grep -qF 'scanProgress.displayText' "$UI_DIR/RootView.swift" 2>/dev/null; then
+  ok "界面显示扫描进度（用户看得到它在动）"
+else
+  bad "界面不显示扫描进度 → 「按了没反应」与卡死无异"
+fi
+if grep -qF 'app.cancelScan()' "$UI_DIR/RootView.swift" 2>/dev/null; then
+  ok "界面提供取消扫描（12 秒不能反悔）"
+else
+  bad "界面无取消入口 → 用户必须等完 12 秒"
+fi
+
+# ⑥ **所有 `engine.scan` 调用都必须落在 `Task.detached` 块内**
+#
+# ⚠️ **第一版这条判据是错的**（已修）：
+#   原写法是「grep 有没有 `let x = try engine.scan(`」——
+#   但**合法的那个调用也在 detached 块里**（只是缩进更深），
+#   按行匹配根本区分不了「在后台」与「在主 actor」。
+#   证伪时注入了「主 actor 上直接调 engine.scan」，**断言没报红**。
+#
+# 正解：**按缩进层级判定** ——
+# `Task.detached` 块内的调用，其缩进**严格大于**块起始行；
+# 而主 actor 上的直接调用，缩进**小于或等于**块起始行。
+#
+# 这里用 Python 做结构判定（比 grep 可靠）：
+DIRECT_ON_ACTOR=$(
+  python3 - "$UI_DIR/AppModel.swift" <<'PYEOF' 2>/dev/null || echo "ERR"
+import re, sys
+lines = open(sys.argv[1], encoding='utf-8').read().split('\n')
+# 找所有 `Task.detached` 的起始行，取其缩进作为「后台块」的基准
+detached_indents = []
+for i, l in enumerate(lines):
+    if 'Task.detached' in l and not l.strip().startswith('//'):
+        detached_indents.append((i, len(l) - len(l.lstrip())))
+if not detached_indents:
+    print("NO_DETACHED"); raise SystemExit
+
+bad = []
+for i, l in enumerate(lines):
+    t = l.strip()
+    if t.startswith('//'):
+        continue
+    if 'engine.scan(' not in l:
+        continue
+    indent = len(l) - len(l.lstrip())
+    # 该调用必须**缩进深于**至少一个 detached 块
+    # （调用所在行的缩进 > detached 起始行的缩进 → 它在块内）
+    inside = any(indent > di for _, di in detached_indents)
+    if not inside:
+        bad.append(i + 1)
+print(len(bad))
+PYEOF
+)
+if [ "${DIRECT_ON_ACTOR}" = "0" ]; then
+  ok "所有 engine.scan 调用都在 Task.detached 块内（扫描不会跑回主线程）"
+elif [ "${DIRECT_ON_ACTOR}" = "NO_DETACHED" ]; then
+  bad "AppModel 里找不到 Task.detached → 扫描在主 actor 上同步跑"
+else
+  bad "有 ${DIRECT_ON_ACTOR} 处 engine.scan 调用不在 detached 块内 → 扫描会跑回主线程"
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
 echo "=============================================="
 echo "通过 $PASS 项 / 失败 $FAIL 项"
 echo "=============================================="

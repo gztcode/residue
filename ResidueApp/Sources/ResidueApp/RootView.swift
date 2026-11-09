@@ -116,12 +116,40 @@ struct RootView: View {
 
             Spacer()
 
+            // ---- 扫描进度（**扫描期间必须有反馈**）----
+            //
+            // ## 为什么必须有这一行
+            //
+            // 扫描是重 I/O（实测本机：`~/.cache/uv` 115,875 项 ≈ 6.44 s，
+            // `~/.npm/_npx` 106,983 项 ≈ 6.79 s —— 合计约 13 秒）。
+            //
+            // 即便把扫描搬到后台线程，**没有这一行的话用户看到的就是「按了没反应」**
+            // —— 界面能动，但没有任何反馈。那和卡死的差别只是「能拖动了」，
+            // 用户仍然不知道它在干什么、多久能好、要不要继续等。
+            //
+            // 所以「搬走」与「汇报」是**两件都必须做的事**。
+            if app.isScanning, !app.scanProgress.displayText.isEmpty {
+                Text(app.scanProgress.displayText)
+                    .font(Tokens.Typography.secondary)
+                    .foregroundStyle(Tokens.Color.textSecondary)
+                    .monospacedDigit()
+            }
+
             // 扫描（真实触发 ScanEngine；只读态禁用）
             Button(app.isScanning ? "扫描中…" : "扫描") {
                 Task { await app.runScan() }
             }
             .buttonStyle(SecondaryButtonStyle(enabled: !app.isScanning && !model.readOnly))
             .disabled(app.isScanning || model.readOnly)
+
+            // ---- 取消（**13 秒不能反悔**）----
+            //
+            // 契约：`E-104`「用户取消」—— **取消不是失败**，
+            // 它落断点、且**不计入计数日**（M1）。
+            if app.isScanning {
+                Button("取消") { app.cancelScan() }
+                    .buttonStyle(SecondaryButtonStyle(enabled: true))
+            }
 
             if selection == .confirm {
                 // ⚠️ 不用 `.borderedProminent`：系统样式自带配色与圆角，

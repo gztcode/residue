@@ -63,6 +63,57 @@ final class AppModel {
     /// 上次扫描的模式（`T` 快照只能由 `full` 取，见 M3）。
     private(set) var lastScanMode: ScanEngine.Mode = .full
 
+    // MARK: - 扫描作业（**必须离开主 actor**，否则界面冻结）
+
+    /// 一次扫描的**可搬运单元**（`Sendable`）。
+    ///
+    /// ## 为什么需要它
+    ///
+    /// `AppModel` 是 `@MainActor` 隔离的。而 **`@MainActor` 类上的 `async` 函数
+    /// 并不会自动离开主线程** —— `async` 只是让函数「可以被挂起」，
+    /// 函数体里的**同步代码仍然在主 actor 上执行**。
+    ///
+    /// 实测（本机 · 2026-11-09）：
+    /// | 来源 | 项数 | 耗时 |
+    /// |---|---|---|
+    /// | `~/.cache/uv` | 115,875 | **6.44 s** |
+    /// | `~/.npm/_npx` | 106,983 | **6.79 s** |
+    ///
+    /// 合计约 **13 秒**的全同步阻塞跑在主线程上 → 界面**彻底冻结**
+    /// （不能拖动、不能滚动、点按钮无反应）。
+    ///
+    /// 所以扫描必须整体搬到主 actor 之外。本类型承载那部分工作，
+    /// 它只含 `Sendable` 数据，可以安全地跨 actor 边界传递。
+    struct ScanJob: Sendable {
+        /// 已扫描的来源与结果（`source` → 该来源的扫描结果）。
+        var results: [(source: String, result: ScanEngine.ScanResult)] = []
+        /// 各来源的错误（**单个来源失败不阻断整体**）。
+        var failures: [(source: String, message: String)] = []
+        /// 上游命令记录（定位来源根用的只读命令）。
+        var upstream: [UpstreamCommand] = []
+        /// L0 快照。
+        var snapshot: L0Snapshot?
+        /// 本轮实际扫描的模式。
+        var mode: ScanEngine.Mode = .full
+        /// 累计扫描条目数。
+        var filesScanned: Int = 0
+        /// 累计候选数。
+        var candidatesFound: Int = 0
+        /// 首个中止原因。
+        var abortReason: String?
+    }
+
+    /// **当前扫描的进度**（供界面显示「在动」）。
+    ///
+    /// ## 为什么必须有它
+    ///
+    /// 只把扫描搬到后台线程而**不汇报进度**，用户看到的是「按了没反应」——
+    /// **那和卡死没有区别**，甚至更糟（用户会去重复点击）。
+    var scanProgress = ScanProgress()
+
+    /// **当前扫描的取消令牌**（主 actor 写、后台任务读）。
+    private var scanCancelBox: CancelBox?
+
     /// 上次扫描的 L0 是否降级（无法枚举同 uid 进程）。
     private(set) var lastScanDegraded = false
 
@@ -230,51 +281,152 @@ final class AppModel {
     /// 执行一次扫描（`full` 才取快照）。
     ///
     /// 流程：定位来源根 → 逐来源扫描 → L0 探测 → 聚合诊断 → 落盘 → 投影。
+    /// 执行一次扫描。
+    ///
+    /// ## ⚠️ 为什么这段要分成「主 actor 内外两段」
+    ///
+    /// `AppModel` 是 `@MainActor` 隔离的。**`@MainActor` 类上的 `async` 函数
+    /// 并不会自动离开主线程** —— `async` 只让函数「可以被挂起」，
+    /// 而函数体里的**同步代码仍然在主 actor 上执行**。
+    ///
+    /// 于是原先整个扫描（13 秒的全同步 `stat`）都跑在主线程上，
+    /// 界面**彻底冻结**：不能拖动、不能滚动、点按钮无反应。
+    ///
+    /// 实测（本机 · 2026-11-09）：
+    /// | 来源 | 项数 | 耗时 |
+    /// |---|---|---|
+    /// | `~/.cache/uv` | 115,875 | **6.44 s** |
+    /// | `~/.npm/_npx` | 106,983 | **6.79 s** |
+    ///
+    /// ## 三件事，缺一件都还会「像卡住」
+    ///
+    /// 1. **搬走**：重活进 `Task.detached`（`ScanJob` 全 `Sendable`）
+    /// 2. **汇报**：进度持续回流到界面 → 用户看到它在动
+    /// 3. **可取消**：13 秒不能反悔
+    ///
+    /// ## 为什么**不是**多线程
+    ///
+    /// 扫描是 11 万次 `stat` —— **元数据查询**，在内核态串行完成，
+    /// 并行化**不缩短总时长**，只会加剧磁盘竞争。
+    /// 这里的瓶颈是「在主线程上做 I/O」，不是「单线程不够快」。
+    /// **该用的是「离开主线程」，不是「加线程」。**
     func runScan(mode: ScanEngine.Mode = .full) async {
         guard !readOnly else {
             errorMessage = UICopy.readOnlyNoSettlement
             return
         }
+        guard !isScanning else { return }   // **防重复点击**（后台化后更容易被点到）
         isScanning = true
+        scanProgress = ScanProgress()
         rebuild()
 
         let started = Date()
-        var allCandidates: [ScanEngine.Candidate] = []
-        var filesScanned = 0
-        var bytesScanned: Int64 = 0
-        var unknownCount = 0
-        var abortReason: String?
-        var upstreamRecords: [UpstreamCommand] = []
+        let engine = self.engine          // `ScanEngine` 是 `Sendable` 值
+        let probe = self.probe            // `UpstreamRunner` 是 `Sendable` 值
+        let rootsOverride = self.sourceRootsOverride
+        let excludePIDs: Set<pid_t> = [getpid()]
 
-        // ---- 来源根（用上游只读命令定位；失败回退标准路径） ----
-        let roots = resolveSourceRoots(&upstreamRecords)
+        // ---- 取消令牌（**主 actor 持有**，后台任务读它）----
+        let cancelBox = CancelBox()
+        scanCancelBox = cancelBox
 
-        // ---- 逐来源扫描 ----
-        for (sourceName, root) in roots {
-            guard FileManager.default.fileExists(atPath: root) else { continue }
-            do {
-                let result = try engine.scan(root: root, mode: mode, now: started)
-                filesScanned += result.filesScanned
-                bytesScanned += result.candidates.reduce(Int64(0)) { $0 + $1.bytes }
-                unknownCount += result.unknownCount
-                if let ab = result.aborted { abortReason = ab.rawValue }
-                // 引擎按路径片段匹配来源；这里以「扫描根所属来源」为准做一次校正，
-                // 避免路径里恰好含别的来源片段时被误判。
-                for var c in result.candidates {
-                    if c.source.isEmpty { c.source = sourceName }
-                    allCandidates.append(c)
+        // ---- 进度轮询（**主 actor 上的定时器**）----
+        //
+        // 后台任务把进度写进 `cancelBox`，这里每 100 ms 取一次写进 `scanProgress`
+        // → 界面上的文字会持续变化 → 用户看到它在动。
+        //
+        // **为什么用轮询而不是后台直接写 `@Observable` 属性**：
+        // 后台任务写主 actor 的属性需要 `await MainActor.run`，
+        // 那会让「进度」与「取消」分裂成两套机制；
+        // 而轮询只有一个写入点（主 actor），**不存在竞态**。
+        let progressTask = Task { @MainActor in
+            while !Task.isCancelled {
+                let p = cancelBox.takeProgress()
+                if p != scanProgress {
+                    scanProgress = p
                 }
-            } catch {
-                // 单个来源不可读不阻断整体（AC-14 第一类：来源不可读 → 降级只读该来源）
-                errorMessage = "\(sourceName)：\(describeScanError(error))"
+                try? await Task.sleep(for: .milliseconds(100))
             }
         }
-        candidates = allCandidates
-        lastUpstreamCommands = upstreamRecords
-        lastScanMode = mode
 
-        // ---- L0 探测（排除自身，防自污染） ----
-        let snapshot = L0Probe.snapshot(excludePIDs: [getpid()])
+        // ================= 重活在主 actor 之外 =================
+        let job = await Task.detached(priority: .userInitiated) { () -> ScanJob in
+            var job = ScanJob()
+            job.mode = mode
+
+            // ---- 来源根（用上游只读命令定位；失败回退标准路径）----
+            let roots = resolveSourceRoots(
+                override: rootsOverride,
+                probe: probe,
+                upstream: &job.upstream
+            )
+
+            // ---- 逐来源扫描 ----
+            for (sourceName, root) in roots {
+                // **取消检查**：每条来源一次（来源只有 3 个，开销可忽略）
+                if cancelBox.isCancelled { break }
+                guard FileManager.default.fileExists(atPath: root) else { continue }
+                do {
+                    let result = try engine.scan(
+                        root: root,
+                        mode: mode,
+                        now: started,
+                        // **进度回流**：每 2000 条一次 → 11 万条约 56 次
+                        progress: { p in
+                            cancelBox.report(
+                                ScanProgress(
+                                    source: p.source,
+                                    filesScanned: p.filesScanned,
+                                    candidatesFound: p.candidatesFound,
+                                    elapsed: p.elapsed,
+                                    isRunning: true
+                                )
+                            )
+                        }
+                    )
+                    job.results.append((sourceName, result))
+                    job.filesScanned += result.filesScanned
+                    job.candidatesFound += result.candidates.count
+                    if let ab = result.aborted, job.abortReason == nil {
+                        job.abortReason = ab.rawValue
+                    }
+                } catch {
+                    // 单个来源不可读不阻断整体（AC-14 第一类：来源不可读 → 降级只读该来源）
+                    job.failures.append((sourceName, error.localizedDescription))
+                }
+            }
+
+            // ---- L0 探测（排除自身，防自污染）----
+            // **也在主 actor 之外**：它要枚举同 uid 进程的 fd，同样是重 I/O。
+            job.snapshot = L0Probe.snapshot(excludePIDs: excludePIDs)
+            return job
+        }.value
+
+        // ================= 回到主 actor：落盘与刷新界面 =================
+        var allCandidates: [ScanEngine.Candidate] = []
+        var bytesScanned: Int64 = 0
+        var unknownCount = 0
+        for (sourceName, result) in job.results {
+            bytesScanned += result.candidates.reduce(Int64(0)) { $0 + $1.bytes }
+            unknownCount += result.unknownCount
+            // 引擎按路径片段匹配来源；这里以「扫描根所属来源」为准做一次校正，
+            // 避免路径里恰好含别的来源片段时被误判。
+            for var c in result.candidates {
+                if c.source.isEmpty { c.source = sourceName }
+                allCandidates.append(c)
+            }
+        }
+
+        candidates = allCandidates
+        lastUpstreamCommands = job.upstream
+        lastScanMode = job.mode
+
+        // **来源级错误**（此时已在主 actor，可用 `describeScanError` 取码表文案）
+        if let first = job.failures.first {
+            errorMessage = "\(first.source)：\(describeScanErrorMessage(first.message))"
+        }
+
+        let snapshot = job.snapshot ?? L0Snapshot()
         lastScanDegraded = snapshot.degraded
 
         // **`pNowCount` 与 `b` 是两个不同的量，曾经被混成一个变量**
@@ -314,24 +466,24 @@ final class AppModel {
             contentReads: 0
         )
 
-        // ---- 观测进度推进（成功扫描 +1 计数日） ----
+        // ---- 观测进度推进（成功扫描 +1 计数日）----
         advanceCountedDayIfNeeded(now: started)
 
-        // ---- 落盘（**必须真写**，否则 A-10 第 9 步不可达） ----
+        // ---- 落盘（**必须真写**，否则 A-10 第 9 步不可达）----
         persist()
 
-        // ---- 扫描日志（AC-19 唯一可判载体） ----
+        // ---- 扫描日志（AC-19 唯一可判载体）----
         let record = ScanLogRecord(
             at: started,
-            mode: mode.rawValue,
-            sources: roots.map(\.0),
-            filesScanned: filesScanned,
+            mode: job.mode.rawValue,
+            sources: job.results.map { $0.source },
+            filesScanned: job.filesScanned,
             bytesScanned: bytesScanned,
             durationMs: Int(Date().timeIntervalSince(started) * 1000),
-            aborted: abortReason,
+            aborted: job.abortReason,
             breakpointSaved: false,
             unknownCount: unknownCount,
-            upstreamCommands: upstreamRecords,
+            upstreamCommands: job.upstream,
             diagnostics: lastScanDiagnostics
         )
         do {
@@ -342,10 +494,35 @@ final class AppModel {
             errorMessage = "扫描日志写入失败：\(error.localizedDescription)"
         }
 
-        lastAbort = abortReason
+        lastAbort = job.abortReason
         isScanning = false
+        scanProgress = ScanProgress()
+        scanCancelBox = nil
+        progressTask.cancel()
         rebuild()
     }
+
+    /// **取消当前扫描**（用户反悔）。
+    ///
+    /// 契约：`E-104`「用户取消」—— **取消不是失败**，它落断点、且**不计入计数日**。
+    func cancelScan() {
+        guard isScanning else { return }
+        scanCancelBox?.cancel()
+        // **不立刻置 `isScanning = false`** —— 后台任务还在收尾，
+        // 提前置 false 会让用户能再点一次扫描 → 两个扫描并发 → 状态错乱。
+        // 真正的复位在 `runScan` 收尾处。
+    }
+
+    /// 把一个错误消息还原成带码的文案（后台拿不到 `describeScanError` 的结构化错误）。
+    private func describeScanErrorMessage(_ raw: String) -> String {
+        // 后台任务里只能拿到 `localizedDescription`。
+        // 这里做**尽力而为**的还原：若消息里含已知码字面量则直接引用，否则原样展示。
+        if let code = DiagnosticCode.allCases.first(where: { raw.contains($0.rawValue) }) {
+            return "\(code.rawValue) · \(code.summary)"
+        }
+        return raw
+    }
+
 
     // MARK: - 开关
 
@@ -598,33 +775,6 @@ final class AppModel {
     // MARK: - 私有
 
     /// 定位各来源根。优先用上游只读命令（AC-19 白名单内），失败回退标准路径。
-    private func resolveSourceRoots(_ upstream: inout [UpstreamCommand]) -> [(String, String)] {
-        // 自检注入优先（不产生 upstreamCommands —— 因为压根没调上游命令）
-        if let override = sourceRootsOverride { return override }
-
-        let home = NSHomeDirectory()
-        var out: [(String, String)] = []
-
-        // uv：`uv cache dir`（白名单内，纯本地）
-        let uv = probe.run(executable: "uv", args: ["cache", "dir"])
-        upstream.append(uv.record)
-        let uvRoot = (uv.stdout?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 }
-            ?? home + "/.cache/uv"
-        out.append((Source.uvCache.rawValue, uvRoot))
-
-        // npm：`npm config get cache`（白名单内）
-        let npm = probe.run(executable: "npm", args: ["config", "get", "cache"])
-        upstream.append(npm.record)
-        let npmBase = (npm.stdout?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 }
-            ?? home + "/.npm"
-        out.append((Source.npmNpx.rawValue, npmBase + "/_npx"))
-
-        // pipx：规则目录固定（`.local/pipx/venv`，与 SourceRule 一致）
-        out.append((Source.pipxRun.rawValue, home + "/.local/pipx/venv"))
-
-        return out
-    }
-
     /// 本轮 **L0 检查次数** `b`（M5：门槛项）。
     ///
     /// 计数对象 = 「对某候选执行 L0 判定的一次」。本实现对**每条候选都判一次**

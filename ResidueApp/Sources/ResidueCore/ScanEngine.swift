@@ -9,7 +9,18 @@ import Foundation
 /// **断点续扫（AC-20）**：判定要求「重启后续扫与未中断扫描在**文件数 / 字节数 / 候选清单**三项一致」。
 /// **断点 = 「已完成名字集合」，不是「字典序水位」**（K2 实测：APFS `readdir` 是**哈希序**，
 /// 字典序水位会漏掉 70% 的候选 —— 这是 R2 v1.5 的错误，v1.6 已更正）。
-public struct ScanEngine {
+/// 扫描引擎（**`Sendable`** —— 它必须在主 actor 之外被调用，见 `AppModel.runScan`）。
+///
+/// ## 为什么声明 `Sendable`
+///
+/// 它持有两个 `Sendable` 值（`fileSystem: FileSystem` 协议本身是 `Sendable`、
+/// `rules: [SourceRule]` 元素是 `Sendable`），且**全部成员都是 `let`**
+/// → 天然不可变 → 可以安全地跨 actor 边界传递。
+///
+/// 不声明的话，Swift 6 的并发检查会拒绝把它送进 `Task.detached`
+/// （报 `SendingClosureRisksDataRace`）—— 那是**正确的拒绝**：
+/// 编译器无法证明它安全。
+public struct ScanEngine: Sendable {
 
     // MARK: - 输入类型
 
@@ -334,6 +345,51 @@ public struct ScanEngine {
     // MARK: - 依赖
 
     /// 文件系统访问（**可注入 → 可单测**）。
+    // MARK: - 进度汇报（**扫描期间界面必须能动**）
+
+    /// 一次扫描的进度快照（**可跨 actor 边界传递**）。
+    ///
+    /// ## 为什么需要它
+    ///
+    /// 扫描是**重 I/O**（实测：`~/.cache/uv` 115,875 项 ≈ 6.4 秒，
+    /// `~/.npm/_npx` 106,983 项 ≈ 6.8 秒 —— 合计约 13 秒）。
+    ///
+    /// 若这段跑在主线程上，界面就是**冻结**的；而若只是搬到后台线程
+    /// 而**不汇报进度**，用户看到的是「按了没反应」——
+    /// **那和卡死没有区别**，甚至更糟（用户会去重复点击）。
+    ///
+    /// 所以「搬走」与「汇报」是**两件都必须做的事**，缺一不可。
+    public struct Progress: Sendable {
+        /// 当前正在扫的来源（`Source.rawValue`）。
+        public var source: String
+        /// 已扫描的条目数（累计）。
+        public var filesScanned: Int
+        /// 已发现的候选数（累计）。
+        public var candidatesFound: Int
+        /// 已耗时（秒）。
+        public var elapsed: TimeInterval
+
+        public init(
+            source: String,
+            filesScanned: Int,
+            candidatesFound: Int,
+            elapsed: TimeInterval
+        ) {
+            self.source = source
+            self.filesScanned = filesScanned
+            self.candidatesFound = candidatesFound
+            self.elapsed = elapsed
+        }
+    }
+
+    /// 进度回调（**在扫描所在的 actor 上被调用**）。
+    ///
+    /// ## 频率
+    ///
+    /// **不每条都回调** —— 那会产生 11 万次跨 actor 跳转，比扫描本身还贵。
+    /// 故按「条目数」间隔回调（见 `progressEvery`）。
+    public typealias ProgressHandler = @Sendable (Progress) -> Void
+
     public protocol FileSystem: Sendable {
         /// 列目录内容（**名字 + 是否目录**；`isDirectory == nil` 表示未知）。
         func listDirectory(at path: String) throws -> [(name: String, isDirectory: Bool?)]
@@ -415,6 +471,10 @@ public struct ScanEngine {
     /// - 参数 `deadline`：超时时刻（`nil` = 不限时）。
     /// - 参数 `takeSnapshot`：**只有 `full` 扫描能取快照**（R2 §7.3：增量不取快照，
     ///   否则 `T` 会由部分候选集确定 → 偏小且**静默**）。
+    /// - Parameters:
+    ///   - progress: 进度回调（**每 `progressEvery` 个条目调一次**）。
+    ///   - progressEvery: 回调间隔（条目数）。默认 2000 —— 
+    ///     11 万条目 → 约 56 次回调，足够让界面「动起来」，又不至于刷屏。
     public func scan(
         root: String,
         mode: Mode,
@@ -422,7 +482,9 @@ public struct ScanEngine {
         abortCheck: AbortCheck = AbortCheck(),
         deadline: Date? = nil,
         now: Date = Date(),
-        takeSnapshot: Bool? = nil
+        takeSnapshot: Bool? = nil,
+        progress: ProgressHandler? = nil,
+        progressEvery: Int = 2000
     ) throws -> ScanResult {
         let startedAt = now
         guard fileSystem.exists(at: root) else {
@@ -492,6 +554,19 @@ public struct ScanEngine {
 
                 filesScanned += 1
                 seen.insert(full)
+
+                // ---- 进度回调（**按间隔，不每条都调**）----
+                //
+                // 每条都调 = 11 万次跨 actor 跳转，**比扫描本身还贵**。
+                // 按 2000 条一次 → 11 万条目约 56 次，足够让界面「动起来」。
+                if let progress, filesScanned % max(1, progressEvery) == 0 {
+                    progress(Progress(
+                        source: root,
+                        filesScanned: filesScanned,
+                        candidatesFound: candidates.count,
+                        elapsed: Date().timeIntervalSince(startedAt)
+                    ))
+                }
 
                 // 命中来源模式 → 收集为候选。
                 let matched = SourceRule.match(path: full, rules: rules)
