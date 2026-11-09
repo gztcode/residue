@@ -30,10 +30,16 @@ fail=0
 # 故在 docs/contract/ 下执行；脚本本身用绝对路径调用。
 cd "$CONTRACT"
 for s in verify18.py verify_claims.py verify_single_def.py verify_cr022.py; do
+  echo ""
+  echo "--- $s ---"
   if [ -f "$HERE/$s" ]; then
-    echo ""
-    echo "--- $s ---"
     python3 "$HERE/$s" "$P" || fail=1
+  else
+    # 缺脚本**必须失败**。此前这里是静默跳过：把四个脚本全删掉，
+    # 本脚本仍打印「✅ 全部校验通过」并 exit 0 —— 与 ci.yml 那次
+    # 「管道吞退出码导致永远绿」是同一类假绿，只是发生在「文件不见了」这个方向。
+    echo "❌ 缺少校验脚本：$s"
+    fail=1
   fi
 done
 echo ""

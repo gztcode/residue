@@ -12,7 +12,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 二、常用命令
 
-全部命令在 `ResidueApp/` 目录下执行（SwiftPM 包根）。
+SwiftPM 命令在 `ResidueApp/` 目录下执行（SwiftPM 包根）；文档基线校验命令在**仓库根**执行。
 
 ```bash
 swift build                      # 编译
@@ -36,7 +36,7 @@ swift run --disable-sandbox ResidueApp --render-pages design-renders # 重渲染
 python3 tests/contract/verify_r2.py  # R2 v1.8：结构 30 + 落地 65 + 归零 16 + 一致 10 + 自洽 2
 ```
 
-`check_all.sh` 与 `verify_r2.py` 都**自动发现最新版本号**（不写死），新增版本文档后无需改脚本。历史版校验脚本（`verify3.py`…`verify18.py`、`verify_claims.py`、`verify_cr022.py`、`verify_single_def.py`）同放此处，保留备查。
+`check_all.sh`、`verify_r2.py`，以及 `check_all.sh` 调用的四个脚本（`verify18.py` / `verify_claims.py` / `verify_single_def.py` / `verify_cr022.py`）都**自动发现最新版本号**（不写死），新增版本文档后无需改脚本。历史版校验脚本（`verify3.py`…`verify17.py`）同放此处，保留备查。
 
 跑 GUI：`swift run ResidueApp`（菜单栏常驻，无 Dock 图标）。
 
