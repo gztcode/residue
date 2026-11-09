@@ -185,6 +185,10 @@ if _fname_ver and _stated_ver:
         % (_stated_ver.group(1), _fname_ver.group(1))
     )
 must(
+    'v1.8 修订说明' in tech,
+    'E 自洽：缺 v1.8 修订说明块（容量上限的硬上限化）'
+)
+must(
     'v1.7 修订说明' in tech,
     'E 自洽：缺 v1.7 修订说明块（错误码表契约化）'
 )

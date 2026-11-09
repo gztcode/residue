@@ -219,6 +219,68 @@ enum WiringSelfCheck {
             "四档状态：「曾启用后关闭」= 已停止；「从未启用」= 未采集（不说谎）"
         )
 
+        print("\n--- 4d. 执行路径的容量上限（AC-15 · 唯一真动用户文件的模块）---")
+        // 这一节的存在理由：`executeBatch` 此前**一次都没被自检走过**，
+        // 而它是唯一会把用户文件 rename 进废纸篓的路径。
+        //
+        // 尤其要紧的是 CR-029 那条缺陷：预检用目录自身 st_size、记账用递归逻辑字节
+        // → 目录型候选的容量上限**根本不成立**（实测超上限 33%）。
+        // 那条缺陷能长期存活，正是因为「上限」只被单测里的普通文件覆盖过。
+        //
+        // 这里用**真目录 + 真文件**走一遍完整判定，并验「实际删除量 ≤ 上限」。
+
+        // 造两个目录候选，各含 100 KB
+        let execRoot = dir.appendingPathComponent("execstate")
+        let execCache = execRoot.appendingPathComponent("cache")
+        let execTrash = execRoot.appendingPathComponent("trash")
+        try? FileManager.default.createDirectory(at: execCache, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(at: execTrash, withIntermediateDirectories: true)
+        var execIds: [CandidateID] = []
+        for name in ["dir_a", "dir_b"] {
+            let d = execCache.appendingPathComponent(name, isDirectory: true)
+            try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+            try? Data(repeating: 0x7E, count: 100 * 1024)
+                .write(to: d.appendingPathComponent("payload.bin"))
+            let attrs = try? FileManager.default.attributesOfItem(atPath: d.path)
+            let bt = (attrs?[.creationDate] as? Date) ?? Date(timeIntervalSince1970: 0)
+            execIds.append(CandidateID(path: d.path, birthtime: bt))
+        }
+
+        let execOutcome = TrashExecutor(trashDirectory: execTrash).execute(
+            candidates: execIds,
+            source: .uvCache,
+            capacityCap: 150 * 1024,
+            countCap: 100
+        )
+        check(
+            execOutcome.deletedBytes <= 150 * 1024,
+            "目录型候选的实际删除量不超上限（实为 \(execOutcome.deletedBytes) B / 上限 153600 B）"
+        )
+        check(
+            execOutcome.skippedByCap == 1,
+            "第二个目录候选被顺延（预检必须看到递归逻辑字节，不是目录自身 ~96 B）"
+        )
+        check(
+            execOutcome.failures.isEmpty,
+            "顺延不计为失败（AC-15：超出部分顺延并留痕，不报错）"
+        )
+        // 顺延的那条必须仍在原位 —— 这是「没删错」的正面证据
+        let stillThere = execIds.filter {
+            FileManager.default.fileExists(atPath: $0.path)
+        }.count
+        check(stillThere == 1, "被顺延的候选仍在原位（实为 \(stillThere) 条在原位）")
+
+        // 上限判定必须在 Core 的唯一实现处（App 层不得自己做域内算术）
+        check(
+            TrashExecutor.capacityCap(
+                userCapBytes: 1_000_000_000,
+                absoluteCapBytes: 5_000_000_000,
+                sourceTotalBytes: 100_000_000_000,
+                tier: .steady
+            ) == 1_000_000_000,
+            "稳定后档仍受用户配置的上限约束（AC-15：用户设置不得静默失效）"
+        )
+
         print("\n--- 5. 定时任务的 ADR-02 硬约束（登录项非 enabled 不排）---")
         let schedDir = dir.appendingPathComponent("schedstate")
         try? FileManager.default.createDirectory(at: schedDir, withIntermediateDirectories: true)

@@ -491,6 +491,78 @@ fi
 
 # ---------------------------------------------------------------------------
 echo ""
+echo "--- 十二、容量上限的判定必须唯一且口径统一（AC-15 · CR-029）---"
+# ---------------------------------------------------------------------------
+# 背景：CR-029 抓到两处缺陷，根因都是「同一判定有两处实现 / 两个口径」：
+#   ① 预检用目录自身 st_size、记账用递归逻辑字节 → 目录型候选上限不成立
+#      （实测 200 KB vs 上限 150 KB，超 33%）
+#   ② AppModel 的稳定后档漏了用户配置的上限 → 用户设置静默失效
+#
+# 这类缺陷**只靠单测守不住**——它需要「App 层自己算比例」这个前提成立。
+# 所以再加一条静态断言：域内算术不得出现在 App 层。
+
+# ① App 层不得自己做容量比例算术（0.10 / 0.20）
+APP_CAP_ARITH=$(grep -v '^[[:space:]]*//' "$UI_DIR/AppModel.swift" 2>/dev/null \
+                | grep -cE 'Int64\(Double\(total\)|\* *0\.(10|20)' || true)
+if [ "${APP_CAP_ARITH:-0}" -eq 0 ]; then
+  ok "App 层无容量比例算术（上限判定唯一在 Core）"
+else
+  bad "App 层出现 ${APP_CAP_ARITH} 处容量比例算术 → 上限判定有两处实现，必然分叉"
+fi
+
+# ② 上限判定的唯一实现处必须在 Core
+if grep -qF 'public static func capacityCap(' "$CORE_DIR/TrashExecutor.swift" 2>/dev/null; then
+  ok "容量上限判定在 Core（TrashExecutor.capacityCap）"
+else
+  bad "Core 里没有 capacityCap —— 上限判定无处安放"
+fi
+
+# ③ 预检与记账必须共用同一个字节口径函数（不得各写各的）
+if grep -qF 'logicalBytes(of:' "$CORE_DIR/TrashExecutor.swift" 2>/dev/null; then
+  ok "预检与记账共用 logicalBytes(of:)（同一口径）"
+else
+  bad "预检未走 logicalBytes(of:) → 预检与记账口径可能不一致（CR-029 的根因）"
+fi
+
+# ④ execute 必须接受预检值（AC-15：预检值随候选缓存到执行点）
+if grep -qF 'preflightBytes' "$CORE_DIR/TrashExecutor.swift" 2>/dev/null; then
+  ok "execute 支持预检值缓存（AC-15 / CR-022 偏差 2）"
+else
+  bad "execute 不接受预检值 → 契约要求的「预检值随候选缓存到执行点」无法满足"
+fi
+
+# ⑤ `t1` / `t2` 两个取数时点必须有载体（R2 已记「❌ 无载体」）
+for field in bytesPreview bytesMeasuredAt; do
+  if grep -qF "public let $field" "$CORE_DIR/TrashExecutor.swift" 2>/dev/null; then
+    ok "ExecutionRecord 有 $field 载体（AC-15 的两时点判据有落点）"
+  else
+    bad "ExecutionRecord 缺 $field → AC-15 的「实际删除量」没有唯一取数时点，判据退化为恒真"
+  fi
+done
+
+# ⑥ 实测超限必须能回滚（`blocked_cap` + 移回原位）
+if grep -qF '实测超上限，已移回原位' "$CORE_DIR/TrashExecutor.swift" 2>/dev/null; then
+  ok "有「实测超上限 → 移回原位」的回滚路径（IF-07：AC-15 是硬上限）"
+else
+  bad "缺实测超限回滚 → 预检通过但实际超限时上限会被突破"
+fi
+
+# ⑦ App 层必须把扫描期算好的 t1 传进去（IF-08 的唯一来源）
+if grep -qF 'preflightBytes: preflight' "$UI_DIR/AppModel.swift" 2>/dev/null; then
+  ok "生产路径传入扫描期缓存的 t1 预检值（IF-08）"
+else
+  bad "生产路径未传 t1 预检值 → 预检退化为执行时刻实时值，「预检通过→实测超限」路径不可达"
+fi
+
+# ⑧ **执行路径必须被接线自检走过**（唯一真动用户文件的模块）
+if grep -qF 'TrashExecutor(trashDirectory:' "$UI_DIR/WiringSelfCheck.swift" 2>/dev/null; then
+  ok "执行路径已被接线自检覆盖（不是只靠单测）"
+else
+  bad "接线自检未走过执行路径 → 「真动用户文件」那一层无端到端证据"
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
 echo "=============================================="
 echo "通过 $PASS 项 / 失败 $FAIL 项"
 echo "=============================================="

@@ -425,29 +425,51 @@ final class AppModel {
             // **pipx 恒为仅报告**：不在判定域 → 永不参与自动删除（AC-04 ②）
             guard source.isInDecisionDomain else { continue }
 
-            let ids: [CandidateID] = candidates
-                .filter { $0.source == source.rawValue }
+            let sourceCandidates = candidates.filter { $0.source == source.rawValue }
+            let ids: [CandidateID] = sourceCandidates
                 .map { CandidateID(path: $0.path, birthtime: $0.birthtime) }
             guard !ids.isEmpty else { continue }
 
-            // 容量上限：首次取 min(5 GB, T×10%)；稳定后取 T×20%（AC-15）
-            let total = sourceTotalBytes(for: source)
-            let cap: Int64
-            if isFirstRun {
-                // 取「用户配置的上限」与「AC-15 的 10% 档」中更小者
-                cap = Swift.min(
-                    preferences.capacityCapBytes,
-                    Int64(Double(total) * 0.10)
-                )
-            } else {
-                cap = Int64(Double(total) * 0.20)
-            }
+            // ---- **`t1` 预检值**：取扫描时算好的逻辑字节（IF-08 的唯一来源）----
+            //
+            // 契约原文：「「删除前预估」用的字节数 = IF-07 的 `t1` 递归字节
+            //（**首检时刻**算出的值，**随候选一起缓存到执行点**），
+            // **不是执行时刻的实时递归值**。」
+            //
+            // `Candidate.bytes` 正是扫描期算出的那份（目录为递归逻辑字节）。
+            //
+            // **为什么必须用缓存值而不是现算**：契约要的是
+            // 「预检通过 → `rename` 发生 → `t2` 实测超限 → 移回原位」这条路径**可达**。
+            // 若预检用执行时刻的实时值，那么预检值 == `t2` 实测值 → 永不超限
+            // → 那条路径不可达 → 判据失去判别力（恒真）。
+            let preflight: [CandidateID: Int64] = Dictionary(
+                sourceCandidates.map {
+                    (CandidateID(path: $0.path, birthtime: $0.birthtime), $0.bytes)
+                },
+                uniquingKeysWith: { first, _ in first }
+            )
+
+            // 容量上限（AC-15）—— **判定在 Core 的唯一实现处**，本层不自己算。
+            //
+            // 三条上界取最小：用户配置 / 首次档绝对上限 5 GB / 来源总量按比例。
+            //
+            // ⚠️ 稳定后那一档**同样**受用户配置约束：
+            // 原实现这一支只写 `T×20%`，把用户设置的上限丢了 ——
+            // 于是「把上限调小」这个动作在第二次执行时**静默失效**。
+            let cap = TrashExecutor.capacityCap(
+                userCapBytes: preferences.capacityCapBytes,
+                absoluteCapBytes: Self.firstRunAbsoluteCapBytes,
+                sourceTotalBytes: sourceTotalBytes(for: source),
+                tier: isFirstRun ? .firstRun : .steady
+            )
 
             let outcome = executor.execute(
                 candidates: ids,
                 source: source,
                 capacityCap: cap,
                 countCap: preferences.itemCap,
+                // **`t1` 预检值随候选缓存到执行点**（IF-08）
+                preflightBytes: preflight,
                 now: now
             )
             newRecords.append(contentsOf: outcome.records)
