@@ -2,7 +2,7 @@ name: CI
 
 # 这个 workflow 验什么、不验什么，先说清楚（失败时能分辨该修什么）：
 #
-# ✅ 能验：编译、243 个单测、错误码表一致性、页面结构与空实现检测、
+# ✅ 能验：编译、276 个单测、错误码表一致性、页面结构与空实现检测、
 #         接线自检（首启落盘→扫描→落盘→导出→清除）、PRD/R2 文档校验、打包脚本产物结构
 # ❌ 不能验：公证链（无 Developer ID）、端到端装机（无干净机）、
 #           GUI 交互（无显示会话）、滚动/焦点/键盘可达性
@@ -29,9 +29,13 @@ permissions:
 #
 # 也就是说：**这个 workflow 曾经是「永远绿的」，等于没有 CI。**
 # 管道吞退出码是 CI 里最隐蔽的一类假绿——它看起来在做事，实际什么都没验。
+#
+# 同理必须开 errexit（-e）：多命令块里前置命令失败时，bash 默认会继续执行，
+# 取**最后一条**的退出码。本文件当前的多命令 step 都有 `|| true` 保护，
+# 但新增 step 时很容易忘 —— 用 shell 定义兜住比靠每次记得更可靠。
 defaults:
   run:
-    shell: bash -o pipefail {0}
+    shell: bash --noprofile --norc -eo pipefail {0}
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -109,12 +113,12 @@ jobs:
         run: python3 scripts/verify_codes.py
 
       - name: Verify page structure & empty-action detection
-        # 51 项：语义位类型化 / 域内算术 / 数据层接线 / 定时任务 / 空实现 / 错误码
+        # 72 项：语义位类型化 / 域内算术 / 数据层接线 / 定时任务 / 空实现 / 错误码
         working-directory: ResidueApp
         run: ./scripts/verify_a9.sh
 
       - name: Verify v2.6 wiring (real IO round-trip)
-        # 36 项：**真的走一遍**首启落盘 → 扫描 → 落盘 → 门槛链 → 导出脱敏 → 清除 → 定时任务
+        # 45 项：**真的走一遍**首启落盘 → 扫描 → 落盘 → 门槛链 → 导出脱敏 → 清除 → 定时任务
         # 比单测更重要：它验的是「数据层接上了没有」，而单测只验各模块自身契约。
         working-directory: ResidueApp
         run: swift run --disable-sandbox ResidueApp --verify-wiring /tmp/residue-wiring
@@ -134,11 +138,11 @@ jobs:
 
       # ── 文档基线校验 ────────────────────────────────────────
       - name: Verify PRD baseline
-        # 40 项：PRD v5.5 的结构 / 落点 / 归零 / 一致性 / 自洽
+        # 238 项（191 + 47）：PRD v5.5 的结构 / 落点 / 归零 / 一致性 / 自洽
         run: ./tests/contract/check_all.sh
 
       - name: Verify R2 baseline
-        # 124 项：R2 v1.7 的结构 30 + 落地 65 + 归零 16 + 一致 10 + 自洽 2
+        # 123 项：R2 v1.8 的结构 30 + 落地 65 + 归零 16 + 一致 10 + 自洽 2
         run: python3 tests/contract/verify_r2.py
 
       # ── 设计走查产物 ────────────────────────────────────────
@@ -181,5 +185,6 @@ jobs:
           │ ✗ GUI 交互/滚动/焦点     —— 无显示会话（screencapture 全黑） │
           │ ✗ 回滚演练两支           —— 需先产生 a/countedDays 数据      │
           └──────────────────────────────────────────────────────────────┘
-          上述六项在 Residue-Phase3-闸门台账.md 与 Residue-A10-发布准入执行单-v1.0.md 逐条登记。
+          上述六项在 docs/ledger/Residue-Phase3-闸门台账.md 与
+          docs/ledger/Residue-A10-发布准入执行单-v1.0.md 逐条登记。
           EOF

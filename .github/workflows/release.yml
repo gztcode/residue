@@ -33,9 +33,21 @@ permissions:
 
 # 同 ci.yml：管道会吞退出码，必须开 pipefail。
 # 本文件里 `swift test` 与 `gh release create` 都直接决定成败。
+#
+# ⚠️ **必须同时开 errexit（-e）**。本文件有两个**多命令** step：
+#   - `Pre-flight — contract checks`：verify_codes.py → verify_a9.sh → --verify-wiring
+#   - `Pre-flight — baseline docs`：check_all.sh → verify_r2.py
+# 只开 pipefail 时，bash 取**最后一个命令**的退出码 —— 前面几条校验失败会被
+# 静默吞掉，只要最后一条成功，整个 Pre-flight 就是绿的，照样发版。
+# 这不是理论问题：把脚本列表换成两个不存在的脚本，`bash -o pipefail` 退出码仍是 0。
+#
+# 同 ci.yml 里「管道吞退出码让 workflow 永远绿」那件事，这里是同一个坑的第二层：
+# **多命令块吞退出码**。发一个契约校验没过的包，比不发更糟。
+#
+# 加 `--noprofile --norc` 是为了避免 runner 上的 profile 脚本改变 shell 语义。
 defaults:
   run:
-    shell: bash -o pipefail {0}
+    shell: bash --noprofile --norc -eo pipefail {0}
 
 jobs:
   release:
@@ -151,7 +163,7 @@ jobs:
           需要手动放行一次（步骤见下）。**这不是安装包坏了。**
 
           > 正式（已公证）版本需要 Developer ID 证书，目前尚未配置。
-          > 详见仓库内 \`Residue-A10-发布准入执行单-v1.0.md\`。
+          > 详见仓库内 \`docs/ledger/Residue-A10-发布准入执行单-v1.0.md\`。
 
           ### 安装
 
@@ -195,8 +207,8 @@ jobs:
 
           ---
 
-          **完整校验状态**：243 单测全绿、码表 11 项、页面结构 51 项、接线自检 36 项、
-          产物结构 36 项（3 项因无身份如实标未覆盖）、PRD 40 项、R2 124 项。
+          **完整校验状态**：276 单测全绿、码表 11 项、页面结构 72 项、接线自检 45 项、
+          产物结构 36 项（3 项因无身份如实标未覆盖）、PRD 238 项（191 + 47）、R2 123 项。
 
           这些是 CI 每次构建都会重跑的，不是一次性声明。
           EOF

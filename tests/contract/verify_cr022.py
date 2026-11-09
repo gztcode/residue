@@ -26,18 +26,29 @@ _CONTRACT = _os.path.join(_os.path.dirname(_os.path.dirname(_HERE)), 'docs', 'co
 if _os.path.isdir(_CONTRACT):
     _os.chdir(_CONTRACT)
 
-def _latest_prd():
+def _latest(pattern):
     import glob as _g
-    cands = sorted(_g.glob('Residue-PRD-v*.md'),
+    cands = sorted(_g.glob(pattern),
                    key=lambda p: [int(x) for x in re.findall(r'[0-9]+', p)])
-    return cands[-1] if cands else 'Residue-PRD-v5.4.md'
+    return cands[-1] if cands else None
 
 
-P = sys.argv[1] if len(sys.argv) > 1 else _latest_prd()
-PLAN = 'Residue-R2-技术方案-v1.6.md'
+P = sys.argv[1] if len(sys.argv) > 1 else _latest('Residue-PRD-v*.md')
+if not P or not os.path.exists(P):
+    print('❌ 找不到 PRD（docs/contract/Residue-PRD-v*.md）')
+    sys.exit(1)
+
+# R2 方案侧同样**自动发现最新版本**。
+# 此前写死 v1.6：v1.7 / v1.8 落地后这里仍在核旧稿 —— 与 check_all.sh 顶部
+# 记的「写死版本号会核旧稿却打印全部通过」是同一个坑，只是发生在方案侧。
+PLAN = _latest('Residue-R2-技术方案-v*.md')
+if not PLAN or not os.path.exists(PLAN):
+    print('❌ 找不到 R2 技术方案（docs/contract/Residue-R2-技术方案-v*.md）')
+    sys.exit(1)
+
 TXT = open(P, encoding='utf-8').read()
 L = TXT.split('\n')
-PLANTXT = open(PLAN, encoding='utf-8').read() if os.path.exists(PLAN) else ''
+PLANTXT = open(PLAN, encoding='utf-8').read()
 
 FAIL, OK = [], []
 
