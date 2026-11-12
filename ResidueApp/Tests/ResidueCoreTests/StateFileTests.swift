@@ -320,7 +320,56 @@ final class StateFileTests: XCTestCase {
         XCTAssertNotNil(result.error)
     }
 
-    /// **E-304 时不提供「重置」入口、不自动重置**，且现场被保留为 `.corrupt`。
+    /// **`E-304` 之后再次 `load()` 不得被当成首启**（静默重建）。
+    ///
+    /// 首次 `load()` 把主文件移成 `.corrupt` 并返回只读。第二次 `load()` 时
+    /// 主文件已不存在 —— 若只看「主文件在不在」就会判成首启、返回空载体，
+    /// 上层 `AppModel` 于是写下默认 header：**磁盘上重新出现空载体，
+    /// `a` 被静默清零**，`.corrupt` 之外再无痕迹。
+    ///
+    /// 这条路径不是理论风险：`AppModel.init` 自己就会调 `loadAndProject()`
+    /// 一次，任何「重新加载」都会走第二遍。
+    func testSecondLoadAfterE304IsNotTreatedAsFirstRun() throws {
+        let store = StateFile(directory: tmpDir)
+        try store.save(header: makeHeader(), payloads: makePayloads())
+        var data = try Data(contentsOf: store.fileURL)
+        let mid = data.count / 2
+        data[mid] = data[mid] ^ 0xFF
+        try data.write(to: store.fileURL)
+
+        let first = store.load()
+        XCTAssertTrue(first.readOnly, "前置：首次加载应判损坏")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.fileURL.path),
+                       "前置：主文件已被移成 .corrupt")
+
+        let second = store.load()
+        XCTAssertTrue(second.readOnly, "第二次加载仍须只读 —— 不得当成首启")
+        XCTAssertNil(second.contents, "不得返回空载体（那会让上层写默认 header）")
+        XCTAssertEqual(second.error?.diagnostic, .e302)
+    }
+
+    /// **E-301 不得生成 `.corrupt`** —— 只读降级、保留原文件。
+    ///
+    /// schema 更高意味着用户装过更新版本写的载体。归档它等于毁掉新版本数据。
+    /// 与 E-304 的「留档」是两种相反处置，不可合并。
+    func testSchemaTooNewKeepsFileAndCreatesNoCorrupt() throws {
+        let store = StateFile(directory: tmpDir)
+        var bytes = Array("RSD1".utf8)
+        bytes += [9, 0, 0, 0]
+        bytes += [UInt8](repeating: 0, count: 12)
+        try Data(bytes).write(to: store.fileURL)
+
+        let result = store.load()
+        XCTAssertTrue(result.readOnly)
+        XCTAssertEqual(result.error?.diagnostic, .e301)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: store.fileURL.path),
+                      "E-301 必须保留主文件")
+        XCTAssertFalse(FileManager.default.fileExists(atPath:
+            tmpDir.appendingPathComponent("state.residue.corrupt").path),
+            "E-301 不得生成 .corrupt")
+    }
+
+    /// **`E-304` 时不提供「重置」入口、不自动重置**，且现场被保留为 `.corrupt`。
     func testE304PreservesCorruptFileWithoutAutoReset() throws {
         let store = StateFile(directory: tmpDir)
         try store.save(header: makeHeader(), payloads: makePayloads())

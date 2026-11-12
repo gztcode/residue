@@ -82,8 +82,22 @@ public struct StateFile: Sendable {
     public func load() -> LoadResult {
         let fm = FileManager.default
 
-        // 主文件不存在 → 空载体（非错误）
+        // 主文件不存在 → 空载体（非错误）**除非**有 `.corrupt` 留档
+        //
+        // ⚠️ 「主文件不存在」有**两种**含义，靠 `.corrupt` 区分：
+        //   · 无 `.corrupt` → 真的首启 / 用户已显式清理 → 空载体
+        //   · 有 `.corrupt` → **损坏待处理**（上次 `load()` 已把现场移走）。
+        //     若当成首启，`AppModel` 会走「首启写默认 header」→ 磁盘上重新
+        //     出现一个空载体，`a` 被静默清零，`.corrupt` 之外再无痕迹。
+        //     那正是「静默重建」（不变量④）。恢复出口是用户显式动作。
         guard fm.fileExists(atPath: fileURL.path) else {
+            let corruptURL = directory.appendingPathComponent("state.residue.corrupt")
+            if fm.fileExists(atPath: corruptURL.path) {
+                return LoadResult(
+                    readOnly: true,
+                    error: .corruptNoBackup(detail: "主文件缺失，存在 .corrupt 留档（损坏待处理）")
+                )
+            }
             return LoadResult(contents: StateFileContents())
         }
 
@@ -119,6 +133,17 @@ public struct StateFile: Sendable {
                 return LoadResult(readOnly: true, error: err)
             }
         } catch {
+            // **兜底分支也必须保留现场**。
+            //
+            // 解码可能抛出**非 `StateFileError`** 的错误（例如文件短到读不出魔数时
+            // 底层抛出的范围/解码错误）。原先这里直接返回只读、**不移动文件** →
+            // 磁盘上留着一个读不出来的 `state.residue`，而它既不是有效载体、
+            // 也没有被留档；下一次启动会再次走进同一分支，永远无法恢复。
+            //
+            // 与 E-302 / E-304 同一处置：移成 `.corrupt`（保留现场）→ 只读。
+            let corruptURL = directory.appendingPathComponent("state.residue.corrupt")
+            try? fm.removeItem(at: corruptURL)
+            try? fm.moveItem(at: fileURL, to: corruptURL)
             return LoadResult(readOnly: true, error: .corruptNoBackup(detail: String(describing: error)))
         }
     }
@@ -234,10 +259,24 @@ public struct StateFile: Sendable {
     ///
     /// ⚠️ **这不是 N7 的「一键清除」**——N7 的清除**不作用于**本载体。
     /// 本方法只由「应用版本变更」路径调用。
+    ///
+    /// - Parameter preservedRound: **要保留的轮次**。
+    ///
+    ///   M4 写的是「应用版本变更时 `F` / `C_done` / 位槽占用表 / `a` 一并清零」，
+    ///   而 **M1 写的是「版本变更重置当前轮次，不产生新轮次」**。
+    ///   两处合起来的含义：**轮次号要留住**，只清这一轮的凭证。
+    ///
+    ///   原实现无条件造 `StateHeader()`（round 默认 1）→ 一个已经跑到第 3 轮的用户
+    ///   升级后会被打回第 1 轮。那不是「重置」，是**倒退**。
     @discardableResult
-    public func clearCarrierForVersionChange(newAppVersion: String) throws {
+    public func clearCarrierForVersionChange(
+        newAppVersion: String,
+        preservedRound: Int = 1
+    ) throws {
         var header = StateHeader()
         header.appVersion = newAppVersion
+        // **轮次不变**（M1：版本变更重置当前轮次，不产生新轮次）
+        header.round = preservedRound
         // 载荷全空 → 四项（`F` / `C_done` / 位槽占用表 / `a`）自然清零
         try save(header: header, payloads: [:])
     }

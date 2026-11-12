@@ -167,7 +167,12 @@ final class AppModel {
         // **首启必须落盘**：若载体还不存在，立刻写出初始态。
         // 否则「卸载 → 重装 → 判据为初始态」无法与「从来没有写过」区分
         // —— A-10 第 9 条的首演判据就永远不可达（常在线在发布把关里点出过）。
-        if !FileManager.default.fileExists(atPath: stateFile.fileURL.path) {
+        //
+        // ⚠️ **只读态例外**：载体损坏时 `load()` 已把主文件移成 `.corrupt`，
+        // 此时「主文件不存在」≠「首启」。若照样写默认载体，就是**静默重建**：
+        // 现场被一个空文件覆盖，`a` 被清零，`.corrupt` 之外再无痕迹。
+        // 只读态的恢复出口是用户显式动作，不是自动重置（不变量④）。
+        if !readOnly, !FileManager.default.fileExists(atPath: stateFile.fileURL.path) {
             persist()
         }
 
@@ -280,8 +285,72 @@ final class AppModel {
         if let c = result.contents {
             contents = c
         }
+        applyVersionResetIfNeeded()
         loadExecutions()
         rebuild()
+    }
+
+    /// 当前应用版本（`CFBundleShortVersionString`）。
+    private static var currentAppVersion: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0"
+    }
+
+    /// **应用版本变更 → 载体清零**（M4「重置边界」）。
+    ///
+    /// ## 为什么这必须在每次启动时判（原先这段是死代码）
+    ///
+    /// `a`（L0 误判累计）是「本应用版本内判错过几次」。**跨版本没有可比性**：
+    /// 新版本改了判定规则，旧版本的「零误判」证明不了新版本判得准。
+    ///
+    /// 不重置 = **旧版本攒下的安全凭证被新版本继承** → 用户升级完立刻就能点亮
+    /// 自动删除，而新规则一次都没被观察过。这是不变量④（删之前先证明判得准）
+    /// 在版本边界上的失效。
+    ///
+    /// ## 三条边界（与 `VersionResetTests` 一一对应）
+    ///
+    /// | 情形 | 行为 |
+    /// |---|---|
+    /// | `appVersion` 为空（首启） | 只记下版本，**不清零** |
+    /// | 同版本 | 不动（否则每次启动重置 → 永远点不亮） |
+    /// | 版本变了 | 清零凭证，**保留轮次** |
+    private func applyVersionResetIfNeeded() {
+        // ⚠️ **只读 / 损坏态绝不写盘**。
+        //
+        // 载体损坏时 `load()` 把主文件移成 `.corrupt` 并返回只读。
+        // 若此时继续走「首启 → 写默认 header」这条路：
+        //   · 磁盘上立刻出现一个**空的 state.residue**（现场被覆盖）
+        //   · `a` 被静默清零 → 旧版本攒的误判证据消失
+        //   · 下一次启动已经看不到 `.corrupt` 之外的任何痕迹
+        //
+        // 那是「静默重建」，直接违反不变量④：**不知道就不能当成知道**。
+        // 只读态的恢复出口是用户显式动作（重装 / 修载体），不是自动重置。
+        guard !readOnly else { return }
+
+        let current = Self.currentAppVersion
+        let stored = contents.header.appVersion
+
+        // 首启：载体里没有版本 → 只记下，不清零（没有旧凭证可清）
+        guard !stored.isEmpty else {
+            contents.header.appVersion = current
+            persist()
+            return
+        }
+        guard stored != current else { return }
+
+        // 版本变更 → 清零（保留轮次，M1：不产生新轮次）
+        do {
+            try stateFile.clearCarrierForVersionChange(
+                newAppVersion: current,
+                preservedRound: contents.header.round
+            )
+            // 内存态同步成清零后的载体，避免界面继续显示旧凭证
+            contents = stateFile.load().contents ?? StateFileContents()
+            if contents.header.appVersion.isEmpty {
+                contents.header.appVersion = current
+            }
+        } catch {
+            errorMessage = describeWriteError(error)
+        }
     }
 
     /// **回读 `execution.jsonl`**（AC-18 / AC-13）。
@@ -1089,6 +1158,13 @@ final class AppModel {
     }
 
     private func persist() {
+        // **纵深防御**：只读态一律不落盘。
+        //
+        // 调用方比对「主文件是否存在」更可靠 —— 损坏态下主文件已被移走，
+        // 任何基于「文件不存在 = 首启」的判断都会误判。只读是一条硬闸：
+        // 载体读不出来的时候，我们**没有资格**用内存里的空壳去覆盖它。
+        guard !readOnly else { return }
+
         // ---- 保证每个来源都有一行（**字段值必须真实，不能留 nil 冒充「还没算」**）----
         //
         // ## 这里曾经有个会锁死产品的缺口

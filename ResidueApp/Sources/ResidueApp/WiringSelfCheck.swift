@@ -354,6 +354,59 @@ enum WiringSelfCheck {
             "稳定后档仍受用户配置的上限约束（AC-15：用户设置不得静默失效）"
         )
 
+        print("\n--- 4b. 损坏载体不得被静默重建（不变量④）---")
+        // 载体损坏时 `load()` 把它移成 `.corrupt` 并返回只读。若加载流程
+        // 继续走「首启 → 写默认 header」，磁盘上会立刻出现一个空载体：
+        // 现场被覆盖、`a` 被静默清零。这里用真文件复现那条路径。
+        let corruptDir = dir.appendingPathComponent("corrupt")
+        try? FileManager.default.createDirectory(at: corruptDir, withIntermediateDirectories: true)
+        let corruptFile = corruptDir.appendingPathComponent("state.residue")
+        // 造**段校验失败**（E-304）：魔数与 schema 都合法，只有 headerLen 越界。
+        //
+        // ⚠️ 样本必须避开 E-301。「合法魔数 + 乱码」看着像损坏，实际是
+        // `u32(at:4)` 把 `"garb"` 读成 `schemaVersion = 1,734,438,498 > 1`
+        // → 抛 `.schemaTooNew`。E-301 的契约行为是**保留文件、只读降级**
+        // （用户可能装过更新版本，归档它等于毁掉新版本数据），
+        // 与 E-304 的「留档 .corrupt」正好相反。用错样本会测出一个假失败。
+        var badCarrier = Array("RSD1".utf8)
+        badCarrier += [1, 0, 0, 0]                  // schemaVersion = 1（合法）
+        badCarrier += [0xFF, 0xFF, 0xFF, 0xFF]      // headerLen 巨大 → 越界
+        badCarrier += [UInt8](repeating: 0, count: 12)  // 补到 24 B ≥ 20 B 前置
+        try? Data(badCarrier).write(to: corruptFile)
+
+        let corruptStateFile = StateFile(directory: corruptDir)
+        let corruptModel = AppModel(stateFile: corruptStateFile, writer: writer)
+        corruptModel.loadAndProject()
+
+        let mainFileExists = FileManager.default.fileExists(atPath: corruptFile.path)
+        let corruptCopyExists = FileManager.default.fileExists(
+            atPath: corruptDir.appendingPathComponent("state.residue.corrupt").path
+        )
+        // **两条都要成立**：现场被留档（.corrupt 存在）**且**主文件没被重建。
+        // 只判前者会被「留档 + 立刻重建空壳」骗过 —— 那正是静默重建的形态。
+        check(corruptCopyExists, "损坏载体现场已留档（.corrupt）")
+        check(!mainFileExists, "损坏载体未被静默重建（主文件不应重新出现）")
+        check(corruptModel.readOnly, "损坏载体进入只读态")
+
+        // **反向边界**：`E-301`（schema 更高）必须**保留**主文件 —— 只读降级，
+        // 不归档、不重置。那是用户装过更新版本写下的载体，归档等于毁数据。
+        // 与 E-304 的「留档」相反，两者不可合并处理。
+        let newerDir = dir.appendingPathComponent("newer")
+        try? FileManager.default.createDirectory(at: newerDir, withIntermediateDirectories: true)
+        let newerFile = newerDir.appendingPathComponent("state.residue")
+        var newerCarrier = Array("RSD1".utf8)
+        newerCarrier += [9, 0, 0, 0]                    // schemaVersion = 9 > 1
+        newerCarrier += [UInt8](repeating: 0, count: 12)
+        try? Data(newerCarrier).write(to: newerFile)
+        let newerModel = AppModel(stateFile: StateFile(directory: newerDir), writer: writer)
+        newerModel.loadAndProject()
+        check(FileManager.default.fileExists(atPath: newerFile.path),
+              "E-301（schema 更高）保留主文件，不归档")
+        check(!FileManager.default.fileExists(
+                atPath: newerDir.appendingPathComponent("state.residue.corrupt").path),
+              "E-301 不得生成 .corrupt（那是 E-304 的处置）")
+        check(newerModel.readOnly, "E-301 进入只读降级")
+
         print("\n--- 5. 定时任务的 ADR-02 硬约束（登录项非 enabled 不排）---")
         let schedDir = dir.appendingPathComponent("schedstate")
         try? FileManager.default.createDirectory(at: schedDir, withIntermediateDirectories: true)
