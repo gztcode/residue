@@ -124,6 +124,8 @@ final class AppModel {
     private(set) var deferredCount: Int = 0
     /// 上次实际执行时刻（「首次 / 稳定后」的阶段分界依据之一）。
     private(set) var lastExecutionAt: Date?
+    /// 最近一次清理的结果摘要（供首屏显示「删了什么」）。
+    private var lastExecutionNotice: PageModel.ExecutionNotice?
     private let stateFile: StateFile
     private let writer: RecordWriter
     private let engine = ScanEngine()
@@ -278,7 +280,49 @@ final class AppModel {
         if let c = result.contents {
             contents = c
         }
+        loadExecutions()
         rebuild()
+    }
+
+    /// **回读 `execution.jsonl`**（AC-18 / AC-13）。
+    ///
+    /// ## 为什么必须回读（原先只写不读）
+    ///
+    /// `execution.jsonl` 是执行记录的**唯一持久载体**。原实现只 append、从不读 → 后果：
+    ///
+    /// | 症状 | 根因 |
+    /// |---|---|
+    /// | 重启后 ⑦ 页「举证链与日志」清空 | `executions` 每次启动都是 `[]` |
+    /// | 所有「可恢复」按钮消失（恢复无从发起） | 同上 —— 内存里没有记录 |
+    /// | `isFirstRun` 永远为真 | 它判 `executions.isEmpty` |
+    ///
+    /// 第三条最阴：AC-15 的「首次档」与「稳定后档」因此**永远停在首次档**，
+    /// 容量上限（5 GB / 10%）用了一次又一次，从不进入稳定档（20%）。
+    ///
+    /// ## 解码方式
+    ///
+    /// `readLines` 返回 `[String: Any]`（已解析的字典，丢了原始行文本）。
+    /// 这里重新序列化成 JSON 再交给 `iso8601` 解码器 —— 与 `RecordWriter.append`
+    /// 的编码策略必须**成对**（`dateEncodingStrategy = .iso8601`），
+    /// 否则解码静默失败、记录全丢（本仓库 Preferences 踩过同一个坑）。
+    private func loadExecutions() {
+        guard let dicts = try? writer.readLines(kind: .execution), !dicts.isEmpty else {
+            executions = []
+            return
+        }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        var loaded: [ExecutionRecord] = []
+        loaded.reserveCapacity(dicts.count)
+        for dict in dicts {
+            guard let data = try? JSONSerialization.data(withJSONObject: dict),
+                  let rec = try? decoder.decode(ExecutionRecord.self, from: data)
+            else { continue }
+            loaded.append(rec)
+        }
+        // **按执行时刻排序**：文件顺序是 append 顺序，但恢复动作会再追加一条
+        // 同一 candidate 的 `restored_by_user`。排序后界面按时间线读才对。
+        executions = loaded.sorted { $0.executedAt < $1.executedAt }
     }
 
     private func rebuild() {
@@ -307,6 +351,8 @@ final class AppModel {
             whitelist: preferences.whitelist
         )
         pageModel = PageModelBuilder.build(input)
+        // **运行期反馈必须跨 rebuild 存活**（它不是载体投影，但用户在等这个答复）
+        pageModel.lastExecutionNotice = lastExecutionNotice
     }
 
     // MARK: - 扫描
@@ -640,6 +686,7 @@ final class AppModel {
         let isFirstRun = executions.isEmpty
         var newRecords: [ExecutionRecord] = []
         var totalSkipped = 0
+        var totalFailures = 0
 
         // ---- **执行时刻的 L0 快照**（AC-17 二次检查的输入）----
         //
@@ -828,6 +875,9 @@ final class AppModel {
             )
             newRecords.append(contentsOf: outcome.records)
             totalSkipped += outcome.skippedByCap
+            // **失败不再丢弃**：原先 `outcome.failures` 被直接扔掉，
+            // 执行期错误因此不留任何痕迹（用户和日志都看不到）。
+            totalFailures += outcome.failures.count
         }
 
         // 写 `execution.jsonl`（AC-18 举证链的数据源）
@@ -839,7 +889,21 @@ final class AppModel {
         // AC-15：顺延条目数 = 候选总数 − 实际删除条目数
         let deleted = newRecords.filter { $0.action == .renameToTrash }.count
         deferredCount = Swift.max(0, totalSkipped)
-        _ = deleted
+
+        // ---- **结果反馈**：用户点了「执行」，必须得到答复 ----
+        //
+        // 原先执行完只写 `lastExecutionAt` 然后 rebuild —— 界面上什么都不变。
+        // 用户不知道删了几条、有没有失败、要不要处理。`outcome.failures`
+        // 更是**完全丢弃**（连日志都没有），失败没有任何痕迹。
+        let deletedRecords = newRecords.filter { $0.action == .renameToTrash }
+        lastExecutionNotice = PageModel.ExecutionNotice(
+            deletedCount: deletedRecords.count,
+            deletedBytes: deletedRecords.reduce(Int64(0)) { $0 + $1.bytes },
+            deferredCount: deferredCount,
+            failedCount: newRecords.filter { $0.action == .failed }.count + totalFailures,
+            blockedCount: newRecords.filter { $0.action == .blockedSecondCheck }.count
+                + newRecords.filter { $0.action == .blockedOutOfScope }.count
+        )
 
         lastExecutionAt = now
         persist()

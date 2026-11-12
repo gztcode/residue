@@ -336,6 +336,74 @@ struct EmptyStateView: View {
     }
 }
 
+// MARK: - 清理结果反馈卡
+
+/// 一次清理的结果（用户点了「执行」之后的答复）。
+///
+/// 中文案**全部来自 `PageModel.ExecutionNotice.summary`**（Core 唯一实现处），
+/// 这里只决定配色：有失败/拦下 = 需注意（次文字色），干净成功 = 信号色。
+struct ExecutionNoticeCard: View {
+    let notice: PageModel.ExecutionNotice
+
+    private var accent: SwiftUI.Color {
+        notice.didNothing || notice.failedCount > 0
+            ? Tokens.Color.textSecondary
+            : Tokens.Color.signal
+    }
+
+    var body: some View {
+        Card {
+            HStack(alignment: .top, spacing: Tokens.Spacing.s) {
+                Image(systemName: notice.didNothing ? "info.circle" : "checkmark.circle")
+                    .foregroundStyle(accent)
+                Text(notice.summary)
+                    .font(Tokens.Typography.body)
+                    .foregroundStyle(Tokens.Color.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
+            }
+        }
+    }
+}
+
+// MARK: - 首启空态（① 页的主行动）
+
+/// 首启空态：**回答「我现在该做什么」**，并给一个可点的动作。
+///
+/// ## 为什么要有这个东西
+///
+/// 原先首屏在没有数据时显示的是三张 `0 B` 卡片 + 一串 0 —— 因为
+/// `overviewBlocks` 恒为三块（`Source.allCases.map`），空态分支根本不可达。
+/// 用户第一眼看到的是「三个 0」，既不知道产品在干什么，也不知道自己该干什么。
+///
+/// 空态的正确职责是**给方向**：说明首次扫描会做什么（观察期、不读内容）、
+/// 并放一个「开始扫描」按钮作为唯一主行动。
+struct FirstRunEmptyState: View {
+    var onScan: (() -> Void)?
+
+    var body: some View {
+        VStack(spacing: Tokens.Spacing.m) {
+            VStack(spacing: Tokens.Spacing.xs) {
+                Text(L.pick("还没有扫描过", "No scan yet"))
+                    .font(Tokens.Typography.body)
+                    .foregroundStyle(Tokens.Color.textSecondary)
+                Text(L.pick(
+                    "首次扫描会建立观察期基线：只读取文件元数据（大小、时间），不读取文件内容。",
+                    "The first scan builds the observation baseline. It reads file metadata only (size, timestamps) — never file contents."
+                ))
+                .font(Tokens.Typography.secondary)
+                .foregroundStyle(Tokens.Color.textSecondary)
+                .multilineTextAlignment(.center)
+            }
+            if let onScan {
+                Button(L.pick("开始扫描", "Start scanning")) { onScan() }
+                    .buttonStyle(PrimaryButtonStyle())
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
 // MARK: - 错误态（视觉基线 §三：**错误码 + 一句可执行动作**）
 
 struct ErrorStateView: View {

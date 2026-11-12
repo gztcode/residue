@@ -171,7 +171,11 @@ struct RootView: View {
     private var content: some View {
         switch selection {
         case .overview:
-            OverviewPage(model: model)
+            // 空态主行动：首屏在没数据时也能直接开始扫描
+            OverviewPage(
+                model: model,
+                onScan: model.readOnly ? nil : { Task { await app.runScan() } }
+            )
         case .environments:
             EnvironmentsPage(model: model)
         case .policy:

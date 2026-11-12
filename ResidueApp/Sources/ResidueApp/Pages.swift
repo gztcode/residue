@@ -24,6 +24,8 @@ import ResidueCore
 // 必须有的语义位：三区块各一个 `.metric`；状态条承载「并发冲突」
 struct OverviewPage: View {
     let model: PageModel
+    /// 空态里的主行动（「开始扫描」）。为空时不显示按钮（渲染稿 / 只读态）。
+    var onScan: (() -> Void)? = nil
 
     var body: some View {
         if model.loading {
@@ -34,12 +36,31 @@ struct OverviewPage: View {
                     StatusBar(slot: status)
                 }
 
-                if model.overviewBlocks.isEmpty {
-                    EmptyStateView(
-                        message: L.pick("还没有扫描过", "No scan yet"),
-                        hint: L.pick("首次扫描会在观察期内进行，不读取文件内容。", "The first scan runs during the observation period and never reads file contents.")
-                    )
+                // **清理结果反馈**（执行完必须给答复 —— 原先什么都不变）
+                if let notice = model.lastExecutionNotice {
+                    ExecutionNoticeCard(notice: notice)
+                }
+
+                if model.isFirstRunEmpty {
+                    // **空态可达**（原先 overviewBlocks 恒三块 → 这条分支永远进不来）
+                    //
+                    // 首屏必须回答「我现在该做什么」。原先首启看到的是三张 0 B 卡片
+                    // 加一串 0 —— 既不说明状态，也不给动作入口，用户只能盯着 0 发呆。
+                    FirstRunEmptyState(onScan: onScan)
                 } else {
+                    // **总量优先**：先回答「一共占了多少」，再看分来源明细。
+                    Card {
+                        HStack(alignment: .firstTextBaseline, spacing: Tokens.Spacing.s) {
+                            VStack(alignment: .leading, spacing: Tokens.Spacing.xxs) {
+                                Text(L.pick("三来源占用合计", "Total across three sources"))
+                                    .font(Tokens.Typography.secondary)
+                                    .foregroundStyle(Tokens.Color.textSecondary)
+                                SemanticSlotView(slot: model.totalFootprintBytes)
+                                    .font(Tokens.Typography.pageTitle)
+                            }
+                            Spacer()
+                        }
+                    }
                     // 三区块横向并排（总览页的语义是「一眼看完三个来源的占用」）
                     HStack(alignment: .top, spacing: Tokens.Spacing.m) {
                         ForEach(model.overviewBlocks) { block in
@@ -761,6 +782,49 @@ struct ConfirmDrawer: View {
                         .font(Tokens.Typography.secondary)
                         .foregroundStyle(Tokens.Color.textSecondary)
                     SemanticSlotView(slot: model.deferredCountSlot)
+                }
+            }
+
+            // ---- **本次将处理的条目清单** ----
+            //
+            // 原先确认页只有「N 条 / X GB」两个数字和一个大片留白 —— 用户在
+            // 「即将被移进废纸篓」这最后一步，看不到**任何一条具体路径**。
+            // 那让他无法核对「是不是删我想的那些」。
+            //
+            // 清单数据 = `candidateRows`（已排除白名单、已按 200/页分页），
+            // 与 ② 页同一份来源，不另立第二份筛选。
+            if !model.candidateRows.isEmpty {
+                VStack(alignment: .leading, spacing: Tokens.Spacing.xxs) {
+                    SectionTitle(text: L.pick("本次涉及的条目", "Items in this batch"))
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: Tokens.Spacing.xxs) {
+                            ForEach(model.candidateRows) { row in
+                                HStack(spacing: Tokens.Spacing.s) {
+                                    Text(row.name)
+                                        // 视觉基线只有 body / secondary / title / pageTitle 四档，
+                                        // 不引入新字号 —— 路径用 secondary（info 类文案）。
+                                        .font(Tokens.Typography.secondary)
+                                        .foregroundStyle(Tokens.Color.textSecondary)
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                    Spacer(minLength: Tokens.Spacing.xs)
+                                    SemanticSlotView(slot: row.bytes, muted: true)
+                                }
+                            }
+                        }
+                    }
+                    .frame(maxHeight: 180)
+
+                    // **如实说明清单是分页的**：不让「我看了 200 条」被读成「只有 200 条」。
+                    if model.pageCount > 1 {
+                        Text(L.pick(
+                            "以上为第 1 页（最多 200 条）。本批次共 \(model.pageCount) 页，执行时会按上限逐条复核。",
+                            "Showing page 1 (up to 200 items). This batch has \(model.pageCount) pages; each item is re-checked at execution time."
+                        ))
+                        .font(Tokens.Typography.secondary)
+                        .foregroundStyle(Tokens.Color.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
             }
 

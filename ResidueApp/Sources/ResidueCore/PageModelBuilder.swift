@@ -180,6 +180,14 @@ var model = PageModel()
             )
         }
 
+        // **总量**：三来源占用之和（算术在 Core，界面不参与）。
+        let totalBytes = bytesBySource.values.reduce(Int64(0), +)
+        model.totalFootprintBytes = .metric(Int(totalBytes), unit: .bytes)
+
+        // **空态判定**：没扫过（无候选）→ 首屏必须回答「现在该做什么」，
+        // 而不是摆三张 0 B 的卡。`hasScanned` 取自载体（有 `lastScanAt` 即扫过）。
+        model.isFirstRunEmpty = input.candidates.isEmpty && header.lastScanAt == nil
+
         // ① 状态条：只承载「并发冲突」（A1 裁定：全局页级状态条）
         if input.degraded {
             model.statusSlot = .stateLabel(.noPermission)

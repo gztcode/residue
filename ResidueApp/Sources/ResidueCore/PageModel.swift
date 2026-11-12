@@ -80,8 +80,89 @@ public struct PageModel: Sendable {
 
     /// ① 页三区块。
     public var overviewBlocks: [OverviewBlock] = []
+    /// ① 页：**三来源占用总量**（字节）。
+    ///
+    /// 原首屏只有三张各自数额的卡，**没有「一共占了多少」** —— 用户要自己心算。
+    /// 而「我到底能被腾出多少空间」正是这个产品最该先回答的问题。
+    public var totalFootprintBytes: SemanticSlot = .metric(0, unit: .bytes)
+    /// ① 页：**是否还没有任何扫描数据**（决定显示空态还是数据）。
+    ///
+    /// 原先 `overviewBlocks` 恒为三块（`Source.allCases.map`）→ 空态分支
+    /// **在真实产品里不可达**，首启看到的是三张 `0 B` 卡 + 一串 0 ——
+    /// 既不告诉用户「你还没扫过」，也不给「开始扫描」的入口。
+    public var isFirstRunEmpty: Bool = true
     /// ① 页状态条。
     public var statusSlot: SemanticSlot?
+
+    /// **最近一次清理的结果反馈**（`nil` = 本次会话还没执行过）。
+    ///
+    /// 原实现执行完只更新 `lastExecutionAt`，界面上**什么都不变** ——
+    /// 用户点了确认，回到原样，不知道删了几条、有没有失败、要不要处理。
+    /// 那是「点了没反应」的一类，比报错更让人困惑。
+    public var lastExecutionNotice: ExecutionNotice?
+
+    /// 一次清理的结果摘要（纯数据，文案在 Core 拼好 —— 界面不做算术）。
+    public struct ExecutionNotice: Equatable, Sendable {
+        /// 实际移入废纸篓的条目数。
+        public let deletedCount: Int
+        /// 实际腾出的字节数。
+        public let deletedBytes: Int64
+        /// 因上限顺延的条目数。
+        public let deferredCount: Int
+        /// 失败条目数（执行期错误）。
+        public let failedCount: Int
+        /// 被二次检查 / 范围守卫拦下的条目数。
+        public let blockedCount: Int
+
+        public init(
+            deletedCount: Int,
+            deletedBytes: Int64,
+            deferredCount: Int,
+            failedCount: Int,
+            blockedCount: Int
+        ) {
+            self.deletedCount = deletedCount
+            self.deletedBytes = deletedBytes
+            self.deferredCount = deferredCount
+            self.failedCount = failedCount
+            self.blockedCount = blockedCount
+        }
+
+        /// 是否什么都没做（用户最需要知道的那种「没反应」）。
+        public var didNothing: Bool { deletedCount == 0 }
+
+        /// 摘要文案（**唯一实现处**）。
+        public var summary: String {
+            if didNothing {
+                if blockedCount > 0 {
+                    return L.pick(
+                        "本次没有删除任何条目：\(blockedCount) 条被执行前检查拦下（文件已变化或正在被使用）。",
+                        "Nothing was deleted: \(blockedCount) item(s) were stopped by the pre-execution check (changed or in use)."
+                    )
+                }
+                return L.pick(
+                    "本次没有条目可删（可能都被上限顺延，或候选已不存在）。",
+                    "Nothing to delete this time (deferred by limits, or candidates no longer exist)."
+                )
+            }
+            var parts = [
+                L.pick(
+                    "已移入废纸篓 \(deletedCount) 条，共 \(MetricUnit.formatBytes(Int(deletedBytes)))",
+                    "Moved \(deletedCount) item(s) to Trash, \(MetricUnit.formatBytes(Int(deletedBytes))) total"
+                )
+            ]
+            if deferredCount > 0 {
+                parts.append(L.pick("顺延 \(deferredCount) 条", "\(deferredCount) deferred"))
+            }
+            if blockedCount > 0 {
+                parts.append(L.pick("拦下 \(blockedCount) 条", "\(blockedCount) blocked"))
+            }
+            if failedCount > 0 {
+                parts.append(L.pick("失败 \(failedCount) 条", "\(failedCount) failed"))
+            }
+            return parts.joined(separator: " · ")
+        }
+    }
 
     /// ② 页候选行。
     public var candidateRows: [CandidateRow] = []

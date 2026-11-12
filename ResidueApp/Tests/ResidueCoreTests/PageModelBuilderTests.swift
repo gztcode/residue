@@ -327,6 +327,58 @@ final class PageModelBuilderTests: XCTestCase {
         XCTAssertEqual(m.overviewBlocks[2].slot.displayText, MetricUnit.formatBytes(0))
     }
 
+    /// **总量 = 三来源之和**（先回答「一共占了多少」，再给分来源明细）。
+    func testTotalFootprintIsSumOfAllSources() {
+        let input = PageModelBuilder.Input(
+            contents: makeContents(makeHeader()),
+            candidates: [
+                makeCandidate(path: "/uv/a", bytes: 1_000_000, source: .uvCache),
+                makeCandidate(path: "/npm/c", bytes: 3_000_000, source: .npmNpx),
+                makeCandidate(path: "/pipx/d", bytes: 500_000, source: .pipxRun),
+            ]
+        )
+        let m = PageModelBuilder.build(input)
+        XCTAssertEqual(
+            m.totalFootprintBytes.displayText,
+            MetricUnit.formatBytes(4_500_000),
+            "总量必须含全部三个来源（含仅报告的 pipx）"
+        )
+    }
+
+    /// **空态可达**：没扫过（无候选 + 无 lastScanAt）→ `isFirstRunEmpty` 为真。
+    ///
+    /// 原先 `overviewBlocks` 恒三块 → 空态分支永远进不来，首启显示三张 0 B 卡。
+    func testFirstRunEmptyWhenNoCandidatesAndNoScan() {
+        var header = makeHeader()
+        header.lastScanAt = nil
+        let m = PageModelBuilder.build(
+            PageModelBuilder.Input(contents: makeContents(header), candidates: [])
+        )
+        XCTAssertTrue(m.isFirstRunEmpty, "从未扫描过必须是空态（要回答「现在该做什么」）")
+        XCTAssertFalse(m.overviewBlocks.isEmpty, "三区块仍构建（渲染稿依赖它）")
+    }
+
+    /// 扫过之后（有 lastScanAt）→ 不是空态，即使候选为空也显示数据形态。
+    func testNotFirstRunEmptyAfterScan() {
+        var header = makeHeader()
+        header.lastScanAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let m = PageModelBuilder.build(
+            PageModelBuilder.Input(contents: makeContents(header), candidates: [])
+        )
+        XCTAssertFalse(m.isFirstRunEmpty, "扫过之后应显示数据形态（0 B 也是真实值）")
+    }
+
+    /// 有候选 → 不是空态。
+    func testNotFirstRunEmptyWithCandidates() {
+        let m = PageModelBuilder.build(
+            PageModelBuilder.Input(
+                contents: makeContents(makeHeader()),
+                candidates: [makeCandidate(path: "/a", bytes: 1, source: .uvCache)]
+            )
+        )
+        XCTAssertFalse(m.isFirstRunEmpty)
+    }
+
     /// **分页上限 200**（ADR-01：分页是渲染正确性）。
     func testPageSizeIsTwoHundred() {
         XCTAssertEqual(PageModelBuilder.pageSize, 200)
