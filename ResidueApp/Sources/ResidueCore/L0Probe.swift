@@ -198,6 +198,30 @@ public enum L0Probe {
         return FDList(fds: out, errno: 0)
     }
 
+    /// 把候选**路径**转成它的文件身份 `(dev, ino)`。
+    ///
+    /// ## 为什么必须是 `lstat` 而不是 `stat`
+    ///
+    /// `stat` **跟随符号链接** → 会返回链接目标的 inode；
+    /// `lstat` 返回**链接自身**的 inode。
+    ///
+    /// 执行路径要的是「**这条路径本身**现在指向哪个 inode」——
+    /// 若用户把候选路径换成了指向别处的 symlink，`stat` 会拿到目标的身份，
+    /// 让复核误判「还是同一个文件」→ 绕过身份复核 → **误删链接目标**。
+    /// `lstat` 拿到的是链接自己的身份，与扫描期记录的一致 → 正确判 `unchanged`
+    /// 或在路径被替换成 symlink 时判 `rebuilt`（身份变了）。
+    ///
+    /// 这与「递归字节统计不跟随 symlink」（S-03）是同一纪律的两面：
+    /// **凡涉及「这条路径本身是什么」，一律不跟随 symlink。**
+    ///
+    /// - Parameter path: 候选路径。
+    /// - Returns: 文件身份；路径不存在或 `lstat` 失败 → `nil`。
+    public static func identity(atPath path: String) -> FileIdentity? {
+        var st = stat()
+        guard lstat(path, &st) == 0 else { return nil }
+        return FileIdentity(st: st)
+    }
+
 
     // MARK: - 快照
 

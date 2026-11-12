@@ -443,6 +443,48 @@ else
   bad "定时执行点只扫描不执行（AC-04 无落点 → 自动删除永不被定时触发）"
 fi
 
+# ---- 执行路径的三道安全闸（2026-11-12 · 审计确认会误删）----
+
+# ⑤ 白名单必须在**执行路径**生效（原先只过滤展示 → 用户以为保护了，照样删）
+if grep -qF 'WhitelistGuard' "$UI_DIR/AppModel.swift" 2>/dev/null \
+   && grep -qF 'WhitelistGuard' "$CORE_DIR/PageModelBuilder.swift" 2>/dev/null; then
+  ok "白名单在执行路径生效，且与展示层共用同一原语（AC-03）"
+else
+  bad "白名单未接执行路径（只过滤显示 → 保护形同虚设）"
+fi
+
+# ⑤ 执行方式必须在执行路径生效（默认「仅报告」= 永不删）
+if grep -qF 'executionMode == .autoDelete' "$UI_DIR/AppModel.swift" 2>/dev/null; then
+  ok "执行方式闸生效（.reportOnly 时不执行删除，AC-03）"
+else
+  bad "执行方式未接执行路径（选「仅报告」仍会删）"
+fi
+
+# ⑥ 删除前二次检查（身份复核 + L0 复核，AC-17）
+if grep -qF 'SecondCheck.checkIdentity' "$UI_DIR/AppModel.swift" 2>/dev/null \
+   && grep -qF 'SecondCheck.isLiveHeld' "$UI_DIR/AppModel.swift" 2>/dev/null; then
+  ok "删除前二次检查已接（身份 + L0，AC-17）"
+else
+  bad "删除前无二次检查（扫描到执行之间文件被重建/被占用会误删）"
+fi
+
+# ⑦ 执行范围守卫（存在 / 非 symlink / 真实路径在根内 / 同卷，AC-19）
+if grep -qF 'ScopeGuard.check' "$UI_DIR/AppModel.swift" 2>/dev/null \
+   && grep -qF 'lstat' "$CORE_DIR/ScopeGuard.swift" 2>/dev/null \
+   && grep -qF 'S_IFLNK' "$CORE_DIR/ScopeGuard.swift" 2>/dev/null; then
+  ok "执行范围守卫已接（符号链接/越界/跨卷拒绝，AC-19）"
+else
+  bad "执行路径无范围守卫（来源根之外的 symlink 目标会被删）"
+fi
+
+# ⑧ 容量上限的分母必须是字节（原先把候选条数当字节 → 11.6 万条 = 11.6 KB 上限）
+if grep -qF 'entry.T' "$UI_DIR/AppModel.swift" 2>/dev/null \
+   && grep -n 'sourceTotalBytes' "$UI_DIR/AppModel.swift" 2>/dev/null | grep -qF 'Int64(t)'; then
+  bad "容量上限仍把候选条数（entry.T）当字节用 → 几乎所有候选被顺延"
+else
+  ok "容量上限分母为逻辑字节（AC-15）"
+fi
+
 # ---------------------------------------------------------------------------
 echo ""
 echo "--- 十、L0 判定的契约常量（本机绿、CI 红那一类）---"

@@ -101,6 +101,9 @@ final class AppModel {
         var candidatesFound: Int = 0
         /// 首个中止原因。
         var abortReason: String?
+        /// 本轮使用的来源根（`source.rawValue` → 根路径）。
+        /// 执行期越界判定（AC-19）必须用**扫描时这一份**。
+        var roots: [String: String] = [:]
     }
 
     /// **当前扫描的进度**（供界面显示「在动」）。
@@ -139,6 +142,14 @@ final class AppModel {
     private(set) var lastScanDiagnostics = ScanLogRecord.Diagnostics()
     /// 本次扫描的上游命令调用记录（AC-19 的界面落点数据源）。
     private var lastUpstreamCommands: [UpstreamCommand] = []
+
+    /// **本轮扫描用的来源根**（`source.rawValue` → 根路径）。
+    ///
+    /// AC-19 / R2:218 的执行期「真实路径在该来源允许根内」判定需要它。
+    /// 不许在执行时重新 `resolveSourceRoots` —— 那要跑上游命令（`uv cache dir`），
+    /// 而且可能返回与扫描时不同的根（用户改了配置）→ 判定用的根与实际扫描的根不一致。
+    /// **判依据必须与扫描时同一份**（同一判定只有一个来源）。
+    private var lastSourceRoots: [String: String] = [:]
 
     init(
         stateFile: StateFile = StateFile(),
@@ -385,6 +396,9 @@ final class AppModel {
 
             // ---- 逐来源扫描 ----
             for (sourceName, root) in roots {
+                // **留存来源根**：执行期越界判定（AC-19）用它，
+                // 不用执行时重新解析的那份（可能已变）。
+                job.roots[sourceName] = root
                 // **取消检查**：每条来源一次（来源只有 3 个，开销可忽略）
                 if cancelBox.isCancelled { break }
                 guard FileManager.default.fileExists(atPath: root) else { continue }
@@ -442,6 +456,8 @@ final class AppModel {
         candidates = allCandidates
         lastUpstreamCommands = job.upstream
         lastScanMode = job.mode
+        // **执行期越界判定的依据**（AC-19）：与本次扫描同一份根
+        lastSourceRoots = job.roots
 
         // **来源级错误**（此时已在主 actor，可用 `describeScanError` 取码表文案）
         if let first = job.failures.first {
@@ -612,6 +628,11 @@ final class AppModel {
             errorMessage = L.pick("未达达标条件，本次不执行（逐来源复核未通过）", "Gate not met; nothing executed this time (per-source re-check failed)")
             return
         }
+        // **执行方式闸（AC-03）**：默认「仅报告」= 永不删。
+        // 原先这里不读 executionMode → 用户在 ③ 页选「仅报告」形同虚设。
+        guard preferences.executionMode == .autoDelete else {
+            return
+        }
         guard !isScanning else { return }
 
         let now = Date()
@@ -620,13 +641,147 @@ final class AppModel {
         var newRecords: [ExecutionRecord] = []
         var totalSkipped = 0
 
+        // ---- **执行时刻的 L0 快照**（AC-17 二次检查的输入）----
+        //
+        // ## 为什么必须现取、不能用扫描期那份
+        //
+        // 扫描可能发生在几分钟前、甚至（定时点）昨天。那份快照记录的是
+        // 「扫描那一刻谁持有文件」。而 AC-17 判的是「**删除前这一刻**还有没有
+        // 活引用」—— 用过期快照等于拿旧证据判当下，TOCTOU（time-of-check-to-time-of-use）
+        // 窗口内的活引用会漏掉 → 误删正在被使用的文件。
+        //
+        // `L0Probe.snapshot` 要枚举全部同 uid 进程的 fd，是重 I/O（同扫描），
+        // 故同样**离开主 actor**（不变量：重 I/O 不在 `@MainActor`）。
+        // 排除自身 pid（IF-03 自污染防护，与扫描期同一纪律）。
+        let excludePIDs: Set<pid_t> = [getpid()]
+        let secondCheckSnapshot = await Task.detached(priority: .userInitiated) {
+            L0Probe.snapshot(excludePIDs: excludePIDs, now: now)
+        }.value
+
         for source in Source.allCases {
             // **pipx 恒为仅报告**：不在判定域 → 永不参与自动删除（AC-04 ②）
             guard source.isInDecisionDomain else { continue }
 
-            let sourceCandidates = candidates.filter { $0.source == source.rawValue }
-            let ids: [CandidateID] = sourceCandidates
-                .map { CandidateID(path: $0.path, birthtime: $0.birthtime) }
+            // **白名单闸（AC-03）**：被保护的条目在执行路径上**真的被排除**。
+            //
+            // 原先 `candidates` 全量直接进 `executeBatch` → 白名单只过滤了显示，
+            // 执行照样删被保护目录下的文件。那是「用户以为保护生效了，
+            // 而它在执行路径上不存在」——本产品最不能犯的谎之一。
+            //
+            // 走 `WhitelistGuard`（Core 唯一原语），与展示层同一份匹配逻辑。
+            let sourceCandidates = WhitelistGuard.filter(
+                candidates: candidates.filter { $0.source == source.rawValue },
+                whitelist: preferences.whitelist,
+                path: { $0.path }
+            )
+
+            // ---- **AC-17 删除前二次检查**（身份复核 + L0 复核）----
+            //
+            // 候选是「扫描时刻」的快照，删除发生在「之后的执行点」。这中间文件系统
+            // 可能已经变了：路径被同名重建、文件被删、文件被活引用持有。
+            // **不复核就删 = 误删**（你以为删的是观察期证明没用的那个缓存，
+            // 实际删的是用户刚重新装好的同名目录）。
+            //
+            // 两道复核（判定都在 Core，本层只编排）：
+            //   ① 身份复核（`SecondCheck.checkIdentity`）：重读 birthtime，
+            //      不一致 = 同名重建 = **不是当初判定的那个文件** → 放弃。
+            //   ② L0 复核（`SecondCheck.isLiveHeld`）：用**执行时刻**的新快照
+            //      再探一次活引用 → 被持有 → 放弃。
+            //
+            // 被阻断的条目**仍写 `execution.jsonl`**（`.blockedSecondCheck`）——
+            // 举证链不缺这一行，AC-18 的完整率才真实。
+            var ids: [CandidateID] = []
+            for cand in sourceCandidates {
+                let id = CandidateID(path: cand.path, birthtime: cand.birthtime)
+
+                // ⓪ **执行范围守卫（AC-19 / R2:218）** —— 最高优先，先于其它复核。
+                //
+                // 扫描端用 `fileExists(atPath:isDirectory:)` 判目录，而该 API
+                // **跟随符号链接**（真文件系统实测确认）：来源根里一个指向
+                // `~/Documents` 的 symlink 会被当目录下探 → 根外文件成为候选。
+                // 执行端若不复核，就把根外的文件移进废纸篓了。
+                //
+                // 四道判定（存在 / 非 symlink / 真实路径在根内 / 同卷）全在
+                // `ScopeGuard`（Core，可单测）。这里只编排与留痕。
+                //
+                // 拿不到来源根时 → **拒绝执行**（不把未知判为安全）。
+                if let root = lastSourceRoots[source.rawValue] {
+                    if let rejection = ScopeGuard.check(path: cand.path, allowedRoot: root) {
+                        newRecords.append(
+                            ExecutionRecord(
+                                id: id, source: source, action: .blockedOutOfScope,
+                                originalPath: cand.path, restorePath: nil, executedAt: now,
+                                bytes: cand.bytes, bytesKind: cand.isDirectory ? .dirRecursive : .file,
+                                blockedReason: rejection.diagnostic.summary,
+                                bytesPreview: cand.bytes, bytesMeasuredAt: now
+                            )
+                        )
+                        continue
+                    }
+                } else {
+                    // 没有该来源的根 → 无法证明在范围内 → 不删（不把未知判为安全）
+                    newRecords.append(
+                        ExecutionRecord(
+                            id: id, source: source, action: .blockedOutOfScope,
+                            originalPath: cand.path, restorePath: nil, executedAt: now,
+                            bytes: cand.bytes, bytesKind: cand.isDirectory ? .dirRecursive : .file,
+                            blockedReason: L.pick("无法确认该来源的允许根，已跳过", "Allowed root for this source unknown; skipped"),
+                            bytesPreview: cand.bytes, bytesMeasuredAt: now
+                        )
+                    )
+                    continue
+                }
+
+                // ① 身份复核
+                switch SecondCheck.checkIdentity(path: cand.path, recordedBirthtime: cand.birthtime) {
+                case .vanished:
+                    // 文件已不存在 → 没东西可删，记一行如实留痕（不是失败）
+                    newRecords.append(
+                        ExecutionRecord(
+                            id: id, source: source, action: .blockedSecondCheck,
+                            originalPath: cand.path, restorePath: nil, executedAt: now,
+                            bytes: cand.bytes, bytesKind: cand.isDirectory ? .dirRecursive : .file,
+                            blockedReason: "二次检查：文件已不存在（已自行删除）",
+                            bytesPreview: cand.bytes, bytesMeasuredAt: now
+                        )
+                    )
+                    continue
+                case .rebuilt:
+                    // **同名重建** → 现在那个文件不是当初判定的那个 → 放弃（误删防线）
+                    newRecords.append(
+                        ExecutionRecord(
+                            id: id, source: source, action: .blockedSecondCheck,
+                            originalPath: cand.path, restorePath: nil, executedAt: now,
+                            bytes: cand.bytes, bytesKind: cand.isDirectory ? .dirRecursive : .file,
+                            blockedReason: "二次检查：路径已被同名重建（birthtime 不一致），不是当初判定的文件",
+                            bytesPreview: cand.bytes, bytesMeasuredAt: now
+                        )
+                    )
+                    continue
+                case .unchanged:
+                    break
+                }
+
+                // ② L0 复核（用执行时刻新取的快照）
+                if let identity = L0Probe.identity(atPath: cand.path),
+                   SecondCheck.isLiveHeld(
+                       identity: identity, isDirectory: cand.isDirectory,
+                       path: cand.path, by: secondCheckSnapshot
+                   ) {
+                    newRecords.append(
+                        ExecutionRecord(
+                            id: id, source: source, action: .blockedSecondCheck,
+                            originalPath: cand.path, restorePath: nil, executedAt: now,
+                            bytes: cand.bytes, bytesKind: cand.isDirectory ? .dirRecursive : .file,
+                            blockedReason: "二次检查：删除前发现活引用（进程正在使用）",
+                            bytesPreview: cand.bytes, bytesMeasuredAt: now
+                        )
+                    )
+                    continue
+                }
+
+                ids.append(id)
+            }
             guard !ids.isEmpty else { continue }
 
             // ---- **`t1` 预检值**：取扫描时算好的逻辑字节（IF-08 的唯一来源）----
@@ -721,13 +876,29 @@ final class AppModel {
         }
     }
 
-    /// 某来源的**总量**（`T`；未取快照时退回候选合计）。
+    /// 某来源的**逻辑字节总量**（AC-15 容量上限的分母）。
+    ///
+    /// ## 这里曾经把「候选条数」当字节用 —— 一个静默的灾难
+    ///
+    /// 原实现：`if let t = entry.T { return Int64(t) }`。
+    /// 而 `entry.T` 是 **M3 的候选条目数**（`slotCount`），**不是字节**。
+    ///
+    /// 后果（本机实测）：uv cache 有 115,875 条候选 →
+    /// 首次档上限 = `min(5 GB, 115875 × 10%)` = **11,587 字节 ≈ 11.6 KB**。
+    /// 于是**几乎每一次执行的所有候选都因「预检超限」被顺延** ——
+    /// 用户点了清理，实际删掉的永远是个位数（甚至 0），而且**不报错**。
+    ///
+    /// ## 正确口径（AC-15 / CR-022 偏差 2）
+    ///
+    /// 分母 = 该来源候选的**逻辑字节**合计（目录 = 递归普通文件 `st_size` 之和）。
+    /// `Candidate.bytes` 正是扫描期按该定义算好的那份 —— 直接求和即得，
+    /// 且与执行期 `t1` 预检、`t2` 实测**同一口径**（不变量②：同一判定只有一处实现）。
+    ///
+    /// **不再看 `entry.T`**：它是条目数，与字节无关。这也是为什么原实现
+    /// 在「候选数很少但体积很大」和「候选数很多但体积很小」两种情形下
+    /// 都会给出荒谬的上限。
     private func sourceTotalBytes(for source: Source) -> Int64 {
-        if let entry = contents.header.sources.first(where: { $0.source == source }),
-           let t = entry.T, t > 0 {
-            return Int64(t)
-        }
-        return candidates
+        candidates
             .filter { $0.source == source.rawValue }
             .reduce(Int64(0)) { $0 + $1.bytes }
     }

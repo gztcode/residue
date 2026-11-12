@@ -190,8 +190,8 @@ rm -rf ~/Library/Application\ Support/Residue
 
 ```bash
 cd ResidueApp
-swift test                                  # 283 个单测（Core 层，零 UI 依赖）
-./scripts/verify_a9.sh                      # 页面结构 + 界面禁算术 + 数据层接线（74 项）
+swift test                                  # 316 个单测（Core 层，零 UI 依赖）
+./scripts/verify_a9.sh                      # 页面结构 + 界面禁算术 + 数据层接线（80 项）
 python3 scripts/verify_codes.py             # 错误码表 ↔ 文档一致性（11 项）
 swift run --disable-sandbox ResidueApp --verify-wiring /tmp/w   # 真 IO 往返（45 项）
 ./scripts/make_app.sh && ./scripts/verify_a5.sh                 # 产物结构（42 项）

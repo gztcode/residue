@@ -119,12 +119,14 @@ public enum PageModelBuilder {
         // ① ② 页候选行 ② 分页总数 ③ 可删除量 / L1 计数。
         // 若只在渲染时隐藏，`deletableAmount` 仍会算进被保护的条目 ——
         // 用户看到的总量与实际可删量不符，那是账对不上。
-        let visibleCandidates = input.candidates.filter { c in
-            !input.whitelist.contains(where: { protectedPath in
-                // 命中的判定：路径相等，或候选在受保护目录之下
-                c.path == protectedPath || c.path.hasPrefix(protectedPath + "/")
-            })
-        }
+        //
+        // **匹配逻辑 = `WhitelistGuard`（Core 唯一原语）**，与执行路径共用 ——
+        // 原先这里内联一份、`executeBatch` 又不读白名单，导致「白名单只过滤显示」。
+        let visibleCandidates = WhitelistGuard.filter(
+            candidates: input.candidates,
+            whitelist: input.whitelist,
+            path: { $0.path }
+        )
 
 var model = PageModel()
         model.readOnly = input.readOnly

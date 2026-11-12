@@ -17,12 +17,12 @@ SwiftPM 命令在 `ResidueApp/` 目录下执行（SwiftPM 包根）；文档基�
 ```bash
 swift build                      # 编译
 swift build -c release           # Release 会裁掉 #if DEBUG 的自检入口，必须单独验
-swift test                       # 全部单测（当前 283 个）
+swift test                       # 全部单测（当前 316 个）
 swift test --filter "MetricsTests"                                    # 跑一个测试类
 swift test --filter "ResidueCoreTests.MetricsTests/testThresholdIsMinOf30AndTotal"  # 跑单个用例
 
 python3 scripts/verify_codes.py   # 错误码表 ↔ 文档一致性（11 项）
-./scripts/verify_a9.sh            # 页面结构 + 界面禁算术 + 数据层接线 + 空实现（当前 74 项）
+./scripts/verify_a9.sh            # 页面结构 + 界面禁算术 + 数据层接线 + 空实现（当前 80 项）
 swift run --disable-sandbox ResidueApp --verify-wiring /tmp/wiring   # 接线自检（真 IO 往返，当前 45 项）
 swift run --disable-sandbox ResidueApp --render-pages design-renders # 重渲染 16 张设计稿
 ./scripts/make_app.sh             # 产出 build/Residue.app + .zip（无证书时 ad-hoc 签名）
