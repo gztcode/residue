@@ -455,6 +455,12 @@ public struct ScanEngine: Sendable {
 
     // MARK: - 引擎
 
+    /// 全量扫描时长上限（N1：p95 ≤ 10 min；R2 §6 `E-105` 取 **600 s**）。
+    ///
+    /// **唯一定义处**：调用方（`AppModel.runScan`）不得自己写 `600`。
+    /// 超时不是失败 —— 中断即落断点，续扫接着走（`aborted ≠ 失败`）。
+    public static let fullScanTimeout: TimeInterval = 600
+
     public let fileSystem: FileSystem
     public let rules: [SourceRule]
 

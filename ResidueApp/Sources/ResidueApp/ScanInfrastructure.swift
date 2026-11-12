@@ -124,6 +124,27 @@ final class CancelBox: @unchecked Sendable {
     }
 }
 
+/// 后台任务回传一个**非 `Sendable` 不可**的结果值（`@unchecked Sendable` + 锁）。
+///
+/// 只用于自检：`Task.detached` 里算出的结果要带回同步上下文，
+/// 直接写外层局部变量会被 Swift 6 判为数据竞争。
+final class ResultBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: ScanEngine.ScanResult?
+
+    func store(_ v: ScanEngine.ScanResult?) {
+        lock.lock()
+        value = v
+        lock.unlock()
+    }
+
+    func load() -> ScanEngine.ScanResult? {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+}
+
 
 // MARK: - 来源根解析（**自由函数，不是 AppModel 的方法**）
 

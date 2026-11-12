@@ -193,6 +193,40 @@ final class ScanEngineTests: XCTestCase {
         XCTAssertFalse(r.snapshotTaken, "中断不取快照")
     }
 
+    /// **`deadline` 真的会让扫描停**，且原因是 `.timeout`（不是 `.userCancelled`）。
+    ///
+    /// 这条覆盖的是「超时**接线**」而非「超时**存在**」：引擎一直支持 `deadline`，
+    /// 但 `AppModel.runScan` 原先没传 → 契约 N1 的 600 s 在运行路径上没有落点。
+    /// 单测只能验引擎侧（`AppModel` 是主 actor + 真 IO，归接线自检）。
+    func testDeadlineStopsScanWithTimeoutReason() throws {
+        let fs = MemoryFS()
+        fs.dirs["/root/.cache/uv"] = [("d1", true), ("d2", true), ("d3", true)]
+        for d in ["d1", "d2", "d3"] {
+            fs.dirs["/root/.cache/uv/\(d)"] = [("f", false)]
+            fs.attrs["/root/.cache/uv/\(d)"] = (Date(), 1, true)
+            fs.attrs["/root/.cache/uv/\(d)/f"] = (Date(), 1, false)
+        }
+        let engine = makeEngine(fs)
+
+        // deadline 在过去 → 第一次检查即超时
+        let r = try engine.scan(
+            root: "/root/.cache/uv", mode: .full,
+            deadline: Date().addingTimeInterval(-1)
+        )
+        XCTAssertEqual(r.aborted, .timeout)
+        XCTAssertTrue(r.breakpointSaved, "超时也要落断点（可续扫）")
+        XCTAssertNotNil(r.checkpoint, "调用方要拿得到断点内容，否则续扫无从谈起")
+        XCTAssertEqual(r.filesScanned, 0, "超时中止时不该有已计条目")
+    }
+
+    /// N1 的全量扫描上限 = **600 s**，且是**唯一定义处**。
+    ///
+    /// 调用方（`AppModel.runScan`）不得自己写 `600` —— 两处写死必然漂移，
+    /// 而漂移方向（变松）就意味着超时契约静默失效。
+    func testFullScanTimeoutIsSixHundredSeconds() {
+        XCTAssertEqual(ScanEngine.fullScanTimeout, 600, "N1 / R2 §6 E-105：全量扫描 600 s")
+    }
+
     func testTimeoutIsDistinctFromUserCancel() throws {
         let fs = MemoryFS()
         fs.dirs["/root/.cache/uv"] = [("d1", true)]

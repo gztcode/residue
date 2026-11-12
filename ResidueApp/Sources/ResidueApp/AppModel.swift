@@ -521,6 +521,18 @@ final class AppModel {
                     let result = try engine.scan(
                         root: root,
                         mode: mode,
+                        // ---- 中止检查（AC-20：取消 5 s 内停 I/O）----
+                        //
+                        // ⚠️ **必须在引擎内部逐目录检查**，不能只在外层
+                        // `for (sourceName, root)` 循环里查一次：一个来源 11 万条目
+                        // 的遍历中途不回头，取消要等它**整条扫完**才生效
+                        // （实测单来源 ~6.7 s）→ 用户点了取消，界面还在扫。
+                        // 契约要的是「取消动作后 5 秒内无新增扫描 I/O」。
+                        abortCheck: ScanEngine.AbortCheck {
+                            cancelBox.isCancelled ? .userCancelled : nil
+                        },
+                        // ---- 超时（N1：全量扫描 600 s → `E-105`）----
+                        deadline: started.addingTimeInterval(ScanEngine.fullScanTimeout),
                         now: started,
                         // **进度回流**：每 2000 条一次 → 11 万条约 56 次
                         progress: { p in

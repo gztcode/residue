@@ -287,10 +287,55 @@ enum WiringSelfCheck {
         )
 
         // ---- ③ 取消真的能取消 ----
+        //
+        // ⚠️ 原来的断言只验了盒子本身（`cancel()` 后 `isCancelled == true`）
+        // ——那是**恒真**的，与「扫描会不会停下来」毫无关系。
+        // 而真实缺陷正是「盒子被取消了，引擎却不知道」：`runScan` 原先
+        // **没把 `cancelBox` 接进 `abortCheck`**，取消只在**每条来源之间**
+        // 生效一次 → 单来源 11 万条目要整条扫完才停（实测 ~6.7 s）。
+        //
+        // 这里验行为不验结构：扫一个大树，跑到一半下取消信号，
+        // 断言**扫描提前停了**（扫过的条目远少于总量）+ 落了断点。
+        let cancelRoot = dir.appendingPathComponent("cancelstate")
+        for d in 0..<120 {
+            let sub = cancelRoot.appendingPathComponent("d\(d)")
+            try? FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
+            for f in 0..<8 {
+                try? Data(repeating: 0x55, count: 32)
+                    .write(to: sub.appendingPathComponent("f\(f)"))
+            }
+        }
+        let totalEntries = 120 * 8        // 960 个叶子
         let cancelBox = CancelBox()
-        check(!cancelBox.isCancelled, "取消令牌初始为未取消")
-        cancelBox.cancel()
-        check(cancelBox.isCancelled, "取消信号被记录（后台任务读得到）")
+        let cancelEngine = ScanEngine()
+        let cancelDone = DispatchSemaphore(value: 0)
+        let cancelBoxOut = ResultBox()
+        Task.detached(priority: .userInitiated) {
+            let r = try? cancelEngine.scan(
+                root: cancelRoot.path,
+                mode: .full,
+                // **与 `AppModel.runScan` 同源**：引擎内部逐目录读同一个盒子
+                abortCheck: ScanEngine.AbortCheck {
+                    cancelBox.isCancelled ? .userCancelled : nil
+                },
+                progress: { p in
+                    // 扫到 48 条就下取消信号（远早于 960）
+                    if p.filesScanned >= 48 { cancelBox.cancel() }
+                },
+                progressEvery: 8
+            )
+            cancelBoxOut.store(r)
+            cancelDone.signal()
+        }
+        _ = cancelDone.wait(timeout: .now() + 30)
+        let cancelResult = cancelBoxOut.load()
+
+        check(cancelResult?.aborted == .userCancelled, "取消后引擎如实报「用户取消」（E-104）")
+        check(
+            (cancelResult?.filesScanned ?? totalEntries) < totalEntries / 2,
+            "取消在**扫描途中**生效（实扫 \(cancelResult?.filesScanned ?? -1) / 共 \(totalEntries) 条）—— 只在外层循环查一次会让单来源整条扫完"
+        )
+        check(cancelResult?.checkpoint != nil, "取消落断点（AC-20：重启后可续扫）")
 
         print("\n--- 4d. 执行路径的容量上限（AC-15 · 唯一真动用户文件的模块）---")
         // 这一节的存在理由：`executeBatch` 此前**一次都没被自检走过**，
