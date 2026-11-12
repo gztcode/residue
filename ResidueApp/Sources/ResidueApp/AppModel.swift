@@ -173,10 +173,32 @@ final class AppModel {
     private func startScheduler() {
         if scheduler == nil {
             scheduler = ScheduledRunner { [weak self] mode in
-                await self?.runScan(mode: mode)
+                await self?.scheduledWork(mode: mode)
             }
         }
         restartScheduler()
+    }
+
+    /// **定时执行点**（AC-04）：扫描 → 若已点亮自动删除，则执行清理批次。
+    ///
+    /// ## 为什么这是「到达定时执行点」的唯一落点
+    ///
+    /// 原先 `work` 闭包只调 `runScan` —— 定时任务**扫完就停**，
+    /// 从不执行删除。AC-04 写的是「到达定时执行点执行删除」，于是这条
+    /// AC 在代码里没有任何落点：排程在跑、扫描在跑，但**删除永远不会被触发**。
+    ///
+    /// ## 三道闸（与手动「立即执行」同源，不另立第二套）
+    ///
+    /// 1. **`autoDeleteEnabled`** —— 用户没点亮自动删除，定时点就**只扫描不删**
+    ///    （这是「观察期」的意义：影子期内只观测，绝不动手）
+    /// 2. **`executeBatch` 内部兜底 `canLightUp`** —— 即使开关开着，未达线也不执行
+    /// 3. **`executeBatch` 内部兜底 `isScanning`** —— 防重复
+    ///
+    /// 闸 2/3 在 `executeBatch` 里，此处只加闸 1，避免定时点绕过「用户主动点亮」。
+    private func scheduledWork(mode: ScanEngine.Mode) async {
+        await runScan(mode: mode)
+        guard contents.header.autoDeleteEnabled else { return }
+        await executeBatch()
     }
 
     /// 按当前状态重排定时任务（登录项态或自动删除态变化后调用）。
@@ -209,7 +231,7 @@ final class AppModel {
         locationWarning = LoginItemManager.locationWarning()
         if scheduler == nil {
             scheduler = ScheduledRunner { [weak self] mode in
-                await self?.runScan(mode: mode)
+                await self?.scheduledWork(mode: mode)
             }
         }
         restartScheduler()

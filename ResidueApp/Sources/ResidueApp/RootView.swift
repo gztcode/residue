@@ -179,6 +179,8 @@ struct RootView: View {
                 model: model,
                 onOpenLoginSettings: { app.openLoginItemSettings() },
                 onSetExecutionMode: { app.setExecutionMode($0) },
+                onToggleAutoDelete: { app.setAutoDelete($0) },
+                onRegisterLoginItem: { app.registerLoginItem() },
                 onAddWhitelist: { app.addToWhitelist($0) },
                 onRemoveWhitelist: { app.removeFromWhitelist($0) }
             )

@@ -148,6 +148,11 @@ public struct PageModel: Sendable {
     public var scheduledTaskSlot: SemanticSlot?
     /// ③ 页：登录项是否需要用户去系统设置允许（决定是否给按钮）。
     public var needsLoginItemApproval: Bool = false
+    /// ③ 页：登录项是否处于「未注册」态（决定是否给「设为登录项」按钮）。
+    ///
+    /// 与 `needsLoginItemApproval` 平行：一个是 `.requiresApproval` 的动作，
+    /// 一个是 `.notRegistered` 的动作。两者互斥，都不会同时为真。
+    public var canRegisterLoginItem: Bool = false
 
     /// 页面顶部位置告警（Translocation：从 .dmg 直接运行 → 登录项会失效）。
     public var locationWarning: String?

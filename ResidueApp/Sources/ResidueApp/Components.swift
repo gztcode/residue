@@ -240,6 +240,13 @@ struct SecondaryButtonStyle: ButtonStyle {
 struct TokenSwitch: View {
     let isOn: Bool
     var enabled: Bool = true
+    /// 切换动作（`nil` = 纯展示，如离屏渲染稿）。
+    ///
+    /// 为什么要显式传一个闭包而不做成 `Binding<Bool>`：开关的「能不能开」
+    /// 由 `canLightUp` 决定，而「开了会发生什么」（记 `everEnabled`、持久化、
+    /// 重启排程）是 `AppModel.setAutoDelete` 的事。用回调让「点击 → 编排层」
+    /// 这条路径显式可见，`verify_a9.sh` 第九节才能 grep 到调用点。
+    var onToggle: ((Bool) -> Void)? = nil
 
     private let trackWidth: CGFloat = 34
     private let trackHeight: CGFloat = 19
@@ -260,6 +267,12 @@ struct TokenSwitch: View {
         }
         .frame(width: trackWidth, height: trackHeight)
         .opacity(enabled ? 1.0 : 0.45)
+        // 点击目标盖满开关本体（不是只给圆点），否则热区太小难点中
+        .contentShape(Rectangle())
+        .onTapGesture {
+            guard enabled, let onToggle else { return }
+            onToggle(!isOn)
+        }
         // 无动画：视觉基线 §六 明确「动效时长曲线」不在最小集内
     }
 

@@ -226,6 +226,10 @@ struct PolicyPage: View {
     var onOpenLoginSettings: () -> Void = {}
     /// 改执行方式（AC-03 四项之一）。
     var onSetExecutionMode: (ExecutionMode) -> Void = { _ in }
+    /// 点亮 / 关闭自动删除（AC-08 组 B）。接 `AppModel.setAutoDelete`。
+    var onToggleAutoDelete: (Bool) -> Void = { _ in }
+    /// 注册为登录项（`.notRegistered` 时给这个动作）。接 `AppModel.registerLoginItem`。
+    var onRegisterLoginItem: () -> Void = {}
     /// 加入 / 移出白名单（AC-03：用户唯一的主动保护动作）。
     var onAddWhitelist: (String) -> Void = { _ in }
     var onRemoveWhitelist: (String) -> Void = { _ in }
@@ -262,7 +266,8 @@ struct PolicyPage: View {
                         // 自建开关（系统 `.switch` 在离屏渲染下不可用，且不符合 token 约束）
                         TokenSwitch(
                             isOn: model.autoDeleteEnabled,
-                            enabled: model.canLightUp && !model.readOnly
+                            enabled: model.canLightUp && !model.readOnly,
+                            onToggle: onToggleAutoDelete
                         )
                     }
 
@@ -401,6 +406,12 @@ struct PolicyPage: View {
                                 // 只在 `.requiresApproval` 时给——其余三态给这个按钮
                                 // 等于把用户支使到一个解决不了问题的地方
                                 Button(L.pick("去系统设置允许", "Open System Settings")) { onOpenLoginSettings() }
+                                    .buttonStyle(SecondaryButtonStyle())
+                            }
+                            if model.canRegisterLoginItem {
+                                // `.notRegistered` 态：主动注册，把产品接上定时链。
+                                // 这是首启默认态唯一的出路——没有它，定时任务永不排程。
+                                Button(L.pick("设为登录项", "Add as Login Item")) { onRegisterLoginItem() }
                                     .buttonStyle(SecondaryButtonStyle())
                             }
                         }

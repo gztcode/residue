@@ -418,6 +418,31 @@ else
   bad "清除回调未接"
 fi
 
+# 自动删除开关必须真接上 setAutoDelete（原先：TokenSwitch 是纯绘图，无 onTapGesture）
+if grep -qF 'onTapGesture' "$UI_DIR/Components.swift" 2>/dev/null \
+   && grep -qF 'app.setAutoDelete(' "$UI_DIR/RootView.swift" 2>/dev/null; then
+  ok "③ 页自动删除开关已接 setAutoDelete（AC-08 组 B 有落点）"
+else
+  bad "自动删除开关未接 setAutoDelete（开关点不动 → 产品永不点亮）"
+fi
+
+# 登录项必须真接上 registerLoginItem（原先：.notRegistered 态无任何注册入口）
+if grep -qF 'app.registerLoginItem()' "$UI_DIR/RootView.swift" 2>/dev/null; then
+  ok "③ 页登录项注册已接 registerLoginItem（.notRegistered 态有出路）"
+else
+  bad "登录项注册无调用点 → 定时任务永不排程（ADR-02 链路断）"
+fi
+
+# 定时执行点必须真的会执行清理批次（AC-04「到达定时执行点」）
+# 原先：ScheduledRunner 的 work 闭包只调 runScan —— 扫完就停，从不删，
+# AC-04 在代码里没有落点。现在 work → scheduledWork（扫描 + 已点亮则 executeBatch）。
+if grep -qF 'scheduledWork' "$UI_DIR/AppModel.swift" 2>/dev/null \
+   && grep -qF 'await executeBatch()' "$UI_DIR/AppModel.swift" 2>/dev/null; then
+  ok "定时执行点已接 executeBatch（AC-04 有落点，扫描后已点亮则执行）"
+else
+  bad "定时执行点只扫描不执行（AC-04 无落点 → 自动删除永不被定时触发）"
+fi
+
 # ---------------------------------------------------------------------------
 echo ""
 echo "--- 十、L0 判定的契约常量（本机绿、CI 红那一类）---"

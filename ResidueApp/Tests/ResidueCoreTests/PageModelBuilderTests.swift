@@ -85,6 +85,49 @@ final class PageModelBuilderTests: XCTestCase {
         XCTAssertNil(m.previousRoundSlot, "只读态不得显示「上一轮」结算行")
     }
 
+    // MARK: - 登录项动作投影（ADR-02 四态）
+
+    /// `.notRegistered` → `canRegisterLoginItem`，且**只读态也如实投影**。
+    ///
+    /// 只读不等于可以假装定时任务在跑——登录项状态是系统真相，
+    /// 与「载体能不能结算」是两件事，所以这条不走 `canClearLogs = false` 那条路。
+    func testCanRegisterLoginItemProjectedinBothModes() {
+        // 正常态
+        let normal = PageModelBuilder.build(
+            PageModelBuilder.Input(
+                contents: makeContents(makeHeader()),
+                loginItem: .notRegistered
+            )
+        )
+        XCTAssertTrue(normal.canRegisterLoginItem, ".notRegistered 必须给注册入口")
+
+        // 只读态：仍然如实投影（只读不改变登录项的系统真相）
+        let ro = PageModelBuilder.build(
+            PageModelBuilder.Input(
+                contents: makeContents(makeHeader()),
+                readOnly: true,
+                loginItem: .notRegistered
+            )
+        )
+        XCTAssertTrue(ro.canRegisterLoginItem, "只读态也要如实投影 canRegisterLoginItem")
+    }
+
+    /// `.enabled` / `.requiresApproval` 都不得给注册按钮（动作互斥，见 LoginItemStateTests）。
+    func testCanRegisterLoginItemFalseForOtherStates() {
+        for state in [LoginItemState.enabled, .requiresApproval, .notFound] {
+            let m = PageModelBuilder.build(
+                PageModelBuilder.Input(
+                    contents: makeContents(makeHeader()),
+                    loginItem: state
+                )
+            )
+            XCTAssertFalse(
+                m.canRegisterLoginItem,
+                "\(state) 不应给「设为登录项」按钮"
+            )
+        }
+    }
+
     // MARK: - ② 候选：判定域决定参与度
 
     /// **判定域内的来源 = 可参与自动删除；`pipx` run = 仅报告**（AC-04 ②）。

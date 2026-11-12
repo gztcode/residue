@@ -43,4 +43,19 @@ public enum LoginItemState: Equatable, Sendable {
     public var needsUserApproval: Bool {
         self == .requiresApproval
     }
+
+    /// 是否该给出「设为登录项」的按钮（`.notRegistered` 态）。
+    ///
+    /// ## 为什么这个态必须有可执行动作
+    /// `.notRegistered` 是**首启默认态**。`ScheduledRunner.start` 对它直接 return
+    /// （ADR-02：非 enabled 不排程）→ 定时任务永不排 → 观察期轮次永不推进。
+    /// 界面上若只有一句「未注册为登录项」而没有任何动作，用户就**没有任何
+    /// 路径把产品接上定时链**——这是原先「登录项从不注册」的结构性根因。
+    ///
+    /// `.requiresApproval` 走「去系统设置」（系统已注册、只差用户允许）；
+    /// `.notRegistered` 走「设为登录项」（主动调 `SMAppService.register`）；
+    /// `.notFound` 需重装，两个按钮都不给。
+    public var canRegister: Bool {
+        self == .notRegistered
+    }
 }

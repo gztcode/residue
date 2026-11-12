@@ -151,6 +151,7 @@ var model = PageModel()
 
         model.scheduledTaskSlot = .text(input.loginItem.label)
             model.needsLoginItemApproval = input.loginItem.needsUserApproval
+            model.canRegisterLoginItem = input.loginItem.canRegister
             model.locationWarning = input.locationWarning
             return model
         }
@@ -234,6 +235,7 @@ var model = PageModel()
 
         model.scheduledTaskSlot = .text(input.loginItem.label)
         model.needsLoginItemApproval = input.loginItem.needsUserApproval
+        model.canRegisterLoginItem = input.loginItem.canRegister
         model.locationWarning = input.locationWarning
 
         model.policySlots = [
