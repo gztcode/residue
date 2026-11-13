@@ -263,6 +263,47 @@ final class RedactorTests: XCTestCase {
         XCTAssertTrue(joined.contains("<path>"), "home 也应被替换：\(joined)")
     }
 
+    // MARK: - 双语（段名双写、正文跟随界面语言）
+
+    /// 英文界面下导出的报告：**正文无中文**，但**段标记仍中英双写**。
+    ///
+    /// 为什么段标记不能跟着语言变：它同时是「五段齐全」自检的判据。
+    /// 若标记随语言变，自检在切换语言后就可能对不上 —— 同一份报告换个
+    /// 语言导出就判「缺段」。双写让两种语言都能定位，自检也稳定。
+    func testEnglishReportHasNoChineseBodyButBilingualMarkers() throws {
+        let previous = L.current
+        L.current = .en
+        defer { L.current = previous }
+
+        let text = try Redactor.render(makeReport(), context: context)
+
+        // 正文（表头 / 标题）必须是英文
+        XCTAssertTrue(text.contains("# Residue Redacted Diagnostic Report"))
+        XCTAssertTrue(text.contains("| Item | Value |"))
+        XCTAssertTrue(text.contains("### Evidence chain"))
+
+        // 段标记双写：五段都必须同时含中文名与英文名
+        for (zh, en) in [
+            ("① 环境", "Environment"), ("② 量", "Metrics"),
+            ("③ 取证", "Diagnostics"), ("④ 证据", "Evidence"),
+            ("⑤ 上游", "Upstream"),
+        ] {
+            XCTAssertTrue(text.contains(zh), "段标记应保留中文名：\(zh)")
+            XCTAssertTrue(text.contains(en), "段标记应保留英文名：\(en)")
+        }
+    }
+
+    /// 中文界面下：正文是中文（默认行为不变）。
+    func testChineseReportKeepsChineseBody() throws {
+        let previous = L.current
+        L.current = .zhHans
+        defer { L.current = previous }
+
+        let text = try Redactor.render(makeReport(), context: context)
+        XCTAssertTrue(text.contains("# Residue 脱敏诊断报告"))
+        XCTAssertTrue(text.contains("| 项 | 值 |"))
+    }
+
     /// **短串不作替换规则**（`needle.count >= 3` 的保护）。
     ///
     /// 用户名若只有 2 个字符（合法但少见），全局替换会把正常文本打烂
