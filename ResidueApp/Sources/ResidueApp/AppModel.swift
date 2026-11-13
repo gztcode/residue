@@ -104,6 +104,12 @@ final class AppModel {
         /// 本轮使用的来源根（`source.rawValue` → 根路径）。
         /// 执行期越界判定（AC-19）必须用**扫描时这一份**。
         var roots: [String: String] = [:]
+        /// **被中断来源的断点**（`source.rawValue` → 断点）。
+        ///
+        /// 只有**中断**的来源才有断点 —— 正常扫完的来源引擎返回 `nil`
+        /// （没有「未扫完的部分」，续扫无从谈起，也不该续）。
+        /// 收尾时整份落 `state/checkpoints.json`，供下次启动续扫。
+        var abortedCheckpoints: [String: ScanEngine.Checkpoint] = [:]
     }
 
     /// **当前扫描的进度**（供界面显示「在动」）。
@@ -128,6 +134,8 @@ final class AppModel {
     private var lastExecutionNotice: PageModel.ExecutionNotice?
     private let stateFile: StateFile
     private let writer: RecordWriter
+    /// 扫描断点（`state/checkpoints.json` · AC-20 断点续扫）。
+    private let checkpoints: CheckpointStore
     private let engine = ScanEngine()
     private let probe = UpstreamRunner()
 
@@ -156,10 +164,16 @@ final class AppModel {
     init(
         stateFile: StateFile = StateFile(),
         writer: RecordWriter = RecordWriter(),
-        preferencesStore: PreferencesStore? = nil
+        preferencesStore: PreferencesStore? = nil,
+        checkpoints: CheckpointStore? = nil
     ) {
         self.stateFile = stateFile
         self.writer = writer
+        // 断点落 `state/` 子目录（**不计入 N7 计量**，但计入 N7 清除范围），
+        // 与 `state/schedule.json` 同级 —— 见 R2 §5.5 / §10.3。
+        self.checkpoints = checkpoints ?? CheckpointStore(
+            directory: stateFile.directory.appendingPathComponent("state", isDirectory: true)
+        )
         self.preferencesStore = preferencesStore
             ?? PreferencesStore(directory: stateFile.directory)
         loadAndProject()
@@ -478,6 +492,33 @@ final class AppModel {
         let cancelBox = CancelBox()
         scanCancelBox = cancelBox
 
+        // ---- 断点续扫（AC-20 / R2 §5.5）----
+        //
+        // ⚠️ **断点此前从未落过盘**：引擎一直能生产它，但 `runScan` 把
+        // `result.checkpoint` 直接丢弃、日志里 `breakpointSaved` 写死 `false`。
+        // 于是进程一重启断点就没了 —— 用户取消/超时中断一次，13 秒要从头再来。
+        //
+        // `E-106`（断点不可信）→ **全量重扫**，不拿坏断点续。
+        let resumeCheckpoints: [String: ScanEngine.Checkpoint]
+        switch checkpoints.load() {
+        case .none:
+            resumeCheckpoints = [:]
+        case .usable(let cps):
+            resumeCheckpoints = cps
+        case .corrupt(let reason):
+            // 坏断点必须**如实告诉用户**并丢弃：拿它续扫会静默少算候选
+            // → `T` 偏小 → 门槛判据建立在错数上。
+            checkpoints.clear()
+            errorMessage = describe(.e106, detail: reason)
+            resumeCheckpoints = [:]
+        }
+        // 断点只在 `full` 模式下有意义：增量扫描本就只查已知候选，
+        // 拿全量断点去续会让「增量」静默变成「不扫」。
+        let usableCheckpoints = (mode == .full) ? resumeCheckpoints : [:]
+        // **非全量扫描不得沿用旧断点** —— 那份断点描述的是上次被中断的全量扫描，
+        // 与本次模式不符，续上去就是错。
+        if mode != .full { checkpoints.clear() }
+
         // ---- 进度轮询（**主 actor 上的定时器**）----
         //
         // 后台任务把进度写进 `cancelBox`，这里每 100 ms 取一次写进 `scanProgress`
@@ -521,6 +562,8 @@ final class AppModel {
                     let result = try engine.scan(
                         root: root,
                         mode: mode,
+                        // 续扫：该来源上次中断时的断点（没有则全量新扫）
+                        checkpoint: usableCheckpoints[sourceName],
                         // ---- 中止检查（AC-20：取消 5 s 内停 I/O）----
                         //
                         // ⚠️ **必须在引擎内部逐目录检查**，不能只在外层
@@ -550,6 +593,10 @@ final class AppModel {
                     job.results.append((sourceName, result))
                     job.filesScanned += result.filesScanned
                     job.candidatesFound += result.candidates.count
+                    // 中断的来源 → 带走它的断点，收尾时落盘（AC-20 可续扫）
+                    if let cp = result.checkpoint {
+                        job.abortedCheckpoints[sourceName] = cp
+                    }
                     if let ab = result.aborted, job.abortReason == nil {
                         job.abortReason = ab.rawValue
                     }
@@ -637,6 +684,31 @@ final class AppModel {
         // ---- 落盘（**必须真写**，否则 A-10 第 9 步不可达）----
         persist()
 
+        // ---- 断点落盘 / 清除（AC-20 可续扫）----
+        //
+        // 两条路互斥，且都**必须真落盘**：
+        //   · 有来源被中断 → 写 `state/checkpoints.json`（下次启动续扫）
+        //   · 全部正常完成 → 清除断点（没有「未扫完的部分」了）
+        //
+        // ⚠️ 此前这里恒为 `false`（断点被直接丢弃），所以「用户取消一次 →
+        // 重启后从头再来」：13 秒的扫描白跑。
+        var breakpointSaved = false
+        do {
+            if job.abortedCheckpoints.isEmpty {
+                checkpoints.clear()
+            } else {
+                try checkpoints.save(job.abortedCheckpoints)
+                breakpointSaved = true
+            }
+        } catch {
+            // 断点写不进去**不影响本次扫描结果**（候选已拿到），
+            // 但要让用户知道「这次中断的进度没保住」—— 不静默。
+            errorMessage = L.pick(
+                "断点未能保存，下次扫描将从全量开始：\(error.localizedDescription)",
+                "Couldn't save the checkpoint; the next scan will start from a full scan: \(error.localizedDescription)"
+            )
+        }
+
         // ---- 扫描日志（AC-19 唯一可判载体）----
         let record = ScanLogRecord(
             at: started,
@@ -646,7 +718,7 @@ final class AppModel {
             bytesScanned: bytesScanned,
             durationMs: Int(Date().timeIntervalSince(started) * 1000),
             aborted: job.abortReason,
-            breakpointSaved: false,
+            breakpointSaved: breakpointSaved,
             unknownCount: unknownCount,
             upstreamCommands: job.upstream,
             diagnostics: lastScanDiagnostics

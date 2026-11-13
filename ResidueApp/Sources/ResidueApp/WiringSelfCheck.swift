@@ -337,6 +337,96 @@ enum WiringSelfCheck {
         )
         check(cancelResult?.checkpoint != nil, "取消落断点（AC-20：重启后可续扫）")
 
+        print("\n--- 4c3. 断点落盘 → 重启 → 续扫（AC-20 · 进程重启后仍可续）---")
+        // §4c2 只验了「引擎会返回断点」；这一节验另一半：**断点真的落盘了**。
+        // 此前 `runScan` 把 `result.checkpoint` 直接丢弃、日志里
+        // `breakpointSaved` 写死 `false` → 进程一重启断点就没了。
+        //
+        // 走**完整 `AppModel` 路径**（不是直接调引擎）—— 落盘发生在
+        // `runScan` 收尾，那才是要验的接线点。
+        let resumeRoot = dir.appendingPathComponent("resumestate")
+        let resumeScan = resumeRoot.appendingPathComponent("scan")
+        let store = CheckpointStore(directory: resumeRoot.appendingPathComponent("state"))
+        // ⚠️ 树必须**大** —— 取消要在扫描途中打中，而主 actor 的轮询有开销。
+        // 实测：8000 条只要 **257 ms**，取消打不中（`aborted` 恒为 nil）；
+        // 200 × 300 = 60000 条约 2 s，留得出取消窗口。
+        try? FileManager.default.createDirectory(at: resumeScan, withIntermediateDirectories: true)
+        for d in 0..<200 {
+            let sub = resumeScan.appendingPathComponent("d\(d)")
+            try? FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
+            for f in 0..<300 {
+                try? Data(repeating: 0x33, count: 16)
+                    .write(to: sub.appendingPathComponent("f\(f)"))
+            }
+        }
+
+        /// 在**主 actor** 上跑一次扫描；`cancel: true` 时在扫描启动后取消它。
+        ///
+        /// ⚠️ 两个不能踩的坑：
+        /// 1. **不能用 `semaphore.wait()`** —— 那占住主线程，而 `runScan` 要在
+        ///    主 actor 上继续跑 → 自己等自己（实测 exit 137）。用 RunLoop 泵。
+        /// 2. **不能用 `scanProgress.filesScanned` 判「扫到多少了」** ——
+        ///    进度经「后台 → `cancelBox` → 主 actor 的 100 ms 定时器」回流，
+        ///    而本地树的扫描只要几十毫秒 → 定时器一次都没触发 → 进度永远不涨
+        ///    （实测：等 `filesScanned >= 2000` 永远等不到，取消一次都没打中）。
+        ///    `cancelScan()` 本身**不依赖进度**（直接写 `cancelBox`），
+        ///    所以判据用「`isScanning` 已置位」+ 让扫描跑一小段。
+        func runScanAndCancel(_ model: AppModel, cancel: Bool) {
+            var finished = false
+            Task { @MainActor in
+                await model.runScan(mode: .full)
+                finished = true
+            }
+            let deadline = Date().addingTimeInterval(120)
+            var sawScanning = false
+            var cancelled = false
+            var scanElapsed: TimeInterval = 0
+            while !finished, Date() < deadline {
+                if model.isScanning { sawScanning = true }
+                // 扫描启动后让它推进 50 ms（真扫到东西 → 断点里有内容），再取消。
+                if cancel, sawScanning, !cancelled, scanElapsed >= 0.05 {
+                    model.cancelScan()
+                    cancelled = true
+                }
+                RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+                scanElapsed += 0.01
+            }
+        }
+
+        // ---- ① 取消 → 断点必须落盘 ----
+        let cancelModel = AppModel(
+            stateFile: StateFile(directory: resumeRoot.appendingPathComponent("s1")),
+            writer: writer, checkpoints: store
+        )
+        cancelModel.sourceRootsOverride = [(Source.uvCache.rawValue, resumeScan.path)]
+        runScanAndCancel(cancelModel, cancel: true)
+
+        if case .usable(let savedCPs) = store.load() {
+            check(true, "取消后断点落在 state/checkpoints.json（此前从没落过盘）")
+            check(savedCPs[Source.uvCache.rawValue] != nil, "断点按来源分开存（uv_cache 一份）")
+
+            // ---- ② 「重启」：全新 AppModel + 同一 store → 正常扫完 ----
+            //
+            // 这次不取消。扫完后断点必须被**清除**（没有「未扫完的部分」了）。
+            let resumeModel = AppModel(
+                stateFile: StateFile(directory: resumeRoot.appendingPathComponent("s2")),
+                writer: RecordWriter(directory: resumeRoot.appendingPathComponent("s2/records")),
+                checkpoints: store
+            )
+            resumeModel.sourceRootsOverride = [(Source.uvCache.rawValue, resumeScan.path)]
+            runScanAndCancel(resumeModel, cancel: false)   // 不取消：这次要跑完
+
+            check(!resumeModel.isScanning, "续扫跑完了（未再被取消）")
+            if case .none = store.load() {
+                check(true, "正常扫完后断点被清除（没有未扫完的部分）")
+            } else {
+                check(false, "正常扫完后断点应被清除，否则下次会拿旧断点续扫")
+            }
+        } else {
+            check(false, "取消后断点应落在 state/checkpoints.json（此前从没落过盘）")
+            check(false, "断点按来源分开存（uv_cache 一份）")
+        }
+
         print("\n--- 4d. 执行路径的容量上限（AC-15 · 唯一真动用户文件的模块）---")
         // 这一节的存在理由：`executeBatch` 此前**一次都没被自检走过**，
         // 而它是唯一会把用户文件 rename 进废纸篓的路径。
