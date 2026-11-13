@@ -25,7 +25,7 @@ python3 scripts/verify_codes.py   # 错误码表 ↔ 文档一致性（11 项）
 ./scripts/verify_a9.sh            # 页面结构 + 界面禁算术 + 数据层接线 + 空实现（当前 80 项）
 swift run --disable-sandbox ResidueApp --verify-wiring /tmp/wiring   # 接线自检（真 IO 往返，当前 56 项）
 swift run --disable-sandbox ResidueApp --render-pages design-renders # 重渲染 16 张设计稿
-./scripts/make_app.sh             # 产出 build/Residue.app + .zip（无证书时 ad-hoc 签名）
+./scripts/make_app.sh             # 产出 build/Residue.app + Residue.app.dmg（无证书时 ad-hoc 签名）
 ./scripts/verify_a5.sh            # 产物结构校验（需先跑 make_app.sh）
 ```
 

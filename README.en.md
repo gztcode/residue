@@ -54,7 +54,8 @@ read-only scan ──→ 14-day shadow period ──→ gate evaluation ──�
 
 ## Install
 
-1. Download the latest `Residue.app.dmg` from [Releases](../../releases)
+1. Download the latest `Residue-<version>.dmg` from [Releases](../../releases)
+   (unnotarized builds carry `UNNOTARIZED` in the file name — **the name is the only claim people actually see**)
 2. Open the disk image and drag `Residue.app` into **Applications**
 3. Eject the image, then open Residue from Applications
 
@@ -87,7 +88,7 @@ Every release publishes a SHA-256. Compute it locally:
 
 ```bash
 cd ~/Downloads
-shasum -a 256 Residue.app.dmg
+shasum -a 256 Residue-*.dmg
 ```
 
 Compare character by character with the release notes. If they differ, don't open it — download again.

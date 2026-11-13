@@ -55,7 +55,8 @@
 
 ## 安装
 
-1. 从 [Releases](../../releases) 下载最新的 `Residue.app.dmg`
+1. 从 [Releases](../../releases) 下载最新的 `Residue-<版本号>.dmg`
+   （未公证的构建文件名里带 `UNNOTARIZED` —— **名字是唯一会被真正看见的声明**）
 2. 双击打开磁盘映像，把 `Residue.app` **拖进「应用程序」文件夹**
 3. 推出磁盘映像，在「应用程序」里双击打开
 
@@ -89,7 +90,7 @@ macOS 15 起对未公证的 App 会直接拒绝，需要手动放行一次：
 
 ```bash
 cd ~/Downloads
-shasum -a 256 Residue.app.dmg
+shasum -a 256 Residue-*.dmg
 ```
 
 把输出与 Releases 说明里的值**逐字符比对**。不一致就不要打开，重新下载。
