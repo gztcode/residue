@@ -14,6 +14,7 @@ final class PageModelBuilderTests: XCTestCase {
         countedDays: Int = 14,
         produced: Bool = true,
         autoDelete: Bool = false,
+        lastScanAt: Date? = nil,
         entries: [SourceHeaderEntry]? = nil
     ) -> StateHeader {
         var h = StateHeader()
@@ -21,6 +22,7 @@ final class PageModelBuilderTests: XCTestCase {
         h.countedDays = countedDays
         h.countedDaysCap = 14
         h.autoDeleteEnabled = autoDelete
+        h.lastScanAt = lastScanAt
         h.settlement = SettlementHeader(
             producedAt: produced ? Date(timeIntervalSince1970: 1_700_000_000) : nil,
             reportId: produced ? "r-1" : nil
@@ -284,6 +286,116 @@ final class PageModelBuilderTests: XCTestCase {
         XCTAssertEqual(m.overviewBlocks[2].slot.displayText, MetricUnit.formatBytes(0))
     }
 
+    // MARK: - 重启后：未知不是 0
+
+    /// 重启后（本会话未扫描）+ 能读到上次扫描的汇总：
+    /// **总量如实展示**（上次扫描的观测值），逐来源 / 候选 / 可释放量一律「—」。
+    ///
+    /// 这条是「重启后 0 KB」缺陷的回归测试：候选清单不落盘，重启后若照常聚合，
+    /// ① 页会显示 `0 B`、⑥ 页会显示 `0 条` —— 那些是「没有数据」，不是观测值。
+    func testRestartWithLastScanShowsTotalAndDashes() {
+        let scannedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let last = PageModelBuilder.LastScanSummary(
+            at: scannedAt,
+            bytes: 3_400_000_000,
+            files: 12_345,
+            sources: Source.allCases.map(\.rawValue)
+        )
+        let m = PageModelBuilder.build(
+            PageModelBuilder.Input(
+                contents: makeContents(makeHeader(lastScanAt: scannedAt)),
+                hasSessionScan: false,
+                lastScan: last
+            )
+        )
+
+        XCTAssertTrue(m.hasScanned, "有上次扫描的汇总 → 不该显示「还没有扫描过」")
+        XCTAssertTrue(m.restoredFromLastScan)
+        XCTAssertFalse(m.hasLiveScan, "本会话没扫过 → 不可执行批次")
+        XCTAssertEqual(m.lastScanNotice, UICopy.lastScanRestoredNotice)
+
+        // 总量 = 上次扫描的真实观测值
+        XCTAssertEqual(m.totalScannedSlot.displayText, MetricUnit.formatBytes(3_400_000_000))
+
+        // 逐来源 / 可释放 / 批次：全部「—」，不是 0
+        XCTAssertEqual(m.sourceShares.count, 3)
+        for row in m.sourceShares {
+            XCTAssertEqual(row.bytes.displayText, "—", "来源「\(row.displayName)」的字节未知")
+            XCTAssertEqual(row.itemCount.displayText, "—")
+            XCTAssertNil(row.share, "分母未知时不画占比")
+        }
+        XCTAssertEqual(m.overviewBlocks.count, 3)
+        XCTAssertEqual(m.overviewBlocks[0].slot.displayText, "—")
+        XCTAssertEqual(m.l1Confirmed.displayText, "—")
+        XCTAssertEqual(m.l2Inferred.displayText, "—")
+        XCTAssertEqual(m.deletableAmount.displayText, "—")
+        XCTAssertEqual(m.confirmItemCount.displayText, "—")
+        XCTAssertEqual(m.confirmBytes.displayText, "—")
+        XCTAssertEqual(m.deferredCountSlot.displayText, "—")
+        XCTAssertTrue(m.confirmRows.isEmpty)
+        XCTAssertNil(m.reclaimableShare)
+        XCTAssertTrue(m.candidateRows.isEmpty)
+        XCTAssertEqual(m.pageIndicatorSlot.displayText, "—")
+    }
+
+    /// 重启后、上次扫描的汇总也读不到（例如日志被「一键清除」）：
+    /// **连总量都不显示** —— 显示 0 会被读成「缓存是空的」。
+    func testRestartWithoutSummaryShowsDashes() {
+        let scannedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let m = PageModelBuilder.build(
+            PageModelBuilder.Input(
+                contents: makeContents(makeHeader(lastScanAt: scannedAt)),
+                hasSessionScan: false
+            )
+        )
+
+        XCTAssertTrue(m.hasScanned, "载体里有上次扫描时刻 → 不是「从未扫描」")
+        XCTAssertTrue(m.restoredFromLastScan)
+        XCTAssertEqual(m.totalScannedSlot.displayText, "—")
+        XCTAssertEqual(m.lastScanNotice, UICopy.lastScanSummaryUnavailable)
+        XCTAssertEqual(m.deletableAmount.displayText, "—")
+    }
+
+    /// 从未扫描：没有「上次扫描」，页面走空态；数值位仍是「—」而不是 0。
+    func testNeverScannedHasNoNumbers() {
+        let m = PageModelBuilder.build(
+            PageModelBuilder.Input(
+                contents: makeContents(makeHeader()),
+                hasSessionScan: false
+            )
+        )
+
+        XCTAssertFalse(m.hasScanned)
+        XCTAssertFalse(m.restoredFromLastScan)
+        XCTAssertNil(m.lastScanNotice, "从未扫描不需要「上次扫描」说明")
+        XCTAssertEqual(m.totalScannedSlot.displayText, "—")
+        XCTAssertEqual(m.deletableAmount.displayText, "—")
+    }
+
+    /// 本会话扫描过：照常聚合，重启逻辑**不得覆盖**真实数值。
+    func testSessionScanKeepsAggregates() {
+        let scannedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let m = PageModelBuilder.build(
+            PageModelBuilder.Input(
+                contents: makeContents(makeHeader(lastScanAt: scannedAt)),
+                candidates: [
+                    makeCandidate(path: "/uv/a", bytes: 1_000_000, source: .uvCache),
+                    makeCandidate(path: "/npm/b", bytes: 2_000_000, source: .npmNpx),
+                ],
+                hasSessionScan: true,
+                lastScan: PageModelBuilder.LastScanSummary(
+                    at: scannedAt, bytes: 999, files: 1, sources: []
+                )
+            )
+        )
+
+        XCTAssertTrue(m.hasLiveScan)
+        XCTAssertNil(m.lastScanNotice)
+        XCTAssertFalse(m.restoredFromLastScan)
+        XCTAssertEqual(m.totalScannedSlot.displayText, MetricUnit.formatBytes(3_000_000))
+        XCTAssertEqual(m.deletableAmount.displayText, "2条")
+    }
+
     /// **分页上限 200**（ADR-01：分页是渲染正确性）。
     func testPageSizeIsTwoHundred() {
         XCTAssertEqual(PageModelBuilder.pageSize, 200)
@@ -411,4 +523,150 @@ final class PageModelBuilderTests: XCTestCase {
         XCTAssertFalse(m.deferredCountSlot.displayText.isEmpty)
     }
 
+    // MARK: - 视觉基线 v2（CR-031）
+
+    /// ① 页来源占比：**分子分母都在 Core 算好**，视图只拿 `RatioSlot`。
+    func testSourceSharesArePrecomputed() {
+        let m = PageModelBuilder.build(
+            PageModelBuilder.Input(
+                contents: makeContents(makeHeader()),
+                candidates: [
+                    makeCandidate(path: "/uv/a", bytes: 600, source: .uvCache),
+                    makeCandidate(path: "/uv/b", bytes: 200, source: .uvCache),
+                    makeCandidate(path: "/npm/c", bytes: 200, source: .npmNpx),
+                ]
+            )
+        )
+
+        XCTAssertEqual(m.totalScannedSlot.displayText, MetricUnit.formatBytes(1000))
+
+        let uv = m.sourceShares.first { $0.sourceKey == Source.uvCache.rawValue }
+        XCTAssertEqual(uv?.itemCount.displayText, "2条")
+        XCTAssertEqual(uv?.bytes.displayText, MetricUnit.formatBytes(800))
+        XCTAssertEqual(uv?.share?.percentTenths, 800)
+        XCTAssertEqual(uv?.inDecisionDomain, true)
+
+        let pipx = m.sourceShares.first { $0.sourceKey == Source.pipxRun.rawValue }
+        XCTAssertEqual(pipx?.itemCount.displayText, "0条")
+        XCTAssertEqual(pipx?.share?.fraction, 0, "真的没有占用 = 0，不是 nil")
+        XCTAssertEqual(pipx?.inDecisionDomain, false)
+    }
+
+    /// 总量为 0 时，占比必须是 `nil`（**未知不等于 0**）。
+    func testSourceShareIsNilWhenTotalIsZero() {
+        let m = PageModelBuilder.build(
+            PageModelBuilder.Input(contents: makeContents(makeHeader()))
+        )
+        XCTAssertTrue(m.sourceShares.allSatisfy { $0.share == nil })
+        XCTAssertNil(m.reclaimableShare)
+    }
+
+    /// 可释放占比 = 可删除字节 / 全量扫描字节。
+    func testReclaimableShareUsesDeletableBytes() {
+        let m = PageModelBuilder.build(
+            PageModelBuilder.Input(
+                contents: makeContents(makeHeader()),
+                candidates: [
+                    makeCandidate(path: "/uv/a", bytes: 300, source: .uvCache),
+                    makeCandidate(path: "/pipx/b", bytes: 100, source: .pipxRun),
+                ]
+            )
+        )
+        // 可删除只含判定域（uv 300），总量 400 → 75.0%
+        XCTAssertEqual(m.reclaimableShare?.percentTenths, 750)
+    }
+
+    /// 观察期比例与「x / 14 天」文案**同源**。
+    func testObservationProgressIsRatioSlot() {
+        let m = PageModelBuilder.build(
+            PageModelBuilder.Input(
+                contents: makeContents(makeHeader(countedDays: 7, produced: false))
+            )
+        )
+        XCTAssertEqual(m.observationRatio?.numerator, 7)
+        XCTAssertEqual(m.observationRatio?.denominator, 14)
+        XCTAssertEqual(m.observationDaySlot.displayText, "7 / 14")
+    }
+
+    /// 门槛清单与 `canLightUp` **必须同源**：清单全过 ⇔ 可点亮。
+    func testGateChecklistAgreesWithCanLightUp() {
+        let qualified = PageModelBuilder.build(
+            PageModelBuilder.Input(contents: makeContents(makeHeader()))
+        )
+        XCTAssertTrue(qualified.canLightUp)
+        XCTAssertTrue(qualified.gateChecks.allSatisfy { $0.passed == true })
+        XCTAssertEqual(qualified.gateChecks.count, 6)
+
+        var failing = makeHeader()
+        failing.sources[0].K = 5   // 样本不足
+        let blocked = PageModelBuilder.build(
+            PageModelBuilder.Input(contents: makeContents(failing))
+        )
+        XCTAssertFalse(blocked.canLightUp)
+        let sample = blocked.gateChecks.first { $0.kind == .sample }
+        XCTAssertEqual(sample?.passed, false)
+    }
+
+    /// 未判定（`a` / `b` 都为 nil）的检查项是 `nil`，**不是 `false`**。
+    func testUndeterminedGateCheckIsNilNotFalse() {
+        var h = makeHeader()
+        h.sources[0].K = nil
+        h.sources[0].a = 0
+        h.sources[0].b = 0
+        let m = PageModelBuilder.build(
+            PageModelBuilder.Input(contents: makeContents(h))
+        )
+        let misses = m.gateChecks.first { $0.kind == .misses }
+        XCTAssertNil(misses?.passed, "「无法判定」不得显示成「未通过」")
+        XCTAssertFalse(m.canLightUp)
+    }
+
+    /// ⑥ 页预览清单：**只含判定域内候选**，且带来源键与占比。
+    func testConfirmRowsExcludeReportOnlySources() {
+        let m = PageModelBuilder.build(
+            PageModelBuilder.Input(
+                contents: makeContents(makeHeader()),
+                candidates: [
+                    makeCandidate(path: "/uv/a", bytes: 300, source: .uvCache),
+                    makeCandidate(path: "/pipx/b", bytes: 100, source: .pipxRun),
+                ]
+            )
+        )
+        XCTAssertEqual(m.confirmRows.map { $0.path }, ["/uv/a"])
+        XCTAssertEqual(m.confirmRows.first?.sourceKey, Source.uvCache.rawValue)
+        XCTAssertEqual(m.confirmRows.first?.share?.percentTenths, 750)
+    }
+
+    /// 只读态：**新增字段一个数值都不许露**（否则旧版本会显示假值）。
+    func testReadOnlyHidesAllNewNumericFields() {
+        let m = PageModelBuilder.build(
+            PageModelBuilder.Input(
+                contents: makeContents(makeHeader()),
+                candidates: [makeCandidate(path: "/uv/a", bytes: 300, source: .uvCache)],
+                readOnly: true
+            )
+        )
+        XCTAssertTrue(m.sourceShares.isEmpty)
+        XCTAssertTrue(m.gateChecks.isEmpty)
+        XCTAssertTrue(m.confirmRows.isEmpty)
+        XCTAssertTrue(m.sampleProgress.isEmpty)
+        XCTAssertNil(m.reclaimableShare)
+        XCTAssertNil(m.observationRatio)
+        XCTAssertEqual(m.totalScannedSlot, .unavailable(reason: UICopy.readOnlyNoSettlement))
+        XCTAssertEqual(m.observationDaySlot, .unavailable(reason: UICopy.readOnlyNoSettlement))
+    }
+
+    /// ⑤ 页逐来源样本进度：分子 = min(K, H)，分母 = H。
+    func testSampleProgressCapsAtThreshold() {
+        var h = makeHeader()
+        h.sources[0].K = 90   // H = 30 → 封顶 100%
+        h.sources[1].K = 15   // H = 30 → 50%
+        let m = PageModelBuilder.build(
+            PageModelBuilder.Input(contents: makeContents(h))
+        )
+        let uv = m.sampleProgress.first { $0.sourceKey == Source.uvCache.rawValue }
+        let npm = m.sampleProgress.first { $0.sourceKey == Source.npmNpx.rawValue }
+        XCTAssertEqual(uv?.ratio?.percentTenths, 1000)
+        XCTAssertEqual(npm?.ratio?.percentTenths, 500)
+    }
 }

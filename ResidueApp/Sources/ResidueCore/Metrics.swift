@@ -64,6 +64,18 @@ public enum Source: String, Codable, Sendable, CaseIterable {
         case .pipxRun: return "pipx run"
         }
     }
+
+    /// 规范缓存路径（**来源身份的一部分**，不是用户数据）。
+    ///
+    /// 只用于 ① 页来源明细表的「目录」列。扫描根由 `SourceRule` 决定，
+    /// 这里给的是用户能认出来的规范位置；两者不一致时以扫描记录为准。
+    public var canonicalCachePath: String {
+        switch self {
+        case .uvCache: return "~/.cache/uv"
+        case .npmNpx: return "~/.npm/_npx"
+        case .pipxRun: return "~/.local/pipx/venv"
+        }
+    }
 }
 
 // ---------- M1 · 观察期进度量 ----------
@@ -526,8 +538,173 @@ public struct SourceGateInput: Sendable {
     }
 }
 
+/// 门槛清单的六个检查项（CR-031）。
+///
+/// 顺序即界面顺序：**全局条件在前，逐来源条件在后**。
+public enum GateCheckKind: String, Sendable, CaseIterable {
+    case observation
+    case settlement
+    case decisionDomain
+    case sample
+    case misses
+    case checks
+
+    public var title: String {
+        switch self {
+        case .observation:
+            return L.pick("观察期已满 14 天", "Observation period reached 14 days")
+        case .settlement:
+            return L.pick("结算报告已产出", "Settlement report produced")
+        case .decisionDomain:
+            return L.pick("判定域非空", "Decision domain is not empty")
+        case .sample:
+            return L.pick("样本 K ≥ 门槛 H", "Samples K ≥ threshold H")
+        case .misses:
+            return L.pick("L0 误判 a = 0", "L0 misjudgments a = 0")
+        case .checks:
+            return L.pick("L0 检查 b ≥ 1", "L0 checks b ≥ 1")
+        }
+    }
+}
+
 /// AC-08 组 A / 组 B 的判定（**唯一定义处**）。
 public enum GateEvaluator {
+
+    /// 门槛清单（**组 B 的展示投影**）。
+    ///
+    /// ## 为什么它必须和 `isQualified` 同源
+    /// 界面上「五个勾是否全绿」与「开关能不能点亮」必须是**同一个判定**。
+    /// 若各写一遍，迟早出现「清单全绿但开关是灰的」——那会让用户
+    /// 以为产品坏了，而且没有错误可看。
+    ///
+    /// 所以 `isQualified` 直接由本清单推导：**全部 `passed == true`**。
+    ///
+    /// `passed == nil` = 无法判定（未结算 / 未取得 FDA / 数据缺失）。
+    /// 它**不是失败**：界面用中性色 + 时钟，而不是红叉。
+    public static func checklist(
+        progress: ObservationProgress,
+        settlementProduced: Bool,
+        sources: [SourceGateInput]
+    ) -> [GateCheckRow] {
+        let domain = sources.filter { $0.source.isInDecisionDomain }
+
+        let observation = GateCheckRow(
+            kind: .observation,
+            passed: progress.isDayQuotaReached,
+            detail: .ratio(progress.displayCountedDays, ObservationProgress.requiredDays)
+        )
+
+        let settlement = GateCheckRow(
+            kind: .settlement,
+            passed: settlementProduced,
+            detail: .text(
+                settlementProduced
+                    ? L.pick("已产出", "Produced")
+                    : L.pick("未产出", "Not produced")
+            )
+        )
+
+        let domainRow = GateCheckRow(
+            kind: .decisionDomain,
+            passed: !domain.isEmpty,
+            detail: .metric(domain.count, unit: .items)
+        )
+
+        // ---- 样本：取最差来源 ----
+        var sampleUnknown = false
+        var worstSample: (source: Source, k: Int, h: Int)?
+        for input in domain {
+            guard let k = input.attributable, let t = input.total else {
+                sampleUnknown = true
+                continue
+            }
+            let h = Threshold.h(forTotal: t)
+            if let current = worstSample {
+                // 比较「达标程度」：k/h 越小越差；h = 0 时视为已达标
+                let currentScore = current.h == 0 ? Double.greatestFiniteMagnitude
+                                                  : Double(current.k) / Double(current.h)
+                let newScore = h == 0 ? Double.greatestFiniteMagnitude
+                                      : Double(k) / Double(h)
+                if newScore < currentScore {
+                    worstSample = (input.source, k, h)
+                }
+            } else {
+                worstSample = (input.source, k, h)
+            }
+        }
+        let samplePassed: Bool?
+        if let worst = worstSample, worst.k < worst.h {
+            samplePassed = false
+        } else if sampleUnknown || worstSample == nil {
+            // `worstSample == nil` 且 domain 非空 = 所有来源都缺 K/T → 无法判定
+            samplePassed = nil
+        } else {
+            samplePassed = true
+        }
+        let sampleDetail: SemanticSlot
+        if let worst = worstSample,
+           let ratio = RatioSlot(numerator: Swift.min(worst.k, worst.h), denominator: worst.h) {
+            sampleDetail = .ratio(ratio.numerator, ratio.denominator)
+        } else {
+            sampleDetail = .unavailable(reason: UICopy.notSettledThisRound)
+        }
+        let sampleRow = GateCheckRow(
+            kind: .sample,
+            passed: samplePassed,
+            subject: worstSample?.source.displayName,
+            detail: sampleDetail
+        )
+
+        // ---- L0 误判 / 检查：逐来源取最差 ----
+        var missesUnknown = false
+        var worstMiss: (source: Source, value: Int)?
+        var checksUnknown = false
+        var worstCheck: (source: Source, value: Int)?
+        for input in domain {
+            if input.undetermined {
+                missesUnknown = true
+                checksUnknown = true
+                continue
+            }
+            if let a = input.missCount {
+                if worstMiss == nil || a > worstMiss!.value {
+                    worstMiss = (input.source, a)
+                }
+            } else {
+                missesUnknown = true
+            }
+            if let b = input.checkCount {
+                if worstCheck == nil || b < worstCheck!.value {
+                    worstCheck = (input.source, b)
+                }
+            } else {
+                checksUnknown = true
+            }
+        }
+        let missPassed: Bool? = (worstMiss?.value ?? 0) != 0
+            ? false
+            : (missesUnknown || worstMiss == nil ? nil : true)
+        let checkPassed: Bool? = (worstCheck?.value ?? 1) == 0
+            ? false
+            : (checksUnknown || worstCheck == nil ? nil : true)
+
+        let missRow = GateCheckRow(
+            kind: .misses,
+            passed: missPassed,
+            subject: worstMiss?.source.displayName,
+            detail: worstMiss.map { .metric($0.value, unit: .times) }
+                ?? .unavailable(reason: L.pick("本轮未判定", "Not judged this round"))
+        )
+        let checkRow = GateCheckRow(
+            kind: .checks,
+            passed: checkPassed,
+            subject: worstCheck?.source.displayName,
+            detail: worstCheck.map { .metric($0.value, unit: .times) }
+                ?? .unavailable(reason: L.pick("本轮未判定", "Not judged this round"))
+        )
+
+        return [observation, settlement, domainRow, sampleRow, missRow, checkRow]
+    }
 
     /// 组 A：未达项集合（与实际不满足项全等）。
     ///
@@ -580,17 +757,12 @@ public enum GateEvaluator {
         settlementProduced: Bool,
         sources: [SourceGateInput]
     ) -> Bool {
-        let domain = sources.filter { $0.source.isInDecisionDomain }
-        guard !domain.isEmpty else { return false }
-        guard settlementProduced, progress.isDayQuotaReached else { return false }
-        for input in domain {
-            if input.undetermined { return false }
-            guard let k = input.attributable, let t = input.total else { return false }
-            if k < Threshold.h(forTotal: t) { return false }
-            guard let a = input.missCount, a == 0 else { return false }
-            guard let b = input.checkCount, b >= 1 else { return false }
-        }
-        return true
+        // **同一实现**：清单全绿 ⇔ 可点亮。见 `checklist(...)` 的注释。
+        checklist(
+            progress: progress,
+            settlementProduced: settlementProduced,
+            sources: sources
+        ).allSatisfy { $0.passed == true }
     }
 }
 

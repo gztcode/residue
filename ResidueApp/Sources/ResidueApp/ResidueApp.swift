@@ -44,26 +44,24 @@ struct ResidueApp: App {
 
     var body: some Scene {
         // ---- 菜单栏常驻 ----
-        MenuBarExtra("Residue", systemImage: "internaldrive") {
-            Button(L.pick("打开主界面…", "Open main window…")) {
-                openWindow(id: "main")
-                NSApp.activate(ignoringOtherApps: true)
-            }
-            .keyboardShortcut("o")
-
-            Divider()
-
-            Text(L.pick("本机 · 零外发", "On-device · No outbound"))
-                .font(.caption)
-
-            Divider()
-
-            Button(L.pick("退出", "Quit")) {
-                NSApplication.shared.terminate(nil)
-            }
-            .keyboardShortcut("q")
+        // `.window` 浮层：菜单栏里直接给出占用 / 可释放 / 观察期，
+        // 不再要求用户「先打开主窗口才知道现在什么状态」（CR-031 §四）。
+        MenuBarExtra {
+            MenuBarPopover(
+                model: app.pageModel,
+                isScanning: app.isScanning,
+                onOpen: {
+                    openWindow(id: "main")
+                    NSApp.activate(ignoringOtherApps: true)
+                },
+                onScan: {
+                    Task { await app.runScan() }
+                }
+            )
+        } label: {
+            Label("Residue", systemImage: "internaldrive")
         }
-        .menuBarExtraStyle(.menu)
+        .menuBarExtraStyle(.window)
 
         // ---- 主窗口（七页）----
         Window("Residue", id: "main") {

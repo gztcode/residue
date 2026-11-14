@@ -23,18 +23,59 @@ extension PageModel {
             OverviewBlock(title: "npm/_npx", slot: .metric(860_000_000, unit: .bytes)),
             OverviewBlock(title: "pipx run", slot: .metric(140_000_000, unit: .bytes)),
         ]
+        // 总量与来源占比：**与上面三区块逐项相加自洽**（2400 + 860 + 140 = 3400 MB）
+        let totalBytes = 3_400_000_000
+        m.totalScannedSlot = .metric(totalBytes, unit: .bytes)
+        m.sourceShares = [
+            SourceShareRow(
+                sourceKey: Source.uvCache.rawValue,
+                displayName: "uv cache",
+                path: Source.uvCache.canonicalCachePath,
+                itemCount: .metric(1_240, unit: .items),
+                bytes: .metric(2_400_000_000, unit: .bytes),
+                share: RatioSlot(numerator: 2_400_000_000, denominator: totalBytes),
+                inDecisionDomain: true
+            ),
+            SourceShareRow(
+                sourceKey: Source.npmNpx.rawValue,
+                displayName: "npm/_npx",
+                path: Source.npmNpx.canonicalCachePath,
+                itemCount: .metric(430, unit: .items),
+                bytes: .metric(860_000_000, unit: .bytes),
+                share: RatioSlot(numerator: 860_000_000, denominator: totalBytes),
+                inDecisionDomain: true
+            ),
+            SourceShareRow(
+                sourceKey: Source.pipxRun.rawValue,
+                displayName: "pipx run",
+                path: Source.pipxRun.canonicalCachePath,
+                itemCount: .metric(28, unit: .items),
+                bytes: .metric(140_000_000, unit: .bytes),
+                share: RatioSlot(numerator: 140_000_000, denominator: totalBytes),
+                inDecisionDomain: false
+            ),
+        ]
+        m.observationRatio = RatioSlot(numerator: 14, denominator: ObservationProgress.requiredDays)
+        m.observationDaySlot = .ratio(14, ObservationProgress.requiredDays)
 
-        // ② 候选行
+        // ② 候选行（`share` 的分母与 ① 页总占用一致）
         m.candidateRows = [
             CandidateRow(name: "uv/archive-v0/3f9a…", participation: .autoDeletable,
-                         bytes: .metric(180_000_000, unit: .bytes)),
+                         bytes: .metric(180_000_000, unit: .bytes),
+                         sourceKey: Source.uvCache.rawValue,
+                         share: RatioSlot(numerator: 180_000_000, denominator: totalBytes)),
             CandidateRow(name: "npm/_npx/9c1b…", participation: .autoDeletable,
-                         bytes: .metric(64_000_000, unit: .bytes)),
+                         bytes: .metric(64_000_000, unit: .bytes),
+                         sourceKey: Source.npmNpx.rawValue,
+                         share: RatioSlot(numerator: 64_000_000, denominator: totalBytes)),
             CandidateRow(name: "pipx/venvs/tool-a", participation: .reportOnly,
-                         bytes: .metric(52_000_000, unit: .bytes)),
+                         bytes: .metric(52_000_000, unit: .bytes),
+                         sourceKey: Source.pipxRun.rawValue,
+                         share: RatioSlot(numerator: 52_000_000, denominator: totalBytes)),
         ]
         m.pageIndex = 0
         m.pageCount = 1
+        m.pageIndicatorSlot = .text(L.pick("第 1 / 1 页", "Page 1 / 1"))
 
         // ③ 未达项（M1 第一串，带轮次）+ 剩余天数
         // 定时任务状态（登录项四态之一）——**样例必须与构造器的结构对齐**，
@@ -53,6 +94,48 @@ extension PageModel {
         m.unmetNotice = .text(
             UICopy.unmetSampleInsufficient(round: 2, sample: 27, threshold: 30)
         )
+        // 门槛清单（CR-031）：**与 canLightUp / 未达项逐条自洽** ——
+        // 观察期已满、报告已产出、判定域非空、误判 0；唯一未过的是样本 27/30。
+        m.gateChecks = [
+            GateCheckRow(kind: .observation, passed: true,
+                         detail: .ratio(14, ObservationProgress.requiredDays)),
+            GateCheckRow(kind: .settlement, passed: true,
+                         detail: .text(L.pick("已产出", "Produced"))),
+            GateCheckRow(kind: .decisionDomain, passed: true,
+                         detail: .metric(2, unit: .items)),
+            GateCheckRow(kind: .sample, passed: false, subject: "uv cache",
+                         detail: .ratio(27, 30)),
+            GateCheckRow(kind: .misses, passed: true, subject: "uv cache",
+                         detail: .metric(0, unit: .times)),
+            GateCheckRow(kind: .checks, passed: true, subject: "npm/_npx",
+                         detail: .metric(12, unit: .times)),
+        ]
+        m.sampleProgress = [
+            SampleProgressRow(
+                sourceKey: Source.uvCache.rawValue,
+                displayName: "uv cache",
+                ratio: RatioSlot(numerator: 27, denominator: 30),
+                sample: .metric(27, unit: .items),
+                threshold: .metric(30, unit: .none),
+                passed: false
+            ),
+            SampleProgressRow(
+                sourceKey: Source.npmNpx.rawValue,
+                displayName: "npm/_npx",
+                ratio: RatioSlot(numerator: 30, denominator: 30),
+                sample: .metric(30, unit: .items),
+                threshold: .metric(30, unit: .none),
+                passed: true
+            ),
+            SampleProgressRow(
+                sourceKey: Source.pipxRun.rawValue,
+                displayName: "pipx run",
+                ratio: nil,
+                sample: .metric(0, unit: .items),
+                threshold: .text(L.pick("不适用", "N/A")),
+                passed: nil
+            ),
+        ]
         m.remainingDays = .duration(days: 0)   // 观察期已满 → 14 − 14 = 0（此时「0 天」是正确值）
         m.policySlots = [
             (L.pick("首次上限（5 GB 与来源 10% 取小）", "First-run cap (lesser of 5 GB and 10% of source)"), .metric(5_000_000_000, unit: .bytes)),
@@ -74,9 +157,12 @@ extension PageModel {
         m.itemCapSlot = .metric(200, unit: .items)
         m.whitelist = ["~/.cache/uv/archive-v0/pinned"]
 
-        m.l1Confirmed = .metric(12, unit: .items)
-        m.l2Inferred = .metric(3, unit: .items)   // 注入非零，验证不并入可删除量
-        m.deletableAmount = .metric(12, unit: .items)
+        // L1 / L2 / 可删除量：**与 ⑥ 批次（2 条 / 244 MB）自洽**。
+        // L1 = 本次可确认删除的 2 条；L2 单列 1 条且**不并入**可删除量（AC-02）。
+        m.l1Confirmed = .metric(2, unit: .items)
+        m.l2Inferred = .metric(1, unit: .items)
+        m.deletableAmount = .metric(2, unit: .items)
+        m.reclaimableShare = RatioSlot(numerator: 244_000_000, denominator: totalBytes)
 
         // 四档采集与授权（AC-10 / AC-11 / AC-14）
         m.collectionTiers = [
@@ -149,6 +235,21 @@ extension PageModel {
         //    现改为：2 条（两个 autoDeletable）/ 244 MB（180+64）。
         m.confirmItemCount = .metric(2, unit: .items)
         m.confirmBytes = .metric(244_000_000, unit: .bytes)
+        m.confirmRows = [
+            ConfirmItemRow(
+                path: "uv/archive-v0/3f9a…",
+                sourceKey: Source.uvCache.rawValue,
+                bytes: .metric(180_000_000, unit: .bytes),
+                share: RatioSlot(numerator: 180_000_000, denominator: totalBytes)
+            ),
+            ConfirmItemRow(
+                path: "npm/_npx/9c1b…",
+                sourceKey: Source.npmNpx.rawValue,
+                bytes: .metric(64_000_000, unit: .bytes),
+                share: RatioSlot(numerator: 64_000_000, denominator: totalBytes)
+            ),
+        ]
+        m.confirmListTruncated = false
 
         // ⑦
         // 举证链八字段（AC-18）

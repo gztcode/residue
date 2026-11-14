@@ -65,6 +65,75 @@ public enum Page: Int, CaseIterable, Identifiable, Sendable {
         case .evidence: return "doc.text.magnifyingglass"
         }
     }
+
+    /// 侧栏分组（CR-031 §一 #15）。
+    public var group: PageGroup {
+        switch self {
+        case .overview, .environments, .report: return .see
+        case .policy, .confirm, .evidence: return .reclaim
+        case .privacy: return .settings
+        }
+    }
+}
+
+/// 导航分组：先看清、再回收、最后设置。
+public enum PageGroup: Int, CaseIterable, Sendable {
+    case see = 0
+    case reclaim = 1
+    case settings = 2
+
+    public var title: String {
+        switch self {
+        case .see: return L.pick("看清", "Understand")
+        case .reclaim: return L.pick("回收", "Reclaim")
+        case .settings: return L.pick("设置", "Settings")
+        }
+    }
+}
+
+// MARK: - 比例槽位（CR-031）
+
+/// 0…1 比例（**视图唯一允许的比例来源**）。
+///
+/// ## 为什么不能直接把两个数交给视图
+/// 「界面禁止算术」要求视图拿不到原料。进度条需要的是**比例**，不是
+/// 「27 / 30」这串文字。若把分子分母交给视图，视图就会写 `Double(a) / Double(b)`
+/// —— 契约里立刻多出第二个算式。
+///
+/// ## `nil` 不是 0
+/// 分母 ≤ 0 时比例**无定义**（例：总量为 0 时的「占比」）。
+/// 此时构造返回 `nil`，界面画空轨道 + 「—」，**不画 0%**。
+/// 分子为 0 是**真实值**（这一来源确实没占用），照常返回 0。
+///
+/// 分子可以大于分母（`K` 是门槛的下界，可以超过 `H`），
+/// `fraction` 封顶 1.0，进度条不会越界。
+public struct RatioSlot: Sendable, Equatable {
+    public let numerator: Int
+    public let denominator: Int
+
+    /// - Returns: 分母 ≤ 0 或分子 < 0 时 `nil`。
+    public init?(numerator: Int, denominator: Int) {
+        guard denominator > 0, numerator >= 0 else { return nil }
+        self.numerator = numerator
+        self.denominator = denominator
+    }
+
+    /// 0…1（Core 侧算好，视图只做 `CGFloat` 转换）。
+    public var fraction: Double {
+        Swift.min(1.0, Double(numerator) / Double(denominator))
+    }
+
+    /// 千分之一百分比：`452` = 45.2%。
+    ///
+    /// 用整数存，避免 `Double` 在等值断言里出现浮点噪声。
+    public var percentTenths: Int {
+        Int((fraction * 1000).rounded())
+    }
+
+    /// 呈现用百分比槽位（**唯一格式化处**，界面不再拼 `%`）。
+    public var percentSlot: SemanticSlot {
+        .percent(tenths: percentTenths)
+    }
 }
 
 // MARK: - 页面模型
@@ -83,11 +152,50 @@ public struct PageModel: Sendable {
     /// ① 页状态条。
     public var statusSlot: SemanticSlot?
 
+    // ---- 扫描新鲜度（重启后不把「不知道」显示成 0）----
+
+    /// 是否有扫描结果可展示（本会话扫描过，或读回了上次扫描）。
+    ///
+    /// `false` → ① 页显示「还没有扫描过」；**任何数值都不显示**。
+    public var hasScanned: Bool = true
+    /// 当前数值是否来自**上次扫描**（本会话尚未扫描）。
+    ///
+    /// 为 `true` 时只有总量可信：来源明细、候选、可释放量都是「—」。
+    public var restoredFromLastScan: Bool = false
+    /// 重启 / 汇总不可读时的说明（`nil` = 数值来自本会话扫描）。
+    public var lastScanNotice: String?
+
+    /// 本会话是否有**可执行的**扫描结果（视图据此禁用「执行本批次」）。
+    public var hasLiveScan: Bool { hasScanned && !restoredFromLastScan }
+
+    // ---- 视觉基线 v2（CR-031）：数据可视化所需的**已算好**字段 ----
+
+    /// ① 页主数字：全部来源合计字节。
+    public var totalScannedSlot: SemanticSlot = .metric(0, unit: .bytes)
+    /// ① 页来源占比行（堆叠条 + 明细表）。
+    public var sourceShares: [SourceShareRow] = []
+    /// ① 页「可释放 / 全量」比例；总量为 0 时 `nil`。
+    public var reclaimableShare: RatioSlot?
+    /// 观察期进度（侧栏 / ① 页 / ⑤ 页**共用同一个比例**）。
+    public var observationRatio: RatioSlot?
+    /// 「x / 14 天」——**唯一格式化处**（视图不再拼「天」之外的数）。
+    public var observationDaySlot: SemanticSlot = .ratio(0, ObservationProgress.requiredDays)
+    /// ⑤ 页门槛清单；`passed == nil` 表示**无法判定**（不是未通过）。
+    public var gateChecks: [GateCheckRow] = []
+    /// ⑤ 页逐来源样本进度条。
+    public var sampleProgress: [SampleProgressRow] = []
+    /// ⑥ 页批次预览清单（**只读，不可勾选**；见 CR-031 §三）。
+    public var confirmRows: [ConfirmItemRow] = []
+    /// ⑥ 页预览是否因上限被截断。
+    public var confirmListTruncated: Bool = false
+
     /// ② 页候选行。
     public var candidateRows: [CandidateRow] = []
     /// ② 页当前页码（0 起）与总页数。
     public var pageIndex: Int = 0
     public var pageCount: Int = 1
+    /// ② 页页码文案（**唯一格式化处**，视图不再做 `pageIndex + 1`）。
+    public var pageIndicatorSlot: SemanticSlot = .text("—")
 
     /// ③ 页：自动删除开关当前是否处于「已启用」。
     public var autoDeleteEnabled: Bool = false
@@ -287,16 +395,138 @@ public struct CandidateRow: Identifiable, Sendable {
     /// `nil` = 未被阻断。
     public let blockReason: SemanticSlot?
 
+    /// 来源键（`Source.rawValue`）：视图据此取**来源识别色**。
+    /// 默认空串 = 未知来源（视图画中性圆点，不猜颜色）。
+    public let sourceKey: String
+    /// 该条目占全量扫描字节的比例。
+    ///
+    /// 只用于② 页占比条；总量为 0 时 `nil`（不画 0%）。
+    public let share: RatioSlot?
+
     public init(
         name: String,
         participation: CandidateParticipation,
         bytes: SemanticSlot,
-        blockReason: SemanticSlot? = nil
+        blockReason: SemanticSlot? = nil,
+        sourceKey: String = "",
+        share: RatioSlot? = nil
     ) {
         self.name = name
         self.participation = participation
         self.bytes = bytes
         self.blockReason = blockReason
+        self.sourceKey = sourceKey
+        self.share = share
+    }
+}
+
+// MARK: - v2 行类型（CR-031）
+
+/// ① 页来源明细行。
+public struct SourceShareRow: Identifiable, Sendable {
+    /// 稳定身份 = 来源键。
+    public var id: String { sourceKey }
+    /// `Source.rawValue`（视图映射识别色；不使用展示名做键）。
+    public let sourceKey: String
+    public let displayName: String
+    /// 规范缓存路径（来源身份的一部分，不是用户数据）。
+    public let path: String
+    public let itemCount: SemanticSlot
+    public let bytes: SemanticSlot
+    /// 占全量字节的比例；总量为 0 时 `nil`。
+    public let share: RatioSlot?
+    public let inDecisionDomain: Bool
+
+    public init(
+        sourceKey: String,
+        displayName: String,
+        path: String,
+        itemCount: SemanticSlot,
+        bytes: SemanticSlot,
+        share: RatioSlot?,
+        inDecisionDomain: Bool
+    ) {
+        self.sourceKey = sourceKey
+        self.displayName = displayName
+        self.path = path
+        self.itemCount = itemCount
+        self.bytes = bytes
+        self.share = share
+        self.inDecisionDomain = inDecisionDomain
+    }
+}
+
+/// ⑤ 页一条门槛检查。
+public struct GateCheckRow: Identifiable, Sendable {
+    public var id: String { kind.rawValue }
+    public let kind: GateCheckKind
+    /// `true` = 通过，`false` = 未通过，`nil` = **无法判定**。
+    ///
+    /// `nil` 在界面上必须是中性色 + 时钟图标，**不得显示成失败**。
+    public let passed: Bool?
+    /// 这一项针对的对象（最差来源名）；全局项为 `nil`。
+    public let subject: String?
+    /// 已格式化好的明细（比例 / 次数），视图不换算。
+    public let detail: SemanticSlot
+
+    public init(
+        kind: GateCheckKind,
+        passed: Bool?,
+        subject: String? = nil,
+        detail: SemanticSlot
+    ) {
+        self.kind = kind
+        self.passed = passed
+        self.subject = subject
+        self.detail = detail
+    }
+}
+
+/// ⑤ 页逐来源样本进度。
+public struct SampleProgressRow: Identifiable, Sendable {
+    public var id: String { sourceKey }
+    public let sourceKey: String
+    public let displayName: String
+    /// `min(K, H) / H`；未结算 / 无门槛时 `nil`。
+    public let ratio: RatioSlot?
+    /// `K`（未结算 → `.unavailable`）。
+    public let sample: SemanticSlot
+    /// `H`（未取快照 → `.unavailable`）。
+    public let threshold: SemanticSlot
+    /// `nil` = 无法判定。
+    public let passed: Bool?
+
+    public init(
+        sourceKey: String,
+        displayName: String,
+        ratio: RatioSlot?,
+        sample: SemanticSlot,
+        threshold: SemanticSlot,
+        passed: Bool?
+    ) {
+        self.sourceKey = sourceKey
+        self.displayName = displayName
+        self.ratio = ratio
+        self.sample = sample
+        self.threshold = threshold
+        self.passed = passed
+    }
+}
+
+/// ⑥ 页批次预览行（**只读**：没有 `isSelected`，见 CR-031 §三）。
+public struct ConfirmItemRow: Identifiable, Sendable {
+    public var id: String { path }
+    public let path: String
+    public let sourceKey: String
+    public let bytes: SemanticSlot
+    /// 占全量字节的比例。
+    public let share: RatioSlot?
+
+    public init(path: String, sourceKey: String, bytes: SemanticSlot, share: RatioSlot?) {
+        self.path = path
+        self.sourceKey = sourceKey
+        self.bytes = bytes
+        self.share = share
     }
 }
 

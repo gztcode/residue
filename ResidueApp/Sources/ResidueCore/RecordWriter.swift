@@ -234,6 +234,40 @@ public struct RecordWriter: Sendable {
         return out
     }
 
+    /// 读**最近一条完整扫描**（`aborted == nil`）的汇总。
+    ///
+    /// ## 为什么重启后要读它
+    /// 候选清单按契约**不落盘**（`state.residue` 不含文件名清单），所以重启后
+    /// 无法还原「逐来源 / 逐条目」的数值。但 `scan.jsonl` 里有一行完整的汇总
+    /// （`bytesScanned` / `filesScanned`），可以如实展示「上次扫描的总量」——
+    /// 这比显示 `0 B` 正确：**未知不等于 0**。
+    ///
+    /// - 从文件尾部往前找，坏行跳过（日志是追加写的，末行可能只写了一半）；
+    /// - 跳过 `aborted` 行：中止扫描的字节数是**部分值**，不能当总量。
+    ///
+    /// - Returns: 找不到完整记录时 `nil`（**不是** 0 字节的汇总）。
+    public func lastCompletedScanRecord() -> ScanLogRecord? {
+        let target = url(for: .scan)
+        guard FileManager.default.fileExists(atPath: target.path),
+              let text = try? String(contentsOf: target, encoding: .utf8)
+        else { return nil }
+
+        let decoder = JSONDecoder()
+        // **必须与 `append` 的 `.iso8601` 成对**：不对称会让解码永远失败，
+        // 且完全静默（本仓库踩过这个坑，见 CLAUDE.md §七 第 6 条）。
+        decoder.dateDecodingStrategy = .iso8601
+
+        for line in text.split(separator: "\n", omittingEmptySubsequences: true).reversed() {
+            guard let record = try? decoder.decode(
+                ScanLogRecord.self,
+                from: Data(line.utf8)
+            ) else { continue }
+            guard record.aborted == nil else { continue }
+            return record
+        }
+        return nil
+    }
+
     /// 记录目录内全部 `.jsonl` 的字节合计（M6 的「可回收字节」的**被减项基础**）。
     ///
     /// ⚠️ 这只是**总字节**；`可回收字节 = 总字节 − 14 日内执行记录字节`

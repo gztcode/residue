@@ -241,6 +241,43 @@ final class UpstreamAndRecordTests: XCTestCase {
         XCTAssertEqual(try writer.readLines(kind: .scan).count, 5)
     }
 
+    // MARK: - 启动时读回「上次完整扫描」
+
+    /// 读回最近一条**完整**扫描；中止行与坏行都必须跳过。
+    ///
+    /// 现有 `readLines` 只给字典，App 层无法还原 `bytesScanned` 的类型；
+    /// 这条测试钉住「重启后能拿到上次扫描的总量」这一能力。
+    func testLastCompletedScanSkipsAbortedAndMalformedLines() throws {
+        let writer = RecordWriter(directory: tmpDir)
+        let complete = ScanLogRecord(
+            at: Date(timeIntervalSince1970: 1_700_000_000),
+            mode: "full", sources: [Source.uvCache.rawValue],
+            filesScanned: 100, bytesScanned: 1_000_000, durationMs: 10
+        )
+        let aborted = ScanLogRecord(
+            at: Date(timeIntervalSince1970: 1_700_000_100),
+            mode: "full", sources: [Source.uvCache.rawValue],
+            filesScanned: 10, bytesScanned: 90_000, durationMs: 5,
+            aborted: "E-104"
+        )
+        try writer.appendScan(complete)
+        try writer.appendScan(aborted)
+        // 末行写坏（例如进程在追加中途被杀）：不能让它阻断读取
+        try writer.append(["broken": true], kind: .scan)
+
+        let last = try XCTUnwrap(writer.lastCompletedScanRecord())
+        XCTAssertEqual(last.bytesScanned, 1_000_000, "中止扫描的字节数是部分值，不能当总量")
+        XCTAssertEqual(last.filesScanned, 100)
+        XCTAssertNil(last.aborted)
+        XCTAssertEqual(last.at, complete.at, "ISO-8601 编解码必须对称")
+    }
+
+    /// 没有 `scan.jsonl`（首次启动）→ `nil`，**不是 0 字节的汇总**。
+    func testLastCompletedScanReturnsNilWhenNoLog() {
+        let writer = RecordWriter(directory: tmpDir)
+        XCTAssertNil(writer.lastCompletedScanRecord())
+    }
+
     /// **三类记录各自独立文件**。
     func testThreeKindsAreSeparateFiles() throws {
         let writer = RecordWriter(directory: tmpDir)

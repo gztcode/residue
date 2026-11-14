@@ -117,6 +117,15 @@ final class AppModel {
     /// 上次扫描的 L0 是否降级（无法枚举同 uid 进程）。
     private(set) var lastScanDegraded = false
 
+    /// **本会话是否完成过扫描**（重启后为 `false`）。
+    ///
+    /// 候选清单不落盘 → 刚启动时内存里没有候选。此时页面上的逐来源 / 逐条目
+    /// 数值**不可知**，必须显示「—」而不是 0（`PageModelBuilder` 据此改写）。
+    private(set) var hasScannedThisSession = false
+
+    /// 上次完整扫描的汇总（启动时从 `scan.jsonl` 读回，只用于展示「上次扫描」）。
+    private(set) var lastScanSummary: PageModelBuilder.LastScanSummary?
+
     /// AC-15 的顺延条目数（本次因上限而未执行的条数）。
     private(set) var deferredCount: Int = 0
     /// 上次实际执行时刻（「首次 / 稳定后」的阶段分界依据之一）。
@@ -245,6 +254,18 @@ final class AppModel {
         if let c = result.contents {
             contents = c
         }
+
+        // 重启后：候选清单不落盘，但 `scan.jsonl` 里有上次完整扫描的**总量**。
+        // 读回来展示「上次扫描」，避免 ① 页把「不知道」显示成 0 B。
+        if lastScanSummary == nil, let rec = writer.lastCompletedScanRecord() {
+            lastScanSummary = PageModelBuilder.LastScanSummary(
+                at: rec.at,
+                bytes: rec.bytesScanned,
+                files: rec.filesScanned,
+                sources: rec.sources
+            )
+        }
+
         rebuild()
     }
 
@@ -252,6 +273,8 @@ final class AppModel {
         let input = PageModelBuilder.Input(
             contents: contents,
             candidates: candidates,
+            hasSessionScan: hasScannedThisSession,
+            lastScan: lastScanSummary,
             executions: executions,
             readOnly: readOnly,
             loading: isScanning,
@@ -494,6 +517,18 @@ final class AppModel {
             errorMessage = L.pick("扫描日志写入失败：\(error.localizedDescription)", "Failed to write scan log: \(error.localizedDescription)")
         }
 
+        // 本会话已有扫描结果：页面数值改为来自本次扫描（不再走「上次扫描」）。
+        hasScannedThisSession = true
+        if job.abortReason == nil {
+            // 中止扫描的字节数是**部分值**，不能当成可复原的汇总。
+            lastScanSummary = PageModelBuilder.LastScanSummary(
+                at: started,
+                bytes: bytesScanned,
+                files: job.filesScanned,
+                sources: job.results.map { $0.source }
+            )
+        }
+
         lastAbort = job.abortReason
         isScanning = false
         scanProgress = ScanProgress()
@@ -588,6 +623,12 @@ final class AppModel {
         // **同门槛**：未达线不得执行（AC-04 ③ 逐来源复核 + AC-08 组 B）
         guard pageModel.canLightUp else {
             errorMessage = L.pick("未达达标条件，本次不执行（逐来源复核未通过）", "Gate not met; nothing executed this time (per-source re-check failed)")
+            return
+        }
+        // **重启后候选清单为空**（不落盘）：没有候选时执行批次只会产生一条
+        // 「0 条」的空记录，让用户以为清理过了。明确拒绝，要求先扫描。
+        guard hasScannedThisSession else {
+            errorMessage = L.pick("本次启动尚未扫描，请先扫描再执行清理。", "No scan since launch; scan first before running cleanup.")
             return
         }
         guard !isScanning else { return }

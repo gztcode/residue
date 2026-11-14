@@ -19,12 +19,40 @@ import Foundation
 
 public enum PageModelBuilder {
 
+    /// 上次完整扫描的汇总（重启后从 `scan.jsonl` 读回）。
+    ///
+    /// **只有总量**：候选清单按契约不落盘，所以逐来源 / 逐条目数值无法还原。
+    public struct LastScanSummary: Sendable, Equatable {
+        public let at: Date
+        public let bytes: Int64
+        public let files: Int
+        public let sources: [String]
+
+        public init(at: Date, bytes: Int64, files: Int, sources: [String]) {
+            self.at = at
+            self.bytes = bytes
+            self.files = files
+            self.sources = sources
+        }
+    }
+
     /// 构造页面模型所需的**全部输入**（都是已算好的值或原始记录）。
     public struct Input: Sendable {
         /// 状态载体内容（`StateFile.load()` 的产出）。
         public var contents: StateFileContents
         /// 本轮扫描到的候选（②/⑥ 页的数据源）。
         public var candidates: [ScanEngine.Candidate]
+        /// **本会话是否完成过扫描**。
+        ///
+        /// `false` = 刚启动、候选清单为空。此时扫描派生的数值（来源明细、
+        /// 可释放量、候选、批次）**一律不可知**——显示「—」，不是 0。
+        /// 默认 `true` 保持既有调用方的语义。
+        public var hasSessionScan: Bool
+        /// 上次完整扫描的汇总（重启后由 `RecordWriter.lastCompletedScanRecord()` 读回）。
+        ///
+        /// 仅当 `hasSessionScan == false` 时使用：总量可以如实展示为「上次扫描」，
+        /// 其余数值仍不可知。
+        public var lastScan: LastScanSummary?
         /// 执行记录（⑦ 页的数据源）。
         public var executions: [ExecutionRecord]
         /// 是否只读态（数据由更高版本创建）。
@@ -71,6 +99,8 @@ public enum PageModelBuilder {
         public init(
             contents: StateFileContents,
             candidates: [ScanEngine.Candidate] = [],
+            hasSessionScan: Bool = true,
+            lastScan: LastScanSummary? = nil,
             executions: [ExecutionRecord] = [],
             readOnly: Bool = false,
             loading: Bool = false,
@@ -90,6 +120,8 @@ public enum PageModelBuilder {
         ) {
             self.contents = contents
             self.candidates = candidates
+            self.hasSessionScan = hasSessionScan
+            self.lastScan = lastScan
             self.executions = executions
             self.readOnly = readOnly
             self.loading = loading
@@ -142,6 +174,15 @@ var model = PageModel()
             model.canClearLogs = false
             model.confirmItemCount = .unavailable(reason: UICopy.readOnlyNoSettlement)
             model.confirmBytes = .unavailable(reason: UICopy.readOnlyNoSettlement)
+            // CR-031：新增的可视化字段同样**一个数都不许露**。
+            model.totalScannedSlot = .unavailable(reason: UICopy.readOnlyNoSettlement)
+            model.observationDaySlot = .unavailable(reason: UICopy.readOnlyNoSettlement)
+            model.sourceShares = []
+            model.gateChecks = []
+            model.sampleProgress = []
+            model.confirmRows = []
+            model.reclaimableShare = nil
+            model.observationRatio = nil
             // 登录项状态**仍然如实显示**：只读不等于「可以假装定时任务在跑」
             // ③ 页四项配置（AC-03）
         model.executionModeLabel = input.executionMode.label
@@ -162,13 +203,35 @@ var model = PageModel()
         )
         let settlementProduced = header.settlement.producedAt != nil
 
+        // ---------- 扫描新鲜度（重启后不把「不知道」显示成 0）----------
+        //
+        // 候选清单按契约**不落盘**，重启后内存里没有候选。若照常聚合，
+        // ① 页会显示「0 B」、② 页会显示「没有可清理的候选」、⑥ 页会显示
+        // 「0 条 / 0 B」——三个都是**假值**，与「未知 ≠ 0」直接冲突。
+        //
+        // 能如实展示的只有上次扫描留下的**总量汇总**（`scan.jsonl`）；
+        // 逐来源 / 逐条目数值一律「—」，并给一条说明。
+        let previousScanKnown = header.lastScanAt != nil || input.lastScan != nil
+        model.hasScanned = input.hasSessionScan || previousScanKnown
+        model.restoredFromLastScan = !input.hasSessionScan && previousScanKnown
+        if !input.hasSessionScan {
+            if input.lastScan != nil {
+                model.lastScanNotice = UICopy.lastScanRestoredNotice
+            } else if previousScanKnown {
+                model.lastScanNotice = UICopy.lastScanSummaryUnavailable
+            }
+        }
+
         // ---------- ① 三区块（按来源聚合字节） ----------
         // 聚合发生在 Core（此处），界面拿到的只有 `.metric`
         var bytesBySource: [Source: Int64] = [:]
+        var countBySource: [Source: Int] = [:]
+        var totalBytes: Int64 = 0
         for c in input.candidates {
-            if let s = Source(rawValue: c.source) {
-                bytesBySource[s, default: 0] += c.bytes
-            }
+            guard let s = Source(rawValue: c.source) else { continue }
+            bytesBySource[s, default: 0] += c.bytes
+            countBySource[s, default: 0] += 1
+            totalBytes += c.bytes
         }
         model.overviewBlocks = Source.allCases.map { source in
             OverviewBlock(
@@ -176,6 +239,28 @@ var model = PageModel()
                 slot: .metric(Int(bytesBySource[source] ?? 0), unit: .bytes)
             )
         }
+        model.totalScannedSlot = .metric(Int(totalBytes), unit: .bytes)
+
+        // 来源占比行（堆叠条 + 明细表）。**分母为 0 时 share = nil**（不显示 0%）。
+        model.sourceShares = Source.allCases.map { source in
+            let bytes = Int(bytesBySource[source] ?? 0)
+            return SourceShareRow(
+                sourceKey: source.rawValue,
+                displayName: source.displayName,
+                path: source.canonicalCachePath,
+                itemCount: .metric(countBySource[source] ?? 0, unit: .items),
+                bytes: .metric(bytes, unit: .bytes),
+                share: totalBytes > 0 ? RatioSlot(numerator: bytes, denominator: Int(totalBytes)) : nil,
+                inDecisionDomain: source.isInDecisionDomain
+            )
+        }
+
+        // 观察期进度（侧栏 / ① 页 / ⑤ 页共用）。
+        model.observationRatio = RatioSlot(
+            numerator: progress.displayCountedDays,
+            denominator: ObservationProgress.requiredDays
+        )
+        model.observationDaySlot = .ratio(progress.displayCountedDays, ObservationProgress.requiredDays)
 
         // ① 状态条：只承载「并发冲突」（A1 裁定：全局页级状态条）
         if input.degraded {
@@ -194,11 +279,21 @@ var model = PageModel()
                 // **值域保持 2 值**（AC-04 判定冻结），阻断原因走 blockReason 副行
                 participation: (source?.isInDecisionDomain ?? false) ? .autoDeletable : .reportOnly,
                 bytes: .metric(Int(c.bytes), unit: .bytes),
-                blockReason: nil
+                blockReason: nil,
+                sourceKey: source?.rawValue ?? "",
+                share: totalBytes > 0
+                    ? RatioSlot(numerator: Int(c.bytes), denominator: Int(totalBytes))
+                    : nil
             )
         }
         let totalPages = max(1, (visibleCandidates.count + pageSize - 1) / pageSize)
         model.pageCount = totalPages
+        model.pageIndicatorSlot = .text(
+            L.pick(
+                "第 \(model.pageIndex + 1) / \(model.pageCount) 页",
+                "Page \(model.pageIndex + 1) / \(model.pageCount)"
+            )
+        )
 
         // ---------- ③ 开关区 / 策略参数 / 规则版本 ----------
         let gateInputs = header.sources.map { entry in
@@ -223,6 +318,49 @@ var model = PageModel()
             settlementProduced: settlementProduced,
             sources: gateInputs
         )
+        // CR-031：门槛清单与可点亮**同源**（见 `GateEvaluator.checklist` 注释）。
+        model.gateChecks = GateEvaluator.checklist(
+            progress: progress,
+            settlementProduced: settlementProduced,
+            sources: gateInputs
+        )
+
+        // ⑤ 页逐来源样本进度（`min(K, H) / H`；未结算 / 不适用 → nil）。
+        model.sampleProgress = header.sources.map { entry in
+            let inDomain = entry.source.isInDecisionDomain
+            let k = entry.K
+            let h = entry.H
+            let passed: Bool?
+            if !inDomain || k == nil || h == nil {
+                passed = nil
+            } else {
+                passed = (k ?? 0) >= (h ?? 0)
+            }
+            let ratio: RatioSlot?
+            if inDomain, let k, let h, h > 0 {
+                ratio = RatioSlot(numerator: Swift.min(k, h), denominator: h)
+            } else {
+                ratio = nil
+            }
+            let sampleSlot: SemanticSlot = k.map { .metric($0, unit: .items) }
+                ?? .unavailable(reason: UICopy.notSettledThisRound)
+            let thresholdSlot: SemanticSlot
+            if !inDomain {
+                thresholdSlot = .text(L.pick("不适用", "N/A"))
+            } else if let h {
+                thresholdSlot = .metric(h, unit: .none)
+            } else {
+                thresholdSlot = .unavailable(reason: L.pick("未取快照", "No snapshot taken"))
+            }
+            return SampleProgressRow(
+                sourceKey: entry.source.rawValue,
+                displayName: entry.source.displayName,
+                ratio: ratio,
+                sample: sampleSlot,
+                threshold: thresholdSlot,
+                passed: passed
+            )
+        }
         model.autoDeleteEnabled = header.autoDeleteEnabled
 
         // ③ 页定时任务状态（ADR-02 四态**如实映射**，非 enabled 一律不显示「已启用」）
@@ -382,10 +520,69 @@ var model = PageModel()
         let deletable = visibleCandidates.filter {
             Source(rawValue: $0.source)?.isInDecisionDomain ?? false
         }
+        let deletableBytes = deletable.reduce(Int64(0)) { $0 + $1.bytes }
         model.confirmItemCount = .metric(deletable.count, unit: .items)
         // AC-15：顺延条目数 = 候选总数 − 实际删除条目数（此处候选总数取可删除集）
         model.deferredCountSlot = .metric(input.deferredCount, unit: .items)
-        model.confirmBytes = .metric(Int(deletable.reduce(Int64(0)) { $0 + $1.bytes }), unit: .bytes)
+        model.confirmBytes = .metric(Int(deletableBytes), unit: .bytes)
+
+        // ⑥ 页批次预览（**只读**，CR-031 §三）。上限 50 行，超出时明确告知。
+        let previewLimit = 50
+        model.confirmRows = deletable.prefix(previewLimit).map { c in
+            let source = Source(rawValue: c.source)
+            return ConfirmItemRow(
+                path: c.path,
+                sourceKey: source?.rawValue ?? "",
+                bytes: .metric(Int(c.bytes), unit: .bytes),
+                share: totalBytes > 0
+                    ? RatioSlot(numerator: Int(c.bytes), denominator: Int(totalBytes))
+                    : nil
+            )
+        }
+        model.confirmListTruncated = deletable.count > previewLimit
+
+        // ① 页「可释放 / 全量」比例（总量为 0 → nil，不画 0%）。
+        model.reclaimableShare = totalBytes > 0
+            ? RatioSlot(numerator: Int(deletableBytes), denominator: Int(totalBytes))
+            : nil
+
+        // ---------- 重启后：扫描派生的数值一律不猜 ----------
+        //
+        // 上面的聚合在「本会话没扫过」时全部基于空候选 → 结果必然是 0。
+        // 那些 0 不是观测值，是「没有数据」。统一改写为「—」；
+        // 总量除外：上次扫描的 `bytesScanned` 是真实观测值，可以展示。
+        if !input.hasSessionScan {
+            let dash = SemanticSlot.text("—")
+            model.overviewBlocks = Source.allCases.map {
+                OverviewBlock(title: $0.displayName, slot: dash)
+            }
+            model.sourceShares = Source.allCases.map { source in
+                SourceShareRow(
+                    sourceKey: source.rawValue,
+                    displayName: source.displayName,
+                    path: source.canonicalCachePath,
+                    itemCount: dash,
+                    bytes: dash,
+                    share: nil,
+                    inDecisionDomain: source.isInDecisionDomain
+                )
+            }
+            model.totalScannedSlot = input.lastScan.map {
+                .metric(Int($0.bytes), unit: .bytes)
+            } ?? dash
+            model.candidateRows = []
+            model.pageCount = 1
+            model.pageIndicatorSlot = dash
+            model.l1Confirmed = dash
+            model.l2Inferred = dash
+            model.deletableAmount = dash
+            model.confirmItemCount = dash
+            model.confirmBytes = dash
+            model.deferredCountSlot = dash
+            model.confirmRows = []
+            model.confirmListTruncated = false
+            model.reclaimableShare = nil
+        }
 
         // ---------- ⑦ 执行记录 ----------
         model.evidenceRows = input.executions.map { rec in

@@ -35,7 +35,7 @@ echo "=============================================="
 echo ""
 echo "--- 一、① 七页可导航 ---"
 # ---------------------------------------------------------------------------
-for f in Pages.swift RootView.swift Components.swift DesignTokens.swift; do
+for f in Pages.swift PolicyPage.swift PrivacyPage.swift ReportPage.swift ConfirmDrawer.swift EvidencePage.swift MenuBarPopover.swift RootView.swift Components.swift DesignTokens.swift; do
   if [ -f "$UI_DIR/$f" ]; then ok "存在 ${f}（App 层视图）"; else bad "缺失 $f"; fi
 done
 # **页面模型在 Core**（不然「禁止算术」不可单测）
@@ -43,8 +43,10 @@ for f in PageModel.swift PageModelBuilder.swift; do
   if [ -f "$CORE_DIR/$f" ]; then ok "存在 ${f}（Core，可单测）"; else bad "缺失 $f"; fi
 done
 
-# 七个 page case
-PAGE_CASES=$(grep -cE "^[[:space:]]+case [A-Za-z_]+ = [0-6]([[:space:]]|$)" "$CORE_DIR/PageModel.swift" 2>/dev/null | head -1 || true)
+# 七个 page case（**限定在 Page 枚举块内**：PageGroup 也有 `= 0/1/2`，
+# 全局 grep 会把它算进来，误报成 10 个）
+PAGE_CASES=$(sed -n '/public enum Page:/,/^}/p' "$CORE_DIR/PageModel.swift" 2>/dev/null \
+  | grep -cE "^[[:space:]]+case [A-Za-z_]+ = [0-6]([[:space:]]|$)" || true)
 PAGE_CASES=${PAGE_CASES:-0}
 if [ "$PAGE_CASES" -eq 7 ]; then
   ok "Page 枚举有 7 个 case（7 页 × 1 形态 = 7 ≤ 8）"
@@ -53,7 +55,8 @@ else
 fi
 
 # 七页各有 View struct
-PAGE_VIEWS=$(grep -cE "^struct (Overview|Environments|Policy|Privacy|Report|Confirm|Evidence)[A-Za-z_]*: View" "$UI_DIR/Pages.swift" 2>/dev/null | head -1 || true)
+PAGE_VIEWS=$(cat "$UI_DIR"/{Pages,PolicyPage,PrivacyPage,ReportPage,ConfirmDrawer,EvidencePage}.swift 2>/dev/null \
+  | grep -cE "^struct (Overview|Environments|Policy|Privacy|Report|Confirm|Evidence)[A-Za-z_]*: View" || true)
 PAGE_VIEWS=${PAGE_VIEWS:-0}
 if [ "$PAGE_VIEWS" -ge 7 ]; then
   ok "七页视图 struct 齐（找到 $PAGE_VIEWS 个）"
@@ -100,7 +103,7 @@ fi
 # ⚠️ **只扫视图文件**：`AppModel.swift` 是编排层，`* 1000`（毫秒换算）
 #    与 `/ 1_000_000`（错误文案里的 MB 显示）不是域内度量运算。
 #    但**域内口径（如 M1 计数日推进）必须在 Core**——见下面的单独断言。
-VIEW_FILES="$UI_DIR/Pages.swift $UI_DIR/RootView.swift $UI_DIR/Components.swift $UI_DIR/PageDesign.swift"
+VIEW_FILES="$UI_DIR/Pages.swift $UI_DIR/PolicyPage.swift $UI_DIR/PrivacyPage.swift $UI_DIR/ReportPage.swift $UI_DIR/ConfirmDrawer.swift $UI_DIR/EvidencePage.swift $UI_DIR/RootView.swift $UI_DIR/Components.swift $UI_DIR/MenuBarPopover.swift $UI_DIR/PageDesign.swift"
 DOMAIN_ARITH=$(
   grep -nE '(slotCount|countedDays|missCount|pNowCount|fSetBits|totalBytes)[[:space:]]*[-+*/][[:space:]]*[A-Za-z0-9]' \
     $VIEW_FILES 2>/dev/null || true
@@ -204,10 +207,10 @@ check_copy "清除范围含「不重置」" "不重置" "$C"
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "--- 五、视觉基线落地（最小集）---"
+echo "--- 五、视觉基线落地（v2 · CR-031）---"
 # ---------------------------------------------------------------------------
 T="$UI_DIR/DesignTokens.swift"
-for hex in 0x0F1115 0x16191F 0xE6E8EC 0x8B9099 0x5E6AD2 0xD9534F; do
+for hex in 0x0D0F13 0x15181E 0x1B1F27 0xECEEF2 0x9AA1AC 0x6E7681 0x6C79F0 0xE5534B 0x46B98A 0xE8A84C 0x7C8CF8 0x56C596; do
   if grep -qF -- "$hex" "$T" 2>/dev/null; then
     ok "色值 $hex 已落地"
   else
@@ -215,11 +218,26 @@ for hex in 0x0F1115 0x16191F 0xE6E8EC 0x8B9099 0x5E6AD2 0xD9534F; do
   fi
 done
 
-# 不得引入第三档语义色（视觉基线 §二）
-if grep -qE 'Color\.(green|yellow|blue|orange|purple|pink|teal|indigo)' "$UI_DIR"/*.swift 2>/dev/null; then
-  bad "引入了第三档语义色（视觉基线 §二：只有两档状态色）"
+# 来源身份色必须由唯一映射函数给出（视图只查表，不自己挑色）
+if grep -qF "static func source(for key: String)" "$T" 2>/dev/null; then
+  ok "来源身份色有唯一映射（source(for:)）"
 else
-  ok "无第三档语义色（只有信号色 + 危险色）"
+  bad "来源身份色缺少唯一映射"
+fi
+
+# 不得引入系统语义色（视觉基线 §二：状态色只有 token 里的几档）
+# 允许 `Color.white`：按钮文字与低透明度分隔线用它，不承载状态语义。
+if grep -qE 'Color\.(green|yellow|blue|orange|purple|pink|teal|indigo|red|gray)\b' "$UI_DIR"/*.swift 2>/dev/null; then
+  bad "引入了系统语义色（状态色必须来自 DesignTokens）"
+else
+  ok "无系统语义色（状态色全部来自 DesignTokens）"
+fi
+
+# CR-031：比例必须由 Core 的 RatioSlot 预计算，视图不得接触分子/分母
+if grep -q "struct RatioSlot" "$CORE_DIR/PageModel.swift" 2>/dev/null; then
+  ok "RatioSlot 定义在 Core（比例不在视图层算）"
+else
+  bad "RatioSlot 未在 Core 定义"
 fi
 
 # 表格行高 32 固定
@@ -373,7 +391,9 @@ echo "--- 九、空实现检测（点了没反应、也不报错，比没有按�
 #   ④ 一键清除 / ⑥ 立即执行（只关抽屉）/ ⑦ 恢复。
 # 这类缺陷最阴：**用户以为做成了**，而产品什么都不做、也不报错。
 EMPTY_ACTIONS=$(
-  python3 - "$UI_DIR/Pages.swift" "$UI_DIR/RootView.swift" <<'PYEOF' 2>/dev/null || echo "ERR"
+  python3 - "$UI_DIR/Pages.swift" "$UI_DIR/PolicyPage.swift" "$UI_DIR/PrivacyPage.swift" \
+    "$UI_DIR/ReportPage.swift" "$UI_DIR/ConfirmDrawer.swift" "$UI_DIR/EvidencePage.swift" \
+    "$UI_DIR/MenuBarPopover.swift" "$UI_DIR/RootView.swift" <<'PYEOF' 2>/dev/null || echo "ERR"
 import re, sys
 bad = []
 for path in sys.argv[1:]:
@@ -402,7 +422,7 @@ else
 fi
 
 # 主线动作必须真接上（清除 / 执行）
-if grep -qF 'onClearLogs()' "$UI_DIR/Pages.swift" 2>/dev/null; then
+if grep -qF 'onClearLogs()' "$UI_DIR/PrivacyPage.swift" 2>/dev/null; then
   ok "④ 页一键清除已接真实动作（AC-12）"
 else
   bad "④ 页一键清除仍是空实现"

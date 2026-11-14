@@ -127,6 +127,12 @@ public enum SemanticSlot: Sendable, Equatable {
     /// 界面**不得**显示自己算出的「差 3 条」。
     case ratio(Int, Int)
 
+    /// 百分比，单位 = 千分之一（`452` → 「45.2%」）。
+    ///
+    /// **值必须由 `RatioSlot.percentTenths` 算好**；界面只读字符串。
+    /// 用整数存，避免浮点在等值断言里出现噪声。
+    case percent(tenths: Int)
+
     /// 剩余天数。`nil` → 显示「—」（**不是 0**）。
     case duration(days: Int?)
 
@@ -161,6 +167,9 @@ public enum SemanticSlot: Sendable, Equatable {
             return "\(v)\(unit.suffix)"
         case .ratio(let a, let b):
             return "\(a) / \(b)"
+        case .percent(let tenths):
+            // 452 → 「45.2%」；整数运算，不引入浮点噪声。
+            return "\(tenths / 10).\(tenths % 10)%"
         case .duration(let days):
             // `nil` → 「—」；**不是 0**（0 会被读成「今天到期」）
             return days.map { L.pick("\($0) 天", "\($0) days") } ?? "—"
@@ -245,6 +254,38 @@ public enum UICopy {
         L.pick(
             "第 \(round) 轮 · 样本不足（\(sample) / \(threshold)）",
             "Round \(round) · Insufficient samples (\(sample) / \(threshold))"
+        )
+    }
+
+    /// 重启后、本会话尚未扫描时的说明（① 页 / ⑥ 页）。
+    ///
+    /// **能展示的只有上次扫描的总量**：候选清单按契约不落盘，所以逐来源、
+    /// 逐条目、可释放量都无从得知。它们显示「—」而不是 0 ——「未知 ≠ 0」。
+    public static var lastScanRestoredNotice: String {
+        L.pick(
+            "本次启动尚未扫描：总量来自上次扫描；来源明细、候选与可释放量需重新扫描后显示。",
+            "Not scanned since launch: the total is from the last scan; source details, candidates, and reclaimable size appear after a new scan."
+        )
+    }
+
+    /// 重启后、上次扫描的汇总也读不到（例如日志已被「一键清除」）。
+    ///
+    /// 此时**连总量都不显示**：显示 0 会被读成「缓存是空的」。
+    public static var lastScanSummaryUnavailable: String {
+        L.pick(
+            "本次启动尚未扫描，上次扫描的汇总不可用（记录可能已被清除）；重新扫描后显示。",
+            "Not scanned since launch and the last scan summary is unavailable (records may have been cleared). Scan again to see numbers."
+        )
+    }
+
+    /// 重启后候选清单为空时的**短说明**（② 页空态 / ⑥ 页批次空态）。
+    ///
+    /// 与 `lastScanRestoredNotice` 分开：那条解释「总量为什么还在」，
+    /// 这两页要解释的是「清单为什么是空的」，用长句会答非所问。
+    public static var candidatesNeedRescan: String {
+        L.pick(
+            "候选清单不会跨启动保留；重新扫描后即可看到。",
+            "The candidate list isn’t kept across launches; scan again to see it."
         )
     }
 

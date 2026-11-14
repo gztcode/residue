@@ -67,15 +67,26 @@ struct StateLabelView: View {
 
 // MARK: - 容器
 
-/// 卡片（`#16191F`，圆角 8）。
+/// 卡片（`#15181E`，圆角 10）。
+///
+/// `height` 在 `background` **之前**生效：否则背景仍按内容高度绘制，
+/// 两张卡并排时会出现「外框一样高、底色不一样高」的错位。
 struct Card<Content: View>: View {
+    var padding: CGFloat = Tokens.Spacing.m
+    var background: SwiftUI.Color = Tokens.Color.surface
+    var height: CGFloat? = nil
     @ViewBuilder var content: Content
 
     var body: some View {
         content
-            .padding(Tokens.Spacing.m)
+            .padding(padding)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Tokens.Color.surface, in: RoundedRectangle(cornerRadius: Tokens.Radius.card))
+            .frame(height: height, alignment: .top)
+            .background(background, in: RoundedRectangle(cornerRadius: Tokens.Radius.card))
+            .overlay(
+                RoundedRectangle(cornerRadius: Tokens.Radius.card)
+                    .strokeBorder(Tokens.Color.stroke, lineWidth: 1)
+            )
     }
 }
 
@@ -151,9 +162,10 @@ struct StatusBar: View {
     let slot: SemanticSlot
 
     var body: some View {
+        // **不撑满整行**：状态条大多只有一个状态徽标，撑满会变成一张
+        // 只有左侧一个标签的空卡（错误态渲染走查已指出）。
         HStack(spacing: Tokens.Spacing.xs) {
             SemanticSlotView(slot: slot)
-            Spacer()
         }
         .padding(.vertical, Tokens.Spacing.xs)
         .padding(.horizontal, Tokens.Spacing.s)
@@ -281,13 +293,12 @@ struct TokenSwitch: View {
 struct LoadingView: View {
     let message: String
     var onCancel: (() -> Void)?
+    @Environment(\.residueRenderMode) private var renderMode
 
     var body: some View {
         VStack(spacing: Tokens.Spacing.s) {
-            ProgressView()
-                .progressViewStyle(.circular)
+            indicator
                 // 视觉基线 §三：加载态 = 中性 + 信号色（进度环）
-                .tint(Tokens.Color.signal)
             Text(message)
                 .font(Tokens.Typography.secondary)
                 .foregroundStyle(Tokens.Color.textSecondary)
@@ -299,6 +310,27 @@ struct LoadingView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// `ImageRenderer` 不渲染 `ProgressView`，离屏会退化成黄色「禁止」占位符
+    /// （13 号加载态渲染图已实测到）。渲染路径改画静态圆弧；
+    /// 产品路径仍是系统转圈，不受影响。
+    @ViewBuilder
+    private var indicator: some View {
+        if renderMode {
+            Circle()
+                .trim(from: 0, to: 0.25)
+                .stroke(
+                    Tokens.Color.signal,
+                    style: StrokeStyle(lineWidth: 3, lineCap: .round)
+                )
+                .frame(width: 20, height: 20)
+                .padding(4)
+        } else {
+            ProgressView()
+                .progressViewStyle(.circular)
+                .tint(Tokens.Color.signal)
+        }
     }
 }
 
@@ -482,5 +514,216 @@ struct TokenTextField: View {
             RoundedRectangle(cornerRadius: Tokens.Radius.control)
                 .stroke(Tokens.Color.textSecondary.opacity(0.25), lineWidth: 1)
         )
+    }
+}
+
+// ============================================================
+// MARK: - 视觉基线 v2 组件（CR-031）
+//
+// 所有比例都来自 `RatioSlot`（Core 已算好）。本文件**没有除法**，
+// 只有 `CGFloat(fraction)` 这种单位转换 —— 档位、百分比由 Core 决定。
+// ============================================================
+
+/// 区块头：标题 + 可选副标 + 右侧说明。
+struct SectionHeader: View {
+    let title: String
+    var subtitle: String? = nil
+    var trailing: String? = nil
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(Tokens.Typography.title)
+                    .foregroundStyle(Tokens.Color.textPrimary)
+                if let subtitle {
+                    Text(subtitle)
+                        .font(Tokens.Typography.secondary)
+                        .foregroundStyle(Tokens.Color.textTertiary)
+                }
+            }
+            Spacer(minLength: Tokens.Spacing.xs)
+            if let trailing {
+                Text(trailing)
+                    .font(Tokens.Typography.secondary)
+                    .foregroundStyle(Tokens.Color.textTertiary)
+            }
+        }
+    }
+}
+
+/// 行内胶囊标签。
+struct Pill: View {
+    let text: String
+    var color: SwiftUI.Color = Tokens.Color.textSecondary
+    var icon: String? = nil
+
+    var body: some View {
+        HStack(spacing: Tokens.Spacing.xxs) {
+            if let icon {
+                Image(systemName: icon)
+                    .font(.system(size: Tokens.Icon.badge, weight: .semibold))
+            }
+            Text(text)
+                .font(Tokens.Typography.secondary)
+        }
+        .foregroundStyle(color)
+        .padding(.horizontal, 7)
+        .padding(.vertical, 3)
+        .background(color.opacity(0.10), in: RoundedRectangle(cornerRadius: 5))
+        .overlay(
+            RoundedRectangle(cornerRadius: 5)
+                .strokeBorder(color.opacity(0.18), lineWidth: 1)
+        )
+    }
+}
+
+/// 来源圆点（**识别色，不是状态色**）。
+struct SourceDot: View {
+    let sourceKey: String
+    var size: CGFloat = 7
+
+    var body: some View {
+        Circle()
+            .fill(Tokens.Color.source(for: sourceKey))
+            .frame(width: size, height: size)
+    }
+}
+
+/// 单条比例条。
+///
+/// - `slot == nil` → 只画轨道 + 「—」由调用方显示（**不画 0%**）。
+/// - `slot` 存在 → 宽度 = 已算好的 `fraction`。
+struct RatioBarView: View {
+    let slot: RatioSlot?
+    var color: SwiftUI.Color = Tokens.Color.signal
+    var height: CGFloat = 5
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(SwiftUI.Color.white.opacity(0.07))
+                if let slot {
+                    Capsule()
+                        .fill(color)
+                        .frame(width: max(2, geo.size.width * CGFloat(slot.fraction)))
+                }
+            }
+        }
+        .frame(height: height)
+        .accessibilityLabel(Text(slot?.percentSlot.displayText ?? L.pick("无法判定", "Unknown")))
+    }
+}
+
+/// 来源堆叠占比条（顶部一条，回答「谁占了大头」）。
+struct StackedShareBar: View {
+    let rows: [SourceShareRow]
+    var height: CGFloat = 10
+
+    var body: some View {
+        GeometryReader { geo in
+            HStack(spacing: 2) {
+                ForEach(rows.filter { ($0.share?.fraction ?? 0) > 0 }) { row in
+                    RoundedRectangle(cornerRadius: height / 2)
+                        .fill(Tokens.Color.source(for: row.sourceKey))
+                        // 每段留 2 pt 间隙；比例本身由 Core 算好，这里只做布局。
+                        .frame(width: max(2, geo.size.width * CGFloat(row.share?.fraction ?? 0) - 2))
+                }
+            }
+        }
+        .frame(height: height)
+        .accessibilityLabel(Text(L.pick("来源占比", "Source share")))
+    }
+}
+
+/// 观察期进度环（**主文字色，不用信号色**）。
+///
+/// 信号色预算已被侧栏选中态占用（CR-031 §1.1）；内容区的数据可视化
+/// 一律用主文字色 / 来源色 / 成功色，不争那一次强调。
+struct ObservationRing: View {
+    let ratio: RatioSlot?
+    var lineWidth: CGFloat = 6
+    var diameter: CGFloat = 54
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .stroke(SwiftUI.Color.white.opacity(0.08), lineWidth: lineWidth)
+            if let ratio {
+                Circle()
+                    .trim(from: 0, to: max(0.002, min(1, CGFloat(ratio.fraction))))
+                    .stroke(
+                        Tokens.Color.textPrimary.opacity(0.85),
+                        style: StrokeStyle(lineWidth: lineWidth, lineCap: .round)
+                    )
+                    .rotationEffect(.degrees(-90))
+            }
+        }
+        .frame(width: diameter, height: diameter)
+    }
+}
+
+/// 门槛检查一行：图标 + 标题 + 对象 + 明细。
+///
+/// **`passed == nil` 用中性色 + 时钟**，不得显示成失败（CR-031 §1.2）。
+struct GateCheckRowView: View {
+    let row: GateCheckRow
+
+    var body: some View {
+        HStack(spacing: Tokens.Spacing.xs) {
+            ZStack {
+                Circle().fill(tint.opacity(0.15))
+                Image(systemName: symbol)
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(tint)
+            }
+            .frame(width: 16, height: 16)
+
+            Text(row.kind.title)
+                .font(Tokens.Typography.body)
+                .foregroundStyle(Tokens.Color.textPrimary)
+
+            if let subject = row.subject {
+                Text(subject)
+                    .font(Tokens.Typography.secondary)
+                    .foregroundStyle(Tokens.Color.textTertiary)
+            }
+
+            Spacer(minLength: Tokens.Spacing.xs)
+
+            SemanticSlotView(slot: row.detail, font: Tokens.Typography.numberSmall)
+                .foregroundStyle(tint)
+        }
+        .frame(height: 24)
+    }
+
+    private var symbol: String {
+        switch row.passed {
+        case .some(true): return "checkmark"
+        case .some(false): return "xmark"
+        case .none: return "clock"
+        }
+    }
+
+    private var tint: SwiftUI.Color {
+        switch row.passed {
+        case .some(true): return Tokens.Color.success
+        case .some(false): return Tokens.Color.danger
+        case .none: return Tokens.Color.textTertiary
+        }
+    }
+}
+
+/// 表头文字（11 pt / 三级文字）。
+struct TableHeaderText: View {
+    let text: String
+    var alignment: Alignment = .leading
+
+    var body: some View {
+        Text(text)
+            .font(Tokens.Typography.secondary)
+            .foregroundStyle(Tokens.Color.textTertiary)
+            .frame(maxWidth: .infinity, alignment: alignment)
     }
 }

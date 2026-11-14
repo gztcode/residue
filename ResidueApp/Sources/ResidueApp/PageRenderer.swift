@@ -23,6 +23,13 @@ enum PageRenderer {
     /// 渲染尺寸（与 `RootView` 的 `defaultSize` 一致）。
     static let size = CGSize(width: 1000, height: 640)
 
+    /// ③ 页内容远超一屏（产品里是 `ScrollView`）。离屏渲染不渲染滚动内容，
+    /// 又不该只截首屏导致「页头被挤出画布」，故按内容高度加高画布。
+    /// **其他页仍是真实窗口高度 640**，只有 ③ 例外且在此注明。
+    static func canvasHeight(for page: Page) -> CGFloat {
+        page == .policy ? 1180 : size.height
+    }
+
     /// 若命令行带 `--render-pages <dir>`，渲染七页并退出。
     ///
     /// - Returns: 是否已处理（`true` 时调用方应直接退出）。
@@ -44,7 +51,11 @@ enum PageRenderer {
 
         for page in Page.allCases {
             // 每页包一层「外壳 + 内容」，与真实界面同构
-            let view = RenderWrapper(page: page, model: model)
+            let view = RenderWrapper(
+                page: page,
+                model: model,
+                height: canvasHeight(for: page)
+            )
             let renderer = ImageRenderer(content: view)
             renderer.scale = 2.0       // Retina
 
@@ -85,18 +96,21 @@ enum PageRenderer {
         errorModel.errorMessageForRender = L.pick("E-303 · 磁盘空间不足，状态未更新。清理废纸篓或释放磁盘后重试", "E-303 · Not enough disk space; state not updated. Empty Trash or free up disk and retry")
 
         var noPermModel = model
-        noPermModel.collectionTiers = noPermModel.collectionTiers.map { tier in
-            CollectionTier(
-                name: tier.name,
-                authorized: tier.authorized,
-                state: .permissionBlocked(
-                    missing: L.pick("本用户进程 fd", "this user's process fds"),
-                    guideItemID: DiagnosticCode.e501.rawValue
-                ),
-                blockReason: .permissionBlocked(
+        // 与 `PageModelBuilder` 同一条规则：后两档默认未授权 → 「未采集」；
+        // 权限受阻只发生在**已授权**的档位。否则会出现「未授权 + 无法判定」
+        // 这种自相矛盾的行（11 号图首版就是这样）。
+        noPermModel.collectionTiers = noPermModel.collectionTiers.enumerated().map { idx, tier in
+            let blocked: SemanticSlot? = idx < 2
+                ? .permissionBlocked(
                     missing: L.pick("本用户进程 fd", "this user's process fds"),
                     guideItemID: DiagnosticCode.e501.rawValue
                 )
+                : nil
+            return CollectionTier(
+                name: tier.name,
+                authorized: idx < 2,
+                state: blocked ?? .text(L.pick("未采集", "Not collected")),
+                blockReason: blocked
             )
         }
 
@@ -124,7 +138,13 @@ enum PageRenderer {
         for (name, page, m) in [
             ("08-观察期报告-只读态-版本降级", Page.report, readOnlyModel),
             ("09-存储总览-空态", Page.overview, {
-                var e = model; e.overviewBlocks = []; return e
+                // 空态由「从未扫描」驱动（`hasScanned == false`），不是把区块清空：
+                // 清空区块只是渲染工具的假态，产品里空态来自扫描新鲜度。
+                var e = model
+                e.hasScanned = false
+                e.restoredFromLastScan = false
+                e.totalScannedSlot = .text("—")
+                return e
             }()),
             ("10-存储总览-错误态", Page.overview, errorModel),
             ("11-授权与隐私-无权限态", Page.privacy, noPermModel),
@@ -147,6 +167,24 @@ enum PageRenderer {
             }
         }
 
+        // 17：菜单栏浮层（`.window` 样式）。它不是七页之一，单独渲一张。
+        do {
+            let renderer = ImageRenderer(
+                content: MenuBarPopover(model: model)
+                    .environment(\.residueRenderMode, true)
+                    .environment(\.colorScheme, .dark)
+            )
+            renderer.scale = 2.0
+            if let cg = renderer.cgImage,
+               let png = NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:]) {
+                let url = outDir.appendingPathComponent("17-菜单栏浮层.png")
+                if (try? png.write(to: url)) != nil {
+                    print("✓ 17-菜单栏浮层.png  (\(cg.width)×\(cg.height))")
+                    okCount += 1
+                }
+            }
+        }
+
         print("\n共渲染 \(okCount) 张 → \(outDir.path)")
         return true
     }
@@ -156,42 +194,15 @@ enum PageRenderer {
 struct RenderWrapper: View {
     let page: Page
     let model: PageModel
+    var height: CGFloat = PageRenderer.size.height
 
     var body: some View {
-        HStack(spacing: 0) {
-            // 侧栏
-            VStack(alignment: .leading, spacing: 0) {
-                Text("Residue")
-                    .font(Tokens.Typography.pageTitle)
-                    .foregroundStyle(Tokens.Color.textPrimary)
-                    .padding(.horizontal, Tokens.Spacing.s)
-                    .padding(.vertical, Tokens.Spacing.m)
-
-                ForEach(Page.allCases) { p in
-                    HStack(spacing: Tokens.Spacing.xs) {
-                        Image(systemName: p.symbolName)
-                            .font(.system(size: 12))
-                            .frame(width: 16)
-                        Text(p.navTitle)
-                            .font(Tokens.Typography.body)
-                        Spacer()
-                    }
-                    .foregroundStyle(p == page ? Tokens.Color.textPrimary : Tokens.Color.textSecondary)
-                    .padding(.horizontal, Tokens.Spacing.s)
-                    .frame(height: 30)
-                    .background(p == page ? Tokens.Color.textPrimary.opacity(0.08) : .clear)
-                }
-
-                Spacer()
-
-                Text(L.pick("本机 · 零外发", "On-device · No outbound"))
-                    .font(Tokens.Typography.secondary)
-                    .foregroundStyle(Tokens.Color.textSecondary)
-                    .padding(Tokens.Spacing.s)
-            }
-            .frame(width: L.current == .en ? 196 : 168)
-            .frame(maxHeight: .infinity, alignment: .top)
-            .background(Tokens.Color.surface)
+        // `.top`：内容超出一屏时 HStack 会变高，默认垂直居中对齐会把
+        // 固定 640 pt 的侧栏整体下移 → 底部观察期卡被裁。
+        HStack(alignment: .top, spacing: 0) {
+            // 侧栏：**与真实界面同一个 View**（`SidebarView`），避免两套皮
+            SidebarView(selection: page, model: model, onSelect: { _ in })
+                .frame(width: Tokens.Layout.sidebarWidth, height: height)
 
             Rectangle()
                 .fill(Tokens.Color.divider)
@@ -205,15 +216,27 @@ struct RenderWrapper: View {
                     )
                     Rectangle().fill(Tokens.Color.divider).frame(height: 1)
                 }
+                // 与 `RootView` 同构：错误态顶部必须有横幅，否则渲染图只看到
+                // 一个「出错了」状态标签、看不到错误码与处置建议，设计走查判不了。
+                if let err = model.errorMessageForRender {
+                    ErrorBanner(message: err)
+                    Rectangle().fill(Tokens.Color.divider).frame(height: 1)
+                }
 
-                HStack {
-                    Text(page.title)
-                        .font(Tokens.Typography.pageTitle)
-                        .foregroundStyle(Tokens.Color.textPrimary)
+                HStack(alignment: .center) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(page.title)
+                            .font(Tokens.Typography.pageTitle)
+                            .foregroundStyle(Tokens.Color.textPrimary)
+                        Text(page.subtitle)
+                            .font(Tokens.Typography.secondary)
+                            .foregroundStyle(Tokens.Color.textTertiary)
+                    }
                     Spacer()
                 }
-                .padding(.horizontal, Tokens.Spacing.m)
-                .padding(.vertical, Tokens.Spacing.s)
+                .padding(.horizontal, Tokens.Layout.contentPadding)
+                .padding(.top, Tokens.Spacing.m)
+                .padding(.bottom, Tokens.Spacing.s)
 
                 Rectangle().fill(Tokens.Color.divider).frame(height: 1)
 
@@ -221,7 +244,11 @@ struct RenderWrapper: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
-        .frame(width: PageRenderer.size.width, height: PageRenderer.size.height)
+        // `alignment: .topLeading` 很关键：错误态比常态多一条横幅，
+        // 内容会超出 640 pt；默认居中对齐会把**页头裁到画布上沿之外**，
+        // 看起来像「标题被切了」。顶部对齐 = 裁掉屏幕下方的内容，
+        // 与真实窗口「首屏」一致。
+        .frame(width: PageRenderer.size.width, height: height, alignment: .topLeading)
         .background(Tokens.Color.background)
         .preferredColorScheme(.dark)
         // ImageRenderer 不做深色推断 → 显式给环境
@@ -239,7 +266,7 @@ struct RenderWrapper: View {
         case .policy:      PolicyPage(model: model)
         case .privacy:     PrivacyPage(model: model)
         case .report:      ReportPage(model: model)
-        case .confirm:     ConfirmDrawer(model: model, onConfirm: {}, onCancel: {})
+        case .confirm:     ConfirmDrawer(model: model, onConfirm: {}, onCancel: {}, showsHeader: false)
         case .evidence:    EvidencePage(model: model, onExport: {})
         }
     }
