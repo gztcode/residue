@@ -126,11 +126,17 @@ struct OverviewPage: View {
 
             StackedShareBar(rows: model.sourceShares, height: 8)
 
-            HStack(alignment: .top, spacing: Tokens.Spacing.m) {
+            // **三列网格**（CR-032：来源由 3 个扩到 5 个）：
+            // 5 行自然折成 3 + 2 两排，不必在视图里按数量切分（视图不做算术）。
+            LazyVGrid(
+                columns: Array(repeating: GridItem(.flexible(), spacing: Tokens.Spacing.m, alignment: .leading), count: 3),
+                alignment: .leading,
+                spacing: 6
+            ) {
                 ForEach(model.sourceShares) { row in
-                    // 三列等宽（每列约 83 pt）。**字节与占比必须竖排**：
+                    // 每列约 83 pt。**字节与占比必须竖排**：
                     // 真实数据 `847.7 MB 97.0%` 横排需要约 92 pt，
-                    // 会在三列布局里被截成「847.7…」（真机走查发现）。
+                    // 会在窄列里被截成「847.7…」（真机走查发现）。
                     VStack(alignment: .leading, spacing: 2) {
                         HStack(spacing: Tokens.Spacing.xxs) {
                             SourceDot(sourceKey: row.sourceKey)

@@ -453,6 +453,259 @@ final class StateFileTests: XCTestCase {
             XCTAssertEqual(entry.a, 0, "累计误判数 `a` 应清零")
             XCTAssertEqual(entry.slotCount, 0, "位槽数应清零")
         }
+        // **轮次不变**（M1 写入时刻：版本变更不产生新轮次，只重置当前轮次）
+        XCTAssertEqual(loaded?.header.round, 2, "版本变更不得把轮次重置为 1")
+        XCTAssertEqual(loaded?.header.countedDays, 0, "计数日归零")
+        XCTAssertNil(loaded?.header.roundStartAnchor, "计时窗口从下次成功扫描重新起算")
+    }
+
+    // MARK: - CR-032 · P1-1（载体存在标记）
+
+    /// **首启（载体不在）→ `carrierPresent == false`**。
+    ///
+    /// 这是版本变更判定的**必要输入**：首启时 `appVersion` 也是空串，
+    /// 与「基线遗留」长得一模一样 → 不能靠版本号空不空去猜。
+    func testCarrierPresentIsFalseOnFirstLaunch() {
+        let store = StateFile(directory: tmpDir)
+        let result = store.load()
+        XCTAssertFalse(result.carrierPresent, "没有载体文件时 `carrierPresent` 必须为 false")
+        XCTAssertNotNil(result.contents, "首启仍应给出空载体（首启可用）")
+        XCTAssertFalse(result.readOnly)
+    }
+
+    /// **载体存在 → `carrierPresent == true`**（哪怕版本号是空的）。
+    func testCarrierPresentIsTrueWhenFileExists() throws {
+        let store = StateFile(directory: tmpDir)
+        try store.save(header: makeHeader(), payloads: makePayloads())
+        XCTAssertTrue(store.load().carrierPresent, "载体文件在 → `carrierPresent` 必须为 true")
+    }
+
+    /// **基线遗留载体（版本号为空）→ 依然 `carrierPresent == true`**。
+    ///
+    /// 这一条是 P1-1 的要害：基线从未写过 `appVersion`，
+    /// 若 `carrierPresent` 跟着版本号一起变成 false，
+    /// 「版本变更 → 清零」就又变成永远不触发。
+    func testLegacyCarrierWithEmptyVersionStillCountsAsPresent() throws {
+        let store = StateFile(directory: tmpDir)
+        var header = makeHeader()
+        header.appVersion = ""      // 基线：从未写过版本号
+        try store.save(header: header, payloads: makePayloads())
+
+        let result = store.load()
+        XCTAssertTrue(result.carrierPresent, "基线遗留载体必须在场")
+        XCTAssertEqual(result.contents?.header.appVersion, "", "版本号确实是空的")
+    }
+
+    // MARK: - CR-032 · P1-2（自动删除开关不得被版本重置静默关闭）
+
+    /// **版本重置后，自动删除开关仍为开启**。
+    ///
+    /// PRD M1「写入时刻」的**七量终值穷举式**里**没有**自动删除开关
+    /// → 穷举清单之外的东西**不得被静默改动**。
+    ///
+    /// 旧实现用 `StateHeader(round:)` 重建 header → `autoDeleteEnabled` 归 `false`
+    /// → 用户主动开的开关被版本升级悄悄关掉（用户意愿被改写）。
+    func testVersionChangeKeepsAutoDeleteEnabled() throws {
+        let store = StateFile(directory: tmpDir)
+        var header = makeHeader()
+        header.autoDeleteEnabled = true
+        try store.save(header: header, payloads: makePayloads())
+
+        try store.clearCarrierForVersionChange(newAppVersion: "2.0.0 (2)")
+
+        XCTAssertTrue(
+            store.load().contents?.header.autoDeleteEnabled ?? false,
+            "版本重置不得静默关闭自动删除开关"
+        )
+    }
+
+    /// **开关关闭时也保持关闭**（不能把「保留」做成「无条件开启」）。
+    func testVersionChangeKeepsAutoDeleteDisabled() throws {
+        let store = StateFile(directory: tmpDir)
+        var header = makeHeader()
+        header.autoDeleteEnabled = false
+        try store.save(header: header, payloads: makePayloads())
+
+        try store.clearCarrierForVersionChange(newAppVersion: "2.0.0 (2)")
+
+        XCTAssertFalse(
+            store.load().contents?.header.autoDeleteEnabled ?? true,
+            "版本重置不得凭空打开自动删除开关"
+        )
+    }
+
+    /// **显式传入的继承值优先于载体里的值**（调用方已经持有最新态时不必再读盘）。
+    func testVersionChangeUsesExplicitInheritedValues() throws {
+        let store = StateFile(directory: tmpDir)
+        try store.save(header: makeHeader(), payloads: makePayloads())
+
+        let scannedAt = Date(timeIntervalSince1970: 1_700_000_999)
+        try store.clearCarrierForVersionChange(
+            newAppVersion: "2.0.0 (2)",
+            keepingRound: 7,
+            keepingAutoDeleteEnabled: true,
+            keepingLastScanAt: scannedAt
+        )
+
+        let loaded = store.load().contents
+        XCTAssertEqual(loaded?.header.round, 7)
+        XCTAssertTrue(loaded?.header.autoDeleteEnabled ?? false)
+        XCTAssertEqual(loaded?.header.lastScanAt, scannedAt)
+    }
+
+    /// **上次扫描时刻保留**（已发生的事实，不是派生量）。
+    func testVersionChangeKeepsLastScanAt() throws {
+        let store = StateFile(directory: tmpDir)
+        var header = makeHeader()
+        let scannedAt = Date(timeIntervalSince1970: 1_700_000_500)
+        header.lastScanAt = scannedAt
+        try store.save(header: header, payloads: makePayloads())
+
+        try store.clearCarrierForVersionChange(newAppVersion: "2.0.0 (2)")
+
+        XCTAssertEqual(
+            store.load().contents?.header.lastScanAt,
+            scannedAt,
+            "版本重置不得让 ① 页把「上次扫过」说成「没扫过」"
+        )
+    }
+
+    /// **旧报告标记清空**（M1 ③：旧轮归因结果随旧报告失效）。
+    ///
+    /// 留着 `producedAt` 会让 ⑤ 页一边说「样本 —」一边说「报告已产出」。
+    func testVersionChangeClearsSettlementMarker() throws {
+        let store = StateFile(directory: tmpDir)
+        var header = makeHeader()
+        header.settlement = SettlementHeader(
+            producedAt: Date(timeIntervalSince1970: 1_700_000_700),
+            reportId: "old-report"
+        )
+        try store.save(header: header, payloads: makePayloads())
+
+        try store.clearCarrierForVersionChange(newAppVersion: "2.0.0 (2)")
+
+        XCTAssertNil(
+            store.load().contents?.header.settlement.producedAt,
+            "旧报告标记必须随旧报告一并失效"
+        )
+    }
+
+    /// **清零方法返回写入后的载体内容**（调用方直接用它刷新内存态）。
+    ///
+    /// 旧实现返回 `Void`，AppModel 只能手工拼一个 `StateHeader` ——
+    /// 那正是「开关被静默关掉」在内存侧的同款病根。
+    func testClearCarrierReturnsWrittenContents() throws {
+        let store = StateFile(directory: tmpDir)
+        var header = makeHeader()
+        header.autoDeleteEnabled = true
+        try store.save(header: header, payloads: makePayloads())
+
+        let written = try store.clearCarrierForVersionChange(newAppVersion: "2.0.0 (2)")
+
+        XCTAssertEqual(written.header.appVersion, "2.0.0 (2)")
+        XCTAssertTrue(written.header.autoDeleteEnabled, "返回的内存态必须带上开关")
+        XCTAssertEqual(written.header.round, 2, "轮次不变")
+        // 返回值与盘上内容必须一致（否则内存态与磁盘态分叉）
+        XCTAssertEqual(written.header, store.load().contents?.header)
+    }
+
+    // MARK: - CR-032 · schema v2
+
+    /// **v1 文件在 v2 下可读**：新增来源排在枚举尾部，旧段索引含义不变。
+    ///
+    /// 造法：正常编码（每来源三段）后只把二进制版本号改成 1。
+    /// CRC 不覆盖版本字段（`magic / 版本 / 长度 / CRC 自身` 都在覆盖范围外），
+    /// 所以无需重算 CRC，读回仍是合法文件。
+    func testV1FileStillLoadsAfterSchemaBump() throws {
+        let legacySources = Array(Source.allCases.prefix(3))
+        var payloads: [Source: SourcePayload] = [:]
+        for source in legacySources {
+            payloads[source] = SourcePayload(bitmap: Data([0b1010_1010]))
+        }
+        var header = makeHeader(slotCount: 8)
+        header.sources = legacySources.map {
+            SourceHeaderEntry(source: $0, snapshotTaken: true, T: 8, H: 8, b: 8, slotCount: 8)
+        }
+        var data = try StateFileCodec.encode(header: header, payloads: payloads)
+        // 二进制版本字段在 offset 4，小端
+        data[4] = 1
+        data[5] = 0
+        data[6] = 0
+        data[7] = 0
+
+        let decoded = try StateFileCodec.decode(data)
+        XCTAssertEqual(decoded.header.sources.map(\.source), legacySources)
+        XCTAssertEqual(
+            decoded.payloads[legacySources[0]]?.bitmap,
+            Data([0b1010_1010]),
+            "旧段索引必须仍指向同一来源"
+        )
+        XCTAssertNil(decoded.payloads[.brewCache], "v1 文件里没有 brew 段")
+    }
+
+    /// **写盘时把 JSON 头的 schemaVersion 归一为当前版本**。
+    ///
+    /// 否则二进制头写 v2、JSON 头仍写 v1 → 审计看到两个版本号。
+    func testEncodeNormalizesHeaderSchemaVersion() throws {
+        var header = makeHeader()
+        header.schemaVersion = 1
+        let data = try StateFileCodec.encode(header: header, payloads: [:])
+        let decoded = try StateFileCodec.decode(data)
+        XCTAssertEqual(decoded.header.schemaVersion, StateFileCodec.currentSchemaVersion)
+    }
+
+    /// **读盘时把 JSON 头的 schemaVersion 归一为当前版本**（CR-032 · P2-4）。
+    ///
+    /// 旧缺陷：编码器强制写当前版本，但**内存里的 header**留着加载时的旧值
+    /// → 导出报告写出的版本号与实际文件里的对不上（审计看到的是另一个）。
+    ///
+    /// 造法：正常编码后把 JSON 头里的版本号字段改成 1
+    /// （CRC 不覆盖版本字段，见 `testV1FileStillLoadsAfterSchemaBump` 的说明）。
+    /// **读盘后内存里的 `schemaVersion` 归一为当前版本**（CR-032 · P2-4）。
+    ///
+    /// 写侧 `encodeHeader` 强制写当前版本；读侧若不归一，内存态可能与文件里
+    /// 的 JSON 头不一致 → 导出报告按内存态写版本号 → **报错版本与实际载体不符**。
+    ///
+    /// 造样本的方式：编码后把 JSON 头里的版本号**等长改写**成旧值，再**重算 CRC**
+    /// （CRC 覆盖 header，只改字节不重算必然 E-304 —— 那样测的是 CRC 而不是归一）。
+    func testDecodeNormalizesHeaderSchemaVersion() throws {
+        var data = try StateFileCodec.encode(header: makeHeader(), payloads: [:])
+
+        func u32(at off: Int) -> Int {
+            let bytes = [UInt8](data)
+            return (0..<4).reduce(0) { $0 | (Int(bytes[off + $1]) << (8 * $1)) }
+        }
+
+        let headerLen = u32(at: 8)
+        let headerEnd = 12 + headerLen
+        var headerData = Data(data[12..<headerEnd])
+
+        let needle = Data("\"schemaVersion\":\(StateFileCodec.currentSchemaVersion)".utf8)
+        guard let range = headerData.range(of: needle) else {
+            XCTFail("未在头部 JSON 里找到 schemaVersion 字段")
+            return
+        }
+        headerData.replaceSubrange(range, with: Data("\"schemaVersion\":1".utf8))
+        XCTAssertEqual(headerData.count, headerLen, "等长改写，否则段偏移全部错位")
+        data.replaceSubrange(12..<headerEnd, with: headerData)
+
+        // 重算 CRC：覆盖 header + 段表 + payload（**不含 segCount**，与 decode 校验③一致）
+        let segTableStart = headerEnd + 4
+        let segCount = u32(at: headerEnd)
+        let segTableEnd = segTableStart + segCount * SegmentDescriptor.byteCount
+        var crcInput = Data()
+        crcInput.append(headerData)
+        crcInput.append(Data(data[segTableStart..<segTableEnd]))
+        crcInput.append(Data(data[segTableEnd..<(data.count - 4)]))
+        var crcLE = CRC32.checksum(crcInput).littleEndian
+        withUnsafeBytes(of: &crcLE) { data.replaceSubrange((data.count - 4)..<data.count, with: $0) }
+
+        let decoded = try StateFileCodec.decode(data)
+        XCTAssertEqual(
+            decoded.header.schemaVersion,
+            StateFileCodec.currentSchemaVersion,
+            "读盘后内存里的版本号必须与「下一次落盘会写成什么」一致"
+        )
     }
 
     // MARK: - 段序固定

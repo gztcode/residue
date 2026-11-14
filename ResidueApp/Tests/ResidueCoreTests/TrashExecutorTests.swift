@@ -512,6 +512,63 @@ final class TrashExecutorTests: XCTestCase {
         XCTAssertGreaterThan(steady, first, "稳定后档必须比首次档宽")
     }
 
+    // ======================================================================
+    // MARK: - 来源总量字节（AC-15 比例档的分母 · CR-032 · P2-1）
+    // ======================================================================
+
+    /// **来源总量按「字节」算，不是按「条数」算**。
+    ///
+    /// 旧缺陷：`AppModel.sourceTotalBytes(for:)` 优先返回 `entry.T`
+    /// ——而 `T` 是**快照条目数**（单位：条）。拿条数当字节，
+    /// 上限就变成「条数 × 10% B」：113 个瓶子 → 上限 11 B → **几乎删不动**。
+    func testSourceTotalBytesUsesBytesNotCounts() {
+        let candidates = [
+            ScanEngine.Candidate(
+                path: "/tmp/a.tar.gz", birthtime: Date(timeIntervalSince1970: 1),
+                bytes: 1_000_000, isDirectory: false, source: Source.brewCache.rawValue
+            ),
+            ScanEngine.Candidate(
+                path: "/tmp/b.tar.gz", birthtime: Date(timeIntervalSince1970: 2),
+                bytes: 2_000_000, isDirectory: false, source: Source.brewCache.rawValue
+            ),
+        ]
+        XCTAssertEqual(
+            TrashExecutor.sourceTotalBytes(candidates: candidates, source: .brewCache),
+            3_000_000,
+            "来源总量必须是候选字节之和，不是条目数"
+        )
+    }
+
+    /// **不同来源互不相加**（分母必须是「该来源」的总量）。
+    func testSourceTotalBytesIsPerSource() {
+        let candidates = [
+            ScanEngine.Candidate(
+                path: "/tmp/uv1", birthtime: Date(timeIntervalSince1970: 1),
+                bytes: 100, isDirectory: false, source: Source.uvCache.rawValue
+            ),
+            ScanEngine.Candidate(
+                path: "/tmp/brew1", birthtime: Date(timeIntervalSince1970: 2),
+                bytes: 700, isDirectory: false, source: Source.brewCache.rawValue
+            ),
+        ]
+        XCTAssertEqual(TrashExecutor.sourceTotalBytes(candidates: candidates, source: .uvCache), 100)
+        XCTAssertEqual(TrashExecutor.sourceTotalBytes(candidates: candidates, source: .brewCache), 700)
+    }
+
+    /// **该来源没有候选时总量为 0**（比例档为 0 → 无候选可删，不影响）。
+    func testSourceTotalBytesIsZeroForAbsentSource() {
+        let candidates = [
+            ScanEngine.Candidate(
+                path: "/tmp/uv1", birthtime: Date(timeIntervalSince1970: 1),
+                bytes: 100, isDirectory: false, source: Source.uvCache.rawValue
+            )
+        ]
+        XCTAssertEqual(
+            TrashExecutor.sourceTotalBytes(candidates: candidates, source: .pipCache),
+            0
+        )
+    }
+
 
     // ======================================================================
     // MARK: - `t1` 预检值 与 `t2` 实测值（IF-07 / B-02）

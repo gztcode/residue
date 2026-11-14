@@ -198,8 +198,26 @@ final class MetricsTests: XCTestCase {
     // MARK: - 判定域
 
     func testDecisionDomainExcludesPipx() {
-        let members = DecisionDomain.members(snapshotSources: [.uvCache, .npmNpx, .pipxRun])
+        let entries = [Source.uvCache, .npmNpx, .pipxRun].map {
+            SourceHeaderEntry(source: $0, snapshotTaken: true, T: 5, H: 5, b: 5)
+        }
+        let members = DecisionDomain.members(from: entries)
         XCTAssertEqual(members, [.uvCache, .npmNpx])
+    }
+
+    /// CR-032：判定域只收「本轮真的出现过」的来源。
+    ///
+    /// 三条排除理由各一个用例：没取快照 / `T = 0` / 静态仅报告（pip）。
+    /// 若不排除，没装 Homebrew 的机器会因 `b = 0` 永远判不通过 ——
+    /// 「装没装某个工具」决定产品能不能点亮，与契约相反。
+    func testDecisionDomainRequiresSnapshotAndPositiveTotal() {
+        let entries = [
+            SourceHeaderEntry(source: .uvCache, snapshotTaken: true, T: 30, H: 30, b: 30),
+            SourceHeaderEntry(source: .npmNpx, snapshotTaken: false, T: 10, H: 10, b: 10),
+            SourceHeaderEntry(source: .brewCache, snapshotTaken: true, T: 0, H: 0, b: 0),
+            SourceHeaderEntry(source: .pipCache, snapshotTaken: true, T: 10, H: 10, b: 10),
+        ]
+        XCTAssertEqual(DecisionDomain.members(from: entries), [.uvCache])
     }
 
     // MARK: - AC-08 组 A / 组 B

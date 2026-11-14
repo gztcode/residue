@@ -35,6 +35,9 @@ final class UpstreamAndRecordTests: XCTestCase {
             ("npm", ["cache", "clean", "--force"]),
             ("brew", ["cleanup"]),
             ("brew", ["cleanup", "--prune=all"]),
+            ("pip", ["cache", "purge"]),
+            ("pip3", ["cache", "purge"]),
+            ("python3", ["-m", "pip", "cache", "purge"]),
             ("rm", ["-rf", "/tmp/x"]),
             ("trash-put", ["/tmp/x"]),
             ("mv", ["/tmp/a", "/tmp/b"]),
@@ -57,6 +60,10 @@ final class UpstreamAndRecordTests: XCTestCase {
             ("brew", ["--cache"]),
             ("pipx", ["list"]),
             ("pipx", ["environment"]),
+            // CR-032：pip 缓存定位三形态（只读）
+            ("pip", ["cache", "dir"]),
+            ("pip3", ["cache", "dir"]),
+            ("python3", ["-m", "pip", "cache", "dir"]),
         ]
         for (exe, args) in allowed {
             XCTAssertNil(
@@ -141,6 +148,73 @@ final class UpstreamAndRecordTests: XCTestCase {
         XCTAssertNil(outcome.record.exitCode)
         XCTAssertNotNil(outcome.record.failure)
         XCTAssertTrue(outcome.record.failure?.contains("总预算") ?? false)
+    }
+
+    /// **总预算必须跨调用累加**（N6：总探测 ≤ 10 s）。
+    ///
+    /// 这曾是静默缺陷：`UpstreamRunner` 是 `struct`，`consumed` 构造后永不增加，
+    /// `consumed + 2 > 10` 恒为假 → 总预算形同虚设。
+    /// 用**自造的可执行**（临时目录里一个名为 `uv` 的脚本）做真执行，
+    /// 不依赖本机装没装 uv / brew / pip。
+    func testBudgetAccumulatesAcrossCalls() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("residue-upstream-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let fakeUV = dir.appendingPathComponent("uv")
+        try "#!/bin/sh\nsleep 0.05\nexit 0\n".write(to: fakeUV, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755], ofItemAtPath: fakeUV.path
+        )
+
+        // 单探测预算 = 总预算：第一次恰好卡在边界内放行，之后必须被累计耗时挡住。
+        let runner = UpstreamRunner(perProbeTimeout: 2.0, totalBudget: 2.0)
+        let first = runner.run(executable: "uv", args: ["cache", "dir"], searchPath: [dir.path])
+        XCTAssertNil(first.record.failure, "第一次调用应在预算内正常执行")
+        XCTAssertGreaterThan(runner.consumedTime, 0, "调用耗时必须计入 consumedTime")
+
+        let second = runner.run(executable: "uv", args: ["cache", "dir"], searchPath: [dir.path])
+        XCTAssertNil(second.record.exitCode, "预算耗尽后不得再执行")
+        XCTAssertTrue(
+            second.record.failure?.contains("总预算") ?? false,
+            "第二次调用应因累计超预算被拒，实为：\(second.record.failure ?? "nil")"
+        )
+    }
+
+    /// **预算是「每次扫描」的，不是「进程生命周期」的**（CR-032 · P1-3）。
+    ///
+    /// N6 写的是「总探测 ≤ 10 s」——**一次扫描**的总探测。
+    /// 若同一个 runner 被复用（`AppModel` 曾持有单例），预算会**跨扫描累计**：
+    /// 第一次扫描用掉 9 s → 第二次扫描只剩 1 s → 第三次起全部探测被拒
+    /// → 探测失败回退默认路径 → 用户自定义的缓存目录被静默当成 0
+    /// → **来源静默退出判定域**。
+    ///
+    /// 本测试锁住「新建 runner = 预算归零」这一语义。
+    func testFreshRunnerStartsWithFullBudget() {
+        let exhausted = UpstreamRunner(perProbeTimeout: 2.0, totalBudget: 2.0, consumed: 4.0)
+        XCTAssertNotNil(
+            exhausted.run(executable: "uv", args: ["cache", "dir"]).record.failure,
+            "预算耗尽的 runner 必须拒绝执行"
+        )
+
+        let fresh = UpstreamRunner(perProbeTimeout: 2.0, totalBudget: 2.0)
+        XCTAssertEqual(fresh.consumedTime, 0, "新建 runner 的预算必须是满的")
+        XCTAssertEqual(
+            fresh.consumedTime, 0,
+            "预算不跨 runner 累计（否则第二次扫描起全部探测被拒）"
+        )
+    }
+
+    /// **两个 runner 之间预算互不影响**（各自独立计账）。
+    func testBudgetIsPerRunnerNotGlobal() {
+        let a = UpstreamRunner(perProbeTimeout: 2.0, totalBudget: 2.0, consumed: 1.9)
+        let b = UpstreamRunner(perProbeTimeout: 2.0, totalBudget: 2.0)
+        XCTAssertEqual(b.consumedTime, 0, "B runner 不得继承 A runner 的消耗")
+        XCTAssertNotNil(
+            a.run(executable: "uv", args: ["cache", "dir"]).record.failure,
+            "A runner 接近上限时应拒绝"
+        )
     }
 
     /// **真跑一条绝对只读命令**（`/bin/echo` 不在白名单 → 应被拒；验证不放行任意命令）。

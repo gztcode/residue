@@ -54,6 +54,10 @@ enum Tokens {
         static let sourceUV = SwiftUI.Color(hex: 0x7C8CF8)
         static let sourceNPM = SwiftUI.Color(hex: 0xE8A84C)
         static let sourcePipx = SwiftUI.Color(hex: 0x56C596)
+        /// CR-032 新增：Homebrew（琥珀棕）与 pip（青蓝）。
+        /// **识别色不是状态色**：两者都不得与信号色 / 危险色 / 成功色混用。
+        static let sourceBrew = SwiftUI.Color(hex: 0xB37A4E)
+        static let sourcePip = SwiftUI.Color(hex: 0x5FB3C9)
         /// 未知来源（不猜颜色）。
         static let sourceUnknown = SwiftUI.Color(hex: 0x6E7681)
 
@@ -65,6 +69,8 @@ enum Tokens {
             case "uv_cache": return sourceUV
             case "npm_npx": return sourceNPM
             case "pipx_run": return sourcePipx
+            case "brew_cache": return sourceBrew
+            case "pip_cache": return sourcePip
             default: return sourceUnknown
             }
         }

@@ -671,7 +671,10 @@ public enum ReportMatrix {
     public static let headerHeight: CGFloat = 60
 
     /// ③ 列宽（需容纳两行副标）。
-    public static let sampleColumnWidth: CGFloat = 150
+    ///
+    /// CR-033 / M-9 由 150 收窄到 130：④ / ⑥ 两列要装下非判定域行的整句契约文案，
+    /// 七列合计必须仍 ≤ 695 pt（可用宽度 751 − 单元格内边距 56）。
+    public static let sampleColumnWidth: CGFloat = 130
 
     /// ⑥ 列的列名。
     public static var l0ColumnTitle: String {

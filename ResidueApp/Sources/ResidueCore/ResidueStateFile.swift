@@ -282,7 +282,12 @@ public enum StateFileCodec {
     /// Magic 4 B。
     public static let magic: [UInt8] = Array("RSD1".utf8)
     /// 当前支持的 schema 版本。
-    public static let currentSchemaVersion = 1
+    ///
+    /// **v2（CR-032）**：来源集合由 3 个扩到 5 个（新增 `brew_cache` / `pip_cache`）。
+    /// 旧版读 v2 文件时，段表中的 `sourceIndex = 3/4` 会越界 → 只能判 `E-304`（损坏）；
+    /// 升版本号后读到的第一件事就是 `E-301`（只读降级），语义正确。
+    /// v1 文件在 v2 下仍可读：新增来源排在枚举尾部，旧段索引含义不变。
+    public static let currentSchemaVersion = 2
 
     /// 当前 schema 版本（供 `StateFile` 引用）。
     public static var schemaVersion: Int { currentSchemaVersion }
@@ -400,6 +405,10 @@ public enum StateFileCodec {
     /// 编码头部 JSON（**不含 bytes** —— 那是写完才知道的）。
     private static func encodeHeader(_ header: StateHeader, segmentCount: Int) throws -> Data {
         var h = header
+        // **写入即升级到当前 schema**：二进制头固定写 `currentSchemaVersion`，
+        // 若 JSON 头保留旧值，文件里会出现「二进制 v2 / JSON v1」两个版本号，
+        // 读回时只信其中一个，审计看到的是另一个（CR-032）。
+        h.schemaVersion = currentSchemaVersion
         h.bytes = ByteCounts()   // 写时未知；读时校验不依赖它
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
@@ -530,6 +539,17 @@ public enum StateFileCodec {
         guard var header = try? decoder.decode(StateHeader.self, from: headerData) else {
             throw StateFileError.segmentValidationFailed(detail: "header JSON 解析失败")
         }
+        // **内存里的 schema 版本号归一为当前版本**（CR-032 · P2-4）。
+        //
+        // 编码器**强制**写 `currentSchemaVersion`（文件永远是当前 schema），
+        // 而 JSON 头里的 `schemaVersion` 字段可能仍是文件自己的旧值
+        // （v1 文件读进来就是 1）→ 内存态与「下一次落盘会写成什么」对不上
+        // → 导出报告写出的版本号**与实际文件里的对不上**（审计看到的是另一个）。
+        //
+        // 归一是**正确的**：解码已按**当前** `Source.allCases` 解释段索引
+        // （v1 文件在 v2 下可读，见 CR-032 的兼容测试），
+        // 所以内存态本来就是**当前 schema 的语义**。
+        header.schemaVersion = currentSchemaVersion
         header.bytes = ByteCounts(
             header: headerLen,
             segTable: segCount * SegmentDescriptor.byteCount,

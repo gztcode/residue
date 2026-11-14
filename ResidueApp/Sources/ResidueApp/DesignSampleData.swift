@@ -17,14 +17,17 @@ extension PageModel {
     static func skeleton() -> PageModel {
         var m = PageModel()
 
-        // ① 三区块
+        // ① 五区块（CR-032：新增 Homebrew / pip）
         m.overviewBlocks = [
             OverviewBlock(title: "uv cache", slot: .metric(2_400_000_000, unit: .bytes)),
             OverviewBlock(title: "npm/_npx", slot: .metric(860_000_000, unit: .bytes)),
             OverviewBlock(title: "pipx run", slot: .metric(140_000_000, unit: .bytes)),
+            OverviewBlock(title: Source.brewCache.displayName, slot: .metric(900_000_000, unit: .bytes)),
+            OverviewBlock(title: "pip cache", slot: .metric(40_000_000, unit: .bytes)),
         ]
-        // 总量与来源占比：**与上面三区块逐项相加自洽**（2400 + 860 + 140 = 3400 MB）
-        let totalBytes = 3_400_000_000
+        // 总量与来源占比：**与上面五区块逐项相加自洽**
+        // （2400 + 860 + 140 + 900 + 40 = 4340 MB）
+        let totalBytes = 4_340_000_000
         m.totalScannedSlot = .metric(totalBytes, unit: .bytes)
         m.sourceShares = [
             SourceShareRow(
@@ -54,6 +57,24 @@ extension PageModel {
                 share: RatioSlot(numerator: 140_000_000, denominator: totalBytes),
                 inDecisionDomain: false
             ),
+            SourceShareRow(
+                sourceKey: Source.brewCache.rawValue,
+                displayName: Source.brewCache.displayName,
+                path: Source.brewCache.canonicalCachePath,
+                itemCount: .metric(113, unit: .items),
+                bytes: .metric(900_000_000, unit: .bytes),
+                share: RatioSlot(numerator: 900_000_000, denominator: totalBytes),
+                inDecisionDomain: true
+            ),
+            SourceShareRow(
+                sourceKey: Source.pipCache.rawValue,
+                displayName: "pip cache",
+                path: Source.pipCache.canonicalCachePath,
+                itemCount: .metric(35, unit: .items),
+                bytes: .metric(40_000_000, unit: .bytes),
+                share: RatioSlot(numerator: 40_000_000, denominator: totalBytes),
+                inDecisionDomain: false
+            ),
         ]
         m.observationRatio = RatioSlot(numerator: 14, denominator: ObservationProgress.requiredDays)
         m.observationDaySlot = .ratio(14, ObservationProgress.requiredDays)
@@ -72,6 +93,12 @@ extension PageModel {
                          bytes: .metric(52_000_000, unit: .bytes),
                          sourceKey: Source.pipxRun.rawValue,
                          share: RatioSlot(numerator: 52_000_000, denominator: totalBytes)),
+            // CR-032：pip 仅报告（不参与删除）——样例必须出现一行，
+            // 否则走查看不到「pip 行恒『仅报告』」这条判据（DAC-109）。
+            CandidateRow(name: "pip/http-v2/ab/cd/ef…", participation: .reportOnly,
+                         bytes: .metric(28_000_000, unit: .bytes),
+                         sourceKey: Source.pipCache.rawValue,
+                         share: RatioSlot(numerator: 28_000_000, denominator: totalBytes)),
         ]
         m.pageIndex = 0
         m.pageCount = 1
@@ -101,8 +128,9 @@ extension PageModel {
                          detail: .ratio(14, ObservationProgress.requiredDays)),
             GateCheckRow(kind: .settlement, passed: true,
                          detail: .text(L.pick("已产出", "Produced"))),
+            // 判定域 = uv / npm / Homebrew 三个（pipx 与 pip 仅报告）
             GateCheckRow(kind: .decisionDomain, passed: true,
-                         detail: .metric(2, unit: .items)),
+                         detail: .metric(3, unit: .items)),
             GateCheckRow(kind: .sample, passed: false, subject: "uv cache",
                          detail: .ratio(27, 30)),
             GateCheckRow(kind: .misses, passed: true, subject: "uv cache",
@@ -130,6 +158,22 @@ extension PageModel {
             SampleProgressRow(
                 sourceKey: Source.pipxRun.rawValue,
                 displayName: "pipx run",
+                ratio: nil,
+                sample: .metric(0, unit: .items),
+                threshold: .text(L.pick("不适用", "N/A")),
+                passed: nil
+            ),
+            SampleProgressRow(
+                sourceKey: Source.brewCache.rawValue,
+                displayName: Source.brewCache.displayName,
+                ratio: RatioSlot(numerator: 30, denominator: 30),
+                sample: .metric(30, unit: .items),
+                threshold: .metric(30, unit: .none),
+                passed: true
+            ),
+            SampleProgressRow(
+                sourceKey: Source.pipCache.rawValue,
+                displayName: "pip cache",
                 ratio: nil,
                 sample: .metric(0, unit: .items),
                 threshold: .text(L.pick("不适用", "N/A")),
@@ -211,13 +255,30 @@ extension PageModel {
                     .text("pipx run"),
                     .text(L.pick("仅报告", "Report only")),
                     .ratio(0, 0),
-                    .text(L.pick("不适用", "N/A")),
+                    // ④ / ⑥ **逐字取 PRD AC-09**（CR-033 / M-9）：
+                    // 样例也是契约的一份证据，写旧值等于把缺陷画进设计稿
+                    .text(UICopy.notInDecisionDomain),
                     .metric(2, unit: .none),
-                    .metric(0, unit: .times),
+                    .text(UICopy.l0NotChecked),
                     .text(L.pick("仅报告", "Report only")),
                 ],
-                multiSlotColumn: 5,
-                extraSlots: [.metric(0, unit: .times)]
+                // 非判定域行 ⑥ **整格一句**，不给第二个槽位
+                multiSlotColumn: nil,
+                extraSlots: []
+            ),
+            ReportRow(
+                source: Source.pipCache.displayName,
+                slots: [
+                    .text(Source.pipCache.displayName),
+                    .text(L.pick("仅报告", "Report only")),
+                    .ratio(0, 0),
+                    .text(UICopy.notInDecisionDomain),
+                    .metric(2, unit: .none),
+                    .text(UICopy.l0NotChecked),
+                    .text(L.pick("仅报告", "Report only")),
+                ],
+                multiSlotColumn: nil,
+                extraSlots: []
             ),
         ]
         // 页级状态行**必须与 M1 同构**（前置数字式），否则 DAC-55 判不通过

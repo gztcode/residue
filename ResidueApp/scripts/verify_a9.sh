@@ -210,7 +210,7 @@ echo ""
 echo "--- 五、视觉基线落地（v2 · CR-031）---"
 # ---------------------------------------------------------------------------
 T="$UI_DIR/DesignTokens.swift"
-for hex in 0x0D0F13 0x15181E 0x1B1F27 0xECEEF2 0x9AA1AC 0x6E7681 0x6C79F0 0xE5534B 0x46B98A 0xE8A84C 0x7C8CF8 0x56C596; do
+for hex in 0x0D0F13 0x15181E 0x1B1F27 0xECEEF2 0x9AA1AC 0x6E7681 0x6C79F0 0xE5534B 0x46B98A 0xE8A84C 0x7C8CF8 0x56C596 0xB37A4E 0x5FB3C9; do
   if grep -qF -- "$hex" "$T" 2>/dev/null; then
     ok "色值 $hex 已落地"
   else

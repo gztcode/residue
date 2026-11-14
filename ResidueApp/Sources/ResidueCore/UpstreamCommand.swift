@@ -100,6 +100,13 @@ public enum UpstreamWhitelist {
               purpose: "列 pipx 环境（只读举证；**不含过期清理**）"),
         .init(executable: "pipx", argumentPrefix: ["environment"],
               purpose: "取 pipx 环境目录（只读定位）"),
+        // ---- CR-032：pip 缓存定位（三形态，逐个尝试；每次调用都落盘）----
+        .init(executable: "pip", argumentPrefix: ["cache", "dir"],
+              purpose: "取 pip 缓存目录（只读定位）"),
+        .init(executable: "pip3", argumentPrefix: ["cache", "dir"],
+              purpose: "取 pip 缓存目录（只读定位；只有 pip3 的机器）"),
+        .init(executable: "python3", argumentPrefix: ["-m", "pip", "cache", "dir"],
+              purpose: "取 pip 缓存目录（只读定位；无独立 pip 入口时）"),
     ]
 
     /// **显式拒绝清单**（即便参数恰好匹配前缀也拒绝）。
@@ -115,6 +122,12 @@ public enum UpstreamWhitelist {
         .init(executable: "npm", argumentPrefix: ["cache", "clean"],
               purpose: "直接删文件的上游命令（AC-19 禁止）"),
         .init(executable: "brew", argumentPrefix: ["cleanup"],
+              purpose: "直接删文件的上游命令（AC-19 禁止）"),
+        .init(executable: "pip", argumentPrefix: ["cache", "purge"],
+              purpose: "直接删文件的上游命令（AC-19 禁止）"),
+        .init(executable: "pip3", argumentPrefix: ["cache", "purge"],
+              purpose: "直接删文件的上游命令（AC-19 禁止）"),
+        .init(executable: "python3", argumentPrefix: ["-m", "pip", "cache", "purge"],
               purpose: "直接删文件的上游命令（AC-19 禁止）"),
         .init(executable: "trash-put", argumentPrefix: [],
               purpose: "非 macOS 原生第三方命令，2C 不能假设已装（AC-19 已剔除）"),
@@ -153,7 +166,11 @@ public enum UpstreamWhitelist {
 ///
 /// **所有调用都返回一条 `UpstreamCommand` 记录**——调用方必须把它写进
 /// `scan.jsonl.upstreamCommands`（§5.4）。未落盘即「无法证明」。
-public struct UpstreamRunner: Sendable {
+///
+/// **引用类型**（CR-032）：总预算要求「每次调用的耗时累加」。用 `struct` 时
+/// `consumed` 是 `let`，构造后永不增加 → `consumed + 2 > 10` 恒为假，
+/// N6 的总预算形同虚设。改成 `final class` + 锁，让多次 `run` 共享同一个计数器。
+public final class UpstreamRunner: @unchecked Sendable {
 
     /// 单次探测超时（N6：单探测 ≤ 2 s）。
     public let perProbeTimeout: TimeInterval
@@ -161,12 +178,20 @@ public struct UpstreamRunner: Sendable {
     public let totalBudget: TimeInterval
 
     /// 本次 runner 已消耗的时间（用于总预算判定）。
-    private let consumed: TimeInterval
+    private var consumed: TimeInterval
+    private let lock = NSLock()
 
     public init(perProbeTimeout: TimeInterval = 2.0, totalBudget: TimeInterval = 10.0, consumed: TimeInterval = 0) {
         self.perProbeTimeout = perProbeTimeout
         self.totalBudget = totalBudget
         self.consumed = consumed
+    }
+
+    /// 当前已消耗时间（测试 / 诊断用）。
+    public var consumedTime: TimeInterval {
+        lock.lock()
+        defer { lock.unlock() }
+        return consumed
     }
 
     /// 一次调用的结果：记录 + 标准输出（若有）。
@@ -211,7 +236,7 @@ public struct UpstreamRunner: Sendable {
         }
 
         // ② 总预算判定（N6）
-        if consumed + perProbeTimeout > totalBudget + 1e-9 {
+        if consumedTime + perProbeTimeout > totalBudget + 1e-9 {
             return RunOutcome(
                 record: UpstreamCommand(
                     cmd: executable, args: args,
@@ -269,6 +294,11 @@ public struct UpstreamRunner: Sendable {
         }
 
         let elapsedMs = Int(Date().timeIntervalSince(started) * 1000)
+        // 总预算累计（N6）：本次实际耗时计入**同一个 runner**，
+        // 后续调用据此拒绝 —— 否则 `consumed` 永远是构造时的初值。
+        lock.lock()
+        consumed += Double(elapsedMs) / 1000.0
+        lock.unlock()
         var stdout: String?
         if failure == nil {
             let data = outPipe.fileHandleForReading.readDataToEndOfFile()
