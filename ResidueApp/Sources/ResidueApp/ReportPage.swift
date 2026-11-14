@@ -278,14 +278,18 @@ struct ReportMatrixView: View {
         .background(Tokens.Color.surface, in: RoundedRectangle(cornerRadius: Tokens.Radius.card))
     }
 
-    /// 单元格字号：**④ 门槛列的非数值槽位取 11 pt**（CR-033 / M-9）。
+    /// 单元格字号：**③ / ④ 两列的非数值槽位取 11 pt**（CR-033 / M-9 · R-2）。
     ///
-    /// 该列宽按数值 `H` 定。非判定域行放的是整句契约文案「不适用（不入判定域）」，
-    /// 13 pt 在这个宽度下折成两行会超出 32 pt 的固定行高（v2 契约值，不动）——
+    /// 这两列的列宽按数值定。非判定域行放的是整句契约文案
+    ///（「扫描时点值 · 非结算值」/「不适用（不入判定域）」），13 pt 在这个宽度下
+    /// 折成两行会超出 32 pt 的固定行高（v2 契约值，不动）——
     /// 11 pt 两行 28.6 pt 装得下，且与 ⑥ 列整句同字号。
     private func cellFont(index: Int, slot: SemanticSlot) -> Font {
-        if index == 3, case .text = slot { return Tokens.Typography.secondary }
-        return Tokens.Typography.body
+        guard index == 2 || index == 3 else { return Tokens.Typography.body }
+        switch slot {
+        case .metric, .ratio, .percent, .duration: return Tokens.Typography.body
+        default: return Tokens.Typography.secondary
+        }
     }
 
     /// 列宽（**加总必须 ≤ 可用宽度**，否则整页被撑宽、右侧截断）。

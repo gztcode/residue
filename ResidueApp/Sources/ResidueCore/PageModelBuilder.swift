@@ -714,17 +714,37 @@ var model = PageModel()
     ) -> ReportRow {
         let inDomain = entry.source.isInDecisionDomain
 
-        // ③ 样本 / 总量：报告产出前为「本轮未结算」
-        let sampleSlot: SemanticSlot = produced
-            ? .ratio(entry.K ?? 0, entry.T ?? 0)
-            : .unavailable(reason: UICopy.notSettledThisRound)
+        // ③ 样本 / 总量。
+        //
+        // - 判定域行：报告产出前「本轮未结算」，产出后 `K / T`（结算值）。
+        // - **非判定域行**：永远取**本窗扫描时点**的条目数，并在同一格标注
+        //   「扫描时点值 · 非结算值」（PRD AC-09 判定逐字，CR-033 / R-2）。
+        //   该行不取快照、`K` / `J` 无语义，故不能套用 `K / T`，也不套用 `K + J = T`。
+        var sampleCell: [SemanticSlot]
+        if !inDomain {
+            sampleCell = [
+                .metric(entry.slotCount, unit: .items),
+                .unavailable(reason: UICopy.scanTimeNonSettled),
+            ]
+        } else {
+            sampleCell = [
+                produced
+                    ? .ratio(entry.K ?? 0, entry.T ?? 0)
+                    : .unavailable(reason: UICopy.notSettledThisRound)
+            ]
+        }
 
-        // ④ 门槛：`H` 为 null（未取快照）或非判定域 → 不适用
+        // ④ 门槛：**报告产出前**一律「本轮未结算」（PRD 1067 行按列列举，CR-033 / R-4）。
+        //
+        // `H` 在取快照时就已存在，但它此刻只是**待验门槛**，不是本轮的结算值；
+        // 提前显示会被读成「已经按这个门槛判过了」。
         let thresholdSlot: SemanticSlot
         if !inDomain {
             // **逐字取 PRD AC-09**（CR-033 / M-9）：只写「不适用」读者分不清
             // 「不参与判定」与「门槛算出来是 0」
             thresholdSlot = .text(UICopy.notInDecisionDomain)
+        } else if !produced {
+            thresholdSlot = .unavailable(reason: UICopy.notSettledThisRound)
         } else if let h = entry.H {
             thresholdSlot = .metric(h, unit: .none)
         } else {
@@ -761,20 +781,20 @@ var model = PageModel()
             conclusionSlot = .text(qualified ? L.pick("达标", "Qualified") : L.pick("未达标", "Not qualified"))
         }
 
+        // 非判定域行 ⑥ **只有一个**槽位（整格一句），视图据此按整列宽渲染
+        let l0Cell: [SemanticSlot] = bSlot.map { [aSlot, $0] } ?? [aSlot]
+
         return ReportRow(
             source: entry.source.displayName,
-            slots: [
-                .text(entry.source.displayName),
-                .text(inDomain ? L.pick("在域", "In domain") : L.pick("仅报告", "Report only")),
-                sampleSlot,
-                thresholdSlot,
-                .metric(round, unit: .none),
-                aSlot,
-                conclusionSlot,
-            ],
-            multiSlotColumn: 5,
-            // 非判定域行**只有一个** ⑥ 槽位（整格一句），交给视图按「整列宽」渲染
-            extraSlots: bSlot.map { [$0] } ?? []
+            cells: [
+                [.text(entry.source.displayName)],
+                [.text(inDomain ? L.pick("在域", "In domain") : L.pick("仅报告", "Report only"))],
+                sampleCell,
+                [thresholdSlot],
+                [.metric(round, unit: .none)],
+                l0Cell,
+                [conclusionSlot],
+            ]
         )
     }
 }

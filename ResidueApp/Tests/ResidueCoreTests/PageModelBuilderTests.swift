@@ -322,12 +322,34 @@ final class PageModelBuilderTests: XCTestCase {
 
         // ③ 样本 / 总量
         XCTAssertEqual(row.cells[2][0].displayText, UICopy.notSettledThisRound)
+        // ④ 门槛：产出前 `H` 只是**待验门槛**，不是结算值（CR-033 / R-4）
+        XCTAssertEqual(
+            row.cells[3][0].displayText, UICopy.notSettledThisRound,
+            "产出前显示 H 会被读成「已经按这个门槛判过了」"
+        )
         // ⑥ 左值（a）
         XCTAssertEqual(row.cells[5][0].displayText, UICopy.notSettledThisRound)
         // ⑥ 右值（b）**照常填**
         XCTAssertEqual(row.cells[5][1].displayText, "7次", "b 在报告产出前照常填实际值")
         // ⑦ 结论
         XCTAssertEqual(row.cells[6][0].displayText, UICopy.notSettledThisRound)
+    }
+
+    /// **非判定域行的 ④ 不随「报告是否产出」变**（CR-033 / M-9 与 R-4 的边界）。
+    ///
+    /// 该行不参与门槛判定 —— 产出前也照样说「不适用（不入判定域）」，
+    /// 不能因为「未结算」就把一句恒真的说明改成临时状态。
+    func testReportOnlyRowThresholdIgnoresProducedFlag() {
+        let entries = [
+            SourceHeaderEntry(source: .pipxRun, snapshotTaken: true,
+                              T: 5, K: nil, J: nil, H: 5, a: 0, b: 3, slotCount: 5, doneCount: 0),
+        ]
+        let input = PageModelBuilder.Input(
+            contents: makeContents(makeHeader(countedDays: 5, produced: false, entries: entries))
+        )
+        let m = PageModelBuilder.build(input)
+
+        XCTAssertEqual(m.reportRows[0].cells[3][0].displayText, UICopy.notInDecisionDomain)
     }
 
     /// **`pipx` 行：④ / ⑥ 逐字取 PRD AC-09**（CR-033 / M-9）。
@@ -368,6 +390,37 @@ final class PageModelBuilderTests: XCTestCase {
             XCTAssertEqual(row.cells[5][0].displayText, UICopy.l0NotChecked)
             XCTAssertEqual(row.cells[5][0].displayText, "不适用 · 未执行 L0 检查")
         }
+    }
+
+    /// **非判定域行 ③ = 扫描时点值 + 标注**（CR-033 · R-2）。
+    ///
+    /// 该行不取快照、`K` / `J` 无语义 → 不能套 `K / T`，也不套 `K + J = T`；
+    /// 取本窗扫描到的条目数，并在同一格标注「扫描时点值 · 非结算值」。
+    func testReportOnlyRowSampleCarriesScanTimeAnnotation() {
+        let entries = [
+            SourceHeaderEntry(source: .pipxRun, snapshotTaken: false,
+                              T: nil, K: nil, J: nil, H: nil, a: 0, b: 0,
+                              slotCount: 4, doneCount: 0),
+        ]
+        let input = PageModelBuilder.Input(contents: makeContents(makeHeader(entries: entries)))
+        let m = PageModelBuilder.build(input)
+        let row = m.reportRows[0]
+
+        XCTAssertEqual(row.cells[2].count, 2, "③ 两槽位：扫描值 + 标注")
+        XCTAssertEqual(row.cells[2][0].displayText, "4条", "取本窗扫描到的条目数")
+        XCTAssertEqual(row.cells[2][1].displayText, UICopy.scanTimeNonSettled)
+        XCTAssertEqual(row.cells[2][1].displayText, "扫描时点值 · 非结算值")
+    }
+
+    /// **判定域行 ③ 不受标注影响**（回归）。
+    func testInDomainRowSampleHasNoScanTimeAnnotation() {
+        let m = PageModelBuilder.build(
+            PageModelBuilder.Input(contents: makeContents(makeHeader()))
+        )
+        let row = m.reportRows[0]
+
+        XCTAssertEqual(row.cells[2].count, 1)
+        XCTAssertNotEqual(row.cells[2][0].displayText, UICopy.scanTimeNonSettled)
     }
 
     /// **判定域行 ⑥ 仍是两个数值**（回归：别把整句套到判定域行上）。

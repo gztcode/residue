@@ -507,7 +507,7 @@ check_all ✅ / verify_r2 ✅（PRD v5.5 / R2 v1.8）
 ### 状态
 
 ```
-swift test       337 全绿（CR-032 收尾 + CR-033）
+swift test       340 全绿（CR-032 收尾 + CR-033 两批）
 verify_a9        88/88
 verify_codes     11/11
 --verify-wiring  46/46

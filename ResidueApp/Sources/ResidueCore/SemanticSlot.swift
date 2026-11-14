@@ -348,6 +348,14 @@ public enum UICopy {
         L.pick("不适用（不入判定域）", "N/A (not in decision domain)")
     }
 
+    /// ⑤ 页 ③ 列：**非判定域行**单元格内的标注（PRD AC-09 判定逐字）。
+    ///
+    /// 该行的数值是**本窗扫描时点**的，不是观察期结算值 —— 同一列两个时点
+    /// 不共用一个列头，所以在单元格里标出来（CR-033 / R-2）。
+    public static var scanTimeNonSettled: String {
+        L.pick("扫描时点值 · 非结算值", "Scan-time value · not settled")
+    }
+
     /// ⑤ 页 ⑥ 列：**非判定域行**的 L0 误判 / 检查取值（整格一句，不拆两值）。
     ///
     /// **逐字取 PRD AC-09 判定**（CR-033 / M-9）。该行从未执行过 L0 检查，

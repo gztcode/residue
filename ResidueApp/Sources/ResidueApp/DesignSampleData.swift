@@ -249,36 +249,32 @@ extension PageModel {
                 multiSlotColumn: 5,
                 extraSlots: [.metric(9, unit: .times)]
             ),
+            // 非判定域两行：③ 两槽位（扫描值 + 标注）、④ / ⑥ 整句
+            // **逐字取 PRD AC-09**（CR-033 / M-9 · R-2）：样例也是契约的一份证据，
+            // 写旧值等于把缺陷画进设计稿
             ReportRow(
                 source: "pipx run",
-                slots: [
-                    .text("pipx run"),
-                    .text(L.pick("仅报告", "Report only")),
-                    .ratio(0, 0),
-                    // ④ / ⑥ **逐字取 PRD AC-09**（CR-033 / M-9）：
-                    // 样例也是契约的一份证据，写旧值等于把缺陷画进设计稿
-                    .text(UICopy.notInDecisionDomain),
-                    .metric(2, unit: .none),
-                    .text(UICopy.l0NotChecked),
-                    .text(L.pick("仅报告", "Report only")),
-                ],
-                // 非判定域行 ⑥ **整格一句**，不给第二个槽位
-                multiSlotColumn: nil,
-                extraSlots: []
+                cells: [
+                    [.text("pipx run")],
+                    [.text(L.pick("仅报告", "Report only"))],
+                    [.metric(3, unit: .items), .unavailable(reason: UICopy.scanTimeNonSettled)],
+                    [.text(UICopy.notInDecisionDomain)],
+                    [.metric(2, unit: .none)],
+                    [.text(UICopy.l0NotChecked)],
+                    [.text(L.pick("仅报告", "Report only"))],
+                ]
             ),
             ReportRow(
                 source: Source.pipCache.displayName,
-                slots: [
-                    .text(Source.pipCache.displayName),
-                    .text(L.pick("仅报告", "Report only")),
-                    .ratio(0, 0),
-                    .text(UICopy.notInDecisionDomain),
-                    .metric(2, unit: .none),
-                    .text(UICopy.l0NotChecked),
-                    .text(L.pick("仅报告", "Report only")),
-                ],
-                multiSlotColumn: nil,
-                extraSlots: []
+                cells: [
+                    [.text(Source.pipCache.displayName)],
+                    [.text(L.pick("仅报告", "Report only"))],
+                    [.metric(7, unit: .items), .unavailable(reason: UICopy.scanTimeNonSettled)],
+                    [.text(UICopy.notInDecisionDomain)],
+                    [.metric(2, unit: .none)],
+                    [.text(UICopy.l0NotChecked)],
+                    [.text(L.pick("仅报告", "Report only"))],
+                ]
             ),
         ]
         // 页级状态行**必须与 M1 同构**（前置数字式），否则 DAC-55 判不通过

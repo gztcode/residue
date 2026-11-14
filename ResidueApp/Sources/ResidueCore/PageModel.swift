@@ -579,6 +579,15 @@ public struct ReportRow: Identifiable, Sendable {
         }
         self.cells = built
     }
+
+    /// 直接给七列单元格（**每列可多槽位**）。
+    ///
+    /// 上面的 `multiSlotColumn:` 只能开**一个**多槽位列，而 ⑤ 页现在有两处需要：
+    /// ⑥（`a` / `b` 两值）与**非判定域行的 ③**（扫描值 + 「扫描时点值 · 非结算值」标注）。
+    public init(source: String, cells: [[SemanticSlot]]) {
+        self.source = source
+        self.cells = cells
+    }
 }
 
 public struct EvidenceRow: Identifiable, Sendable {
