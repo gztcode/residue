@@ -579,6 +579,15 @@ public struct ReportRow: Identifiable, Sendable {
         }
         self.cells = built
     }
+
+    /// 直接给七列单元格（**每列可多槽位**）。
+    ///
+    /// 上面的 `multiSlotColumn:` 只能开**一个**多槽位列，而 ⑤ 页现在有两处需要：
+    /// ⑥（`a` / `b` 两值）与**非判定域行的 ③**（扫描值 + 「扫描时点值 · 非结算值」标注）。
+    public init(source: String, cells: [[SemanticSlot]]) {
+        self.source = source
+        self.cells = cells
+    }
 }
 
 public struct EvidenceRow: Identifiable, Sendable {
@@ -671,7 +680,10 @@ public enum ReportMatrix {
     public static let headerHeight: CGFloat = 60
 
     /// ③ 列宽（需容纳两行副标）。
-    public static let sampleColumnWidth: CGFloat = 150
+    ///
+    /// CR-033 / M-9 由 150 收窄到 130：④ / ⑥ 两列要装下非判定域行的整句契约文案，
+    /// 七列合计必须仍 ≤ 695 pt（可用宽度 751 − 单元格内边距 56）。
+    public static let sampleColumnWidth: CGFloat = 130
 
     /// ⑥ 列的列名。
     public static var l0ColumnTitle: String {

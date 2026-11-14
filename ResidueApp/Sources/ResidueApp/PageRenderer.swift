@@ -120,7 +120,7 @@ enum PageRenderer {
 
         var loadingModel = model
         loadingModel.loading = true
-        loadingModel.loadingMessage = L.pick("正在扫描 3 个来源 · 已扫描 12,847 条", "Scanning 3 sources · 12,847 items scanned")
+        loadingModel.loadingMessage = L.pick("正在扫描 5 个来源 · 已扫描 12,847 条", "Scanning 5 sources · 12,847 items scanned")
 
         var envEmptyModel = model
         envEmptyModel.candidateRows = []

@@ -727,3 +727,74 @@ struct TableHeaderText: View {
             .frame(maxWidth: .infinity, alignment: alignment)
     }
 }
+
+/// 按**固有宽度**横向排布、装不下就换行（`HStack` 装不下只会溢出或压扁）。
+///
+/// **为什么不用 `LazyVGrid`**：② 页保护条的每一格宽窄各不相同（标签、分隔线、
+/// 五个来源、白名单徽标），等宽网格会把标签也拉成一格宽。
+/// **为什么视图里不能自己分组**：靠 `count` 切分就是界面做算术（第 1 条不变量）。
+/// 交给布局：来源 3 个时是一行（与改前同貌），5 个时自然折行，
+/// 中文与英文都不溢出。
+struct WrapHStack: Layout {
+    var spacing: CGFloat = Tokens.Spacing.s
+    var lineSpacing: CGFloat = 4
+
+    private struct Line {
+        var indices: [Int] = []
+        var width: CGFloat = 0
+        var height: CGFloat = 0
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let maxWidth = proposal.width ?? .infinity
+        let lines = arrange(subviews: subviews, maxWidth: maxWidth)
+        let height = lines.reduce(0) { $0 + $1.height }
+            + lineSpacing * CGFloat(max(0, lines.count - 1))
+        let width = lines.map(\.width).max() ?? 0
+        return CGSize(width: maxWidth.isFinite ? maxWidth : width, height: height)
+    }
+
+    func placeSubviews(
+        in bounds: CGRect,
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) {
+        var y = bounds.minY
+        for line in arrange(subviews: subviews, maxWidth: bounds.width) {
+            var x = bounds.minX
+            for index in line.indices {
+                let size = subviews[index].sizeThatFits(.unspecified)
+                subviews[index].place(
+                    at: CGPoint(x: x, y: y + (line.height - size.height) / 2),
+                    proposal: ProposedViewSize(size)
+                )
+                x += size.width + spacing
+            }
+            y += line.height + lineSpacing
+        }
+    }
+
+    private func arrange(subviews: Subviews, maxWidth: CGFloat) -> [Line] {
+        var lines: [Line] = []
+        var current = Line()
+
+        for index in subviews.indices {
+            let size = subviews[index].sizeThatFits(.unspecified)
+            let widthIfAppended = current.indices.isEmpty
+                ? size.width
+                : current.width + spacing + size.width
+
+            if widthIfAppended > maxWidth, !current.indices.isEmpty {
+                lines.append(current)
+                current = Line(indices: [index], width: size.width, height: size.height)
+            } else {
+                current.indices.append(index)
+                current.width = widthIfAppended
+                current.height = max(current.height, size.height)
+            }
+        }
+        if !current.indices.isEmpty { lines.append(current) }
+        return lines
+    }
+}

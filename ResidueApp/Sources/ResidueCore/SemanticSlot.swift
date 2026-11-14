@@ -333,6 +333,37 @@ public enum UICopy {
     /// 报告产出前的结论列取值（**不得填「未达标」——那是假值**）。
     public static var notSettledThisRound: String { L.pick("本轮未结算", "Not settled this round") }
 
+    /// 缓存布局不认识（CR-032：pip 的 `http-v2` / `http` / `wheels` 一个都不存在）。
+    ///
+    /// 根目录在、但布局不认识时**不能显示 0**：没看见 ≠ 没有。
+    public static var cacheLayoutUnrecognized: String {
+        L.pick("缓存布局未识别（工具版本可能已变更）", "Cache layout not recognized (tool version may have changed)")
+    }
+
+    /// ⑤ 页 ④ 列：**非判定域行**（`pipx run` / `pip cache`）的门槛取值。
+    ///
+    /// **逐字取 PRD AC-09 判定**（CR-033 / M-9）。原文只写「不适用」是不够的：
+    /// 读者要能一眼看出「为什么没有门槛」，而不是以为「门槛算出来是 0」。
+    public static var notInDecisionDomain: String {
+        L.pick("不适用（不入判定域）", "N/A (not in decision domain)")
+    }
+
+    /// ⑤ 页 ③ 列：**非判定域行**单元格内的标注（PRD AC-09 判定逐字）。
+    ///
+    /// 该行的数值是**本窗扫描时点**的，不是观察期结算值 —— 同一列两个时点
+    /// 不共用一个列头，所以在单元格里标出来（CR-033 / R-2）。
+    public static var scanTimeNonSettled: String {
+        L.pick("扫描时点值 · 非结算值", "Scan-time value · not settled")
+    }
+
+    /// ⑤ 页 ⑥ 列：**非判定域行**的 L0 误判 / 检查取值（整格一句，不拆两值）。
+    ///
+    /// **逐字取 PRD AC-09 判定**（CR-033 / M-9）。该行从未执行过 L0 检查，
+    /// 填 `0 / 0` 会被读成「检查了 0 次、误判 0 次 = 干净」——那是把未知说成安全。
+    public static var l0NotChecked: String {
+        L.pick("不适用 · 未执行 L0 检查", "N/A · L0 check not run")
+    }
+
     /// ⑤ 页「上一轮」行的前缀（`轮次 ≥ 2` 时才显示该行）。
     ///
     /// **前置数字式**（视觉基线 §五 跨页规则：三处轮次同构）。

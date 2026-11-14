@@ -393,6 +393,32 @@ public struct TrashExecutor {
         }
     }
 
+    /// 某来源的**总量字节**（AC-15「来源 10% / 20%」比例档的**分母**）。
+    ///
+    /// ## 为什么不能拿 `T` 当字节用
+    ///
+    /// `T`（M3）是**快照条目数**（单位：条），而比例档要的是**字节**（单位：B）。
+    /// 两者混用会让上限算成「条数 × 10% B」——
+    /// 113 个瓶子 → 上限 11 B → **几乎什么都删不掉**（条目被顺延、删不动）。
+    /// 这在 CR-032 接入 Homebrew 之前影响较小（候选少），
+    /// 接入后 `downloads/` 里成百上千个瓶子 → 上限形同虚设。
+    ///
+    /// ## 口径 = **该来源候选的逻辑字节之和**
+    ///
+    /// 与 `ScanEngine` 的 `byteCount` **同一口径**（都是候选字节之和），
+    /// 不另立第二套「来源总量」算法。
+    ///
+    /// - Parameter candidates: 本次扫描命中的候选（**全来源**，本函数按 `source` 过滤）。
+    /// - Parameter source: 目标来源。
+    public static func sourceTotalBytes(
+        candidates: [ScanEngine.Candidate],
+        source: Source
+    ) -> Int64 {
+        candidates
+            .filter { $0.source == source.rawValue }
+            .reduce(Int64(0)) { $0 + $1.bytes }
+    }
+
     /// 某候选的**逻辑字节**（AC-15 / CR-022 偏差 2 的唯一定义）。
     ///
     /// - 普通文件 = `st_size`

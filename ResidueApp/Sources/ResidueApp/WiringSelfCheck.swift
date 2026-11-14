@@ -45,6 +45,14 @@ enum WiringSelfCheck {
         try? Data(repeating: 0x41, count: 4096).write(to: fakeUV.appendingPathComponent("blob-a"))
         try? Data(repeating: 0x42, count: 8192).write(to: fakeUV.appendingPathComponent("blob-b"))
 
+        // Homebrew 根（CR-032）：一个真瓶子 + 一个瓶子清单。
+        // 只有瓶子是候选；清单必须被文件名过滤挡掉 —— 否则「可回收量」
+        // 会把删了也没用的元数据算进去。
+        let fakeBrew = dir.appendingPathComponent("fakehome/Library/Caches/Homebrew/downloads")
+        try? FileManager.default.createDirectory(at: fakeBrew, withIntermediateDirectories: true)
+        try? Data(repeating: 0x43, count: 16384).write(to: fakeBrew.appendingPathComponent("foo--1.0.arm64_sonoma.bottle.tar.gz"))
+        try? Data(repeating: 0x44, count: 512).write(to: fakeBrew.appendingPathComponent("foo--1.0.bottle.json"))
+
         let stateFile = StateFile(directory: dir.appendingPathComponent("state"))
         let writer = RecordWriter(directory: dir.appendingPathComponent("state/records"))
 
@@ -53,11 +61,15 @@ enum WiringSelfCheck {
         model.sourceRootsOverride = [
             (Source.uvCache.rawValue, fakeUV.path),
             (Source.npmNpx.rawValue, dir.appendingPathComponent("nonexistent-npm").path),
+            (Source.brewCache.rawValue, fakeBrew.path),
         ]
         check(FileManager.default.fileExists(atPath: stateFile.fileURL.path),
               "首启即写出 state.residue（A-10 第 9 步判据可达的前提）")
         check((((try? Data(contentsOf: stateFile.fileURL))?.count) ?? 0) > 0, "state.residue 非空")
-        check(model.pageModel.overviewBlocks.count == 3, "① 页三区块由真实状态投影（Source.allCases 三个）")
+        check(
+            model.pageModel.overviewBlocks.count == Source.allCases.count,
+            "① 页区块数 = Source.allCases（当前 \(Source.allCases.count) 个来源）"
+        )
 
         print("\n--- 2. 扫描与落盘（runScan）---")
         // ⚠️ **不能**在主 actor 上 `sem.wait()` 等一个需要主 actor 的 Task —— 那是自己等自己，
@@ -87,9 +99,20 @@ enum WiringSelfCheck {
         }
 
         print("\n--- 3. 页面模型来自真实数据 ---")
-        check(model.pageModel.candidateRows.count == 2, "② 页候选 2 条（来自真扫，不是硬编码）")
+        check(model.pageModel.candidateRows.count == 3,
+              "② 页候选 3 条（uv 2 条 + brew 瓶子 1 条，来自真扫）")
         check(model.pageModel.overviewBlocks[0].slot.displayText != "0 B",
               "① 页 uv cache 区块非零（聚合了 12 KB）")
+        // CR-032：brew 只收瓶子。清单（.json）被文件名过滤挡掉，
+        // 所以 brew 的可回收量必须恰好等于瓶子大小（16 KB）。
+        let brewIndex = Source.allCases.firstIndex(of: .brewCache) ?? -1
+        if brewIndex >= 0 {
+            check(
+                model.pageModel.overviewBlocks[brewIndex].slot.displayText
+                    == MetricUnit.formatBytes(16_384),
+                "① 页 brew 区块 = 16 KB（只算瓶子，瓶子清单已过滤）"
+            )
+        }
 
         print("\n--- 4. 清除不碰 a 的载体（CR-022 偏差 3）---")
         let before = ((try? Data(contentsOf: stateFile.fileURL))?.count) ?? 0

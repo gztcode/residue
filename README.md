@@ -10,7 +10,7 @@
 
 > 看清 AI 工具在你自己机器上留下的缓存，然后**在证明自己判断准确之后**，安全地收回它。
 
-`uv`、`npm/npx`、`pipx` 这些临时包管理器会在你不知情的时候攒下几十 GB 缓存。Residue 只做三件事：
+`uv`、`npm/npx`、`pipx`、`Homebrew`、`pip` 这些包管理器会在你不知情的时候攒下几十 GB 缓存。Residue 只做三件事：
 
 | # | 它做什么 | 它不做什么 |
 |---|---|---|
@@ -114,9 +114,9 @@ codesign --verify --deep --strict --verbose=2 /Applications/Residue.app
 <details open>
 <summary><b>会看</b></summary>
 
-- `uv` / `npm` / `pipx` 的**缓存目录**：路径、条目数、字节数、创建时间
+- `uv` / `npm` / `pipx` / **Homebrew** / **pip** 的**缓存目录**：路径、条目数、字节数、创建时间
 - 同 uid 进程的**文件描述符归属**（判断某个缓存是否正被某个进程使用）—— 用它决定「这个能不能删」
-- `uv` / `npm` 的**只读定位命令**输出（`uv cache dir` 这类，用于找到缓存位置）
+- `uv` / `npm` / **Homebrew** / **pip** 的**只读定位命令**输出（`uv cache dir` / `brew --cache` / `pip cache dir` 这类，用于找到缓存位置）
 
 </details>
 
@@ -126,7 +126,7 @@ codesign --verify --deep --strict --verbose=2 /Applications/Residue.app
 | 不做 | 为什么 |
 |---|---|
 | **不读文件内容** | 它只需要判断「占用多少」和「有没有人在用」，读内容既不必要也不该做 |
-| **不扫描个人文件** | 只在你明确指定的缓存来源根下工作（默认是那三个包管理器的缓存目录） |
+| **不扫描个人文件** | 只在你明确指定的缓存来源根下工作（默认是那五个包管理器的缓存目录） |
 | **不申请完全磁盘访问（FDA）** | 它不需要。跨 uid 的进程看不见就如实说「看不见」，**不会假装看得见** |
 | **不外发任何数据** | 零遥测、零崩溃上报、零版本检查。导出报告是**你手动触发**的本地文件 |
 
@@ -170,7 +170,7 @@ rm -rf ~/Library/Application\ Support/Residue
 | 1 | **仅 Apple Silicon** | Intel Mac 无法运行 |
 | 2 | **跨 uid 进程的 fd 不可枚举** | 只能判断「你登录的这个用户」的进程；别的用户的进程看不见，界面会如实显示「无法判定」 |
 | 3 | **增量扫描不发现深层新候选** | 新装的包要到下一次全量扫描（默认每日 1 次）才进清单 |
-| 4 | **仅支持三个来源** | `uv` / `npm(npx)` / `pipx`。其他包管理器的缓存不进候选 |
+| 4 | **只支持五个来源，其中三个可自动删除** | 可自动删除：`uv` / `npm(npx)` / **Homebrew**（只算 bottle 文件）；**仅报告**：`pipx` / **pip**。其他包管理器的缓存不进候选 |
 | 5 | **观察期不可跳过** | 14 天影子观察是设计的核心，不是可选项 —— 没有足够样本就点亮自动删除，等于让它在看不见的情况下删东西 |
 | 6 | **全量扫描本身要十几秒** | 缓存大时（实测 22 万项 ≈ 12 秒）**扫描本身要十几秒**。但扫描在**后台线程**跑，界面全程可操作，并实时显示「已扫描 N 项」与耗时，**也可以随时取消**。（限制的是耗时，不是卡死 —— 界面不会冻住） |
 | 7 | **未公证版本需手动放行一次** | 见上方「首次打开被 Gatekeeper 拦下怎么办」情况 B |
@@ -190,7 +190,7 @@ rm -rf ~/Library/Application\ Support/Residue
 
 ```bash
 cd ResidueApp
-swift test                                  # 283 个单测（Core 层，零 UI 依赖）
+swift test                                  # 312 个单测（Core 层，零 UI 依赖）
 ./scripts/verify_a9.sh                      # 页面结构 + 界面禁算术 + 数据层接线（72 项）
 python3 scripts/verify_codes.py             # 错误码表 ↔ 文档一致性（11 项）
 swift run --disable-sandbox ResidueApp --verify-wiring /tmp/w   # 真 IO 往返（45 项）

@@ -36,7 +36,9 @@ struct MenuBarPopover: View {
             DividerLine()
             actions
         }
-        .frame(width: 360, height: 404)
+        // CR-032：来源由 3 个扩到 5 个 → 浮层加两行（每行约 20 pt），
+        // 由 404 pt 增至 444 pt；否则底部「打开主界面 / 立即扫描」会被裁掉。
+        .frame(width: 360, height: 444)
         .background(Tokens.Color.background)
         .preferredColorScheme(.dark)
     }

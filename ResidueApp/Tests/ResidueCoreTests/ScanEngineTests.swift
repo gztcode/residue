@@ -371,4 +371,59 @@ final class ScanEngineTests: XCTestCase {
         let matched = ScanEngine.SourceRule.match(path: "/x/.cache/uv/.npm/_npx/y")
         XCTAssertEqual(matched.count, 2, "一个路径可命中多个来源")
     }
+
+    // MARK: - CR-032：按根归因 + 文件名过滤
+
+    /// 自定义缓存目录（`HOMEBREW_CACHE=/tmp/x`）不在任何静态路径片段里。
+    ///
+    /// **显式传 `source:` 时必须仍能归因**；若退回路径片段匹配，
+    /// 这类机器上整条来源的候选会静默为 0（CR-032 · P0-2）。
+    func testExplicitSourceAttributesCandidatesOutsideKnownPathFragments() throws {
+        let fs = MemoryFS()
+        fs.dirs["/tmp/custom-brew"] = [("foo--1.0.bottle.tar.gz", false)]
+        fs.attrs["/tmp/custom-brew/foo--1.0.bottle.tar.gz"] = (
+            Date(timeIntervalSince1970: 0), 4096, false
+        )
+        // 规则里**没有** brew 片段 —— 归因只能来自 `source:` 参数
+        let engine = ScanEngine(fileSystem: fs, rules: [])
+        let r = try engine.scan(root: "/tmp/custom-brew", mode: .full, source: .brewCache)
+
+        XCTAssertEqual(r.candidates.count, 1)
+        XCTAssertEqual(r.candidates.first?.source, Source.brewCache.rawValue)
+    }
+
+    /// brew 的 `downloads/` 混放瓶子与清单：只有 `*.bottle*.tar.gz` 是候选。
+    ///
+    /// 若把清单（`.json`）、cask、源码包也算进去，「可回收字节」会把
+    /// 删了也没用的元数据算成可释放空间。
+    func testBottleFilterKeepsOnlyBottleTarballs() throws {
+        let fs = MemoryFS()
+        let root = "/Users/x/Library/Caches/Homebrew/downloads"
+        let names = [
+            ("foo--1.0.arm64_sonoma.bottle.tar.gz", true),   // 瓶子 → 收
+            ("foo--1.0.bottle.json", false),                  // 清单 → 弃
+            ("bar--2.0.catalina.bottle.tar.gz", true),        // 瓶子 → 收
+            ("bar--2.0.tar.gz", false),                       // 源码包 → 弃
+            ("baz.dmg", false),                               // cask 包 → 弃
+        ]
+        fs.dirs[root] = names.map { ($0.0, false) }
+        for (name, _) in names {
+            fs.attrs[root + "/" + name] = (Date(timeIntervalSince1970: 0), 128, false)
+        }
+
+        let filter = ScanEngine.FileNameFilter(
+            requiredSubstrings: [".bottle"],
+            requiredSuffixes: [".tar.gz"]
+        )
+        let engine = ScanEngine(fileSystem: fs, rules: [])
+        let r = try engine.scan(
+            root: root, mode: .full, source: .brewCache, fileFilter: filter
+        )
+
+        XCTAssertEqual(Set(r.candidates.map(\.path)), [
+            root + "/foo--1.0.arm64_sonoma.bottle.tar.gz",
+            root + "/bar--2.0.catalina.bottle.tar.gz",
+        ])
+        XCTAssertEqual(r.filesScanned, names.count, "过滤只影响候选，不影响扫描计数")
+    }
 }

@@ -101,6 +101,14 @@ final class AppModel {
         var candidatesFound: Int = 0
         /// 首个中止原因。
         var abortReason: String?
+        /// 缓存布局不认识的来源（根在、已知子目录都不在；当前用于 pip）。
+        var layoutUnrecognized: Set<String> = []
+        /// **本轮实际扫描的根路径**（`source.rawValue` → 真实路径）。
+        ///
+        /// 界面原来显示 `Source.canonicalCachePath`（写死的标准路径）——
+        /// 一旦用户用 `UV_CACHE_DIR` / `npm_config_cache` 之类改了位置，
+        /// ① 页会指着一个**根本没扫过的目录**说「这是你的缓存」。
+        var resolvedRoots: [String: String] = [:]
     }
 
     /// **当前扫描的进度**（供界面显示「在动」）。
@@ -133,7 +141,11 @@ final class AppModel {
     private let stateFile: StateFile
     private let writer: RecordWriter
     private let engine = ScanEngine()
-    private let probe = UpstreamRunner()
+    // ⚠️ **不再持有单例 runner**（CR-032 · P1-3）：
+    // N6 的「总探测 ≤ 10 s」是**每次扫描**的预算。单例会让预算**跨扫描累计**
+    // → 第二次扫描起全部探测被拒 → 探测失败回退默认路径
+    // → 用户自定义的缓存目录被静默当成 0 → **来源静默退出判定域**。
+    // 每次扫描新建 runner（见 `runScan`），预算自然回到 0。
 
     /// **测试 / 自检专用**：覆盖来源根（`nil` = 走真实定位）。
     ///
@@ -148,6 +160,16 @@ final class AppModel {
     private(set) var lastScanDiagnostics = ScanLogRecord.Diagnostics()
     /// 本次扫描的上游命令调用记录（AC-19 的界面落点数据源）。
     private var lastUpstreamCommands: [UpstreamCommand] = []
+    /// **缓存布局不认识的来源**（根在、已知子目录都不在）。
+    ///
+    /// 界面据它显示「缓存布局未识别」而不是 0 —— 没看见 ≠ 没有。
+    private var lastLayoutUnrecognizedSources: Set<String> = []
+
+    /// **本轮实际扫描的根路径**（`source.rawValue` → 真实路径）。
+    ///
+    /// 界面显示「缓存目录」时必须显示这个，而不是写死的 `canonicalCachePath` ——
+    /// 用户改了 `UV_CACHE_DIR` 之类以后，标准路径根本没被扫过。
+    private var lastResolvedRoots: [String: String] = [:]
 
     init(
         stateFile: StateFile = StateFile(),
@@ -252,7 +274,49 @@ final class AppModel {
         }
 
         if let c = result.contents {
-            contents = c
+            // ---------- 应用版本变更 → 派生量清零（M4 唯一重置边界）----------
+            //
+            // 契约：计数日归零、`T` 重算、`a` 清零、**轮次不变**。
+            // 此前这条路径**没有任何调用点**——`a` 会跨版本永久累计，
+            // 「错 1 次永久」的边界实际变成了「永久」。
+            //
+            // ## 判据 = **载体在** ∧ **版本号不同**（CR-032 · P1-1）
+            //
+            // 旧写法是 `!stored.isEmpty && stored != version`——
+            // 而**基线从未写过 `appVersion`**（写入方是 CR-032 才补的），
+            // 于是 `stored` 恒为 `""` → `!stored.isEmpty` 恒假
+            // → **重置路径在真实升级场景下从未生效过**。
+            //
+            // 现在改成用 `carrierPresent`（载体文件在不在）区分两种
+            // 「版本号读不出来」：
+            // - **首启**（载体不在）→ 不是版本变更 → **不清零**；
+            // - **基线遗留**（载体在、版本号为空）→ 按版本变更处理 → **清零**。
+            let version = Self.currentAppVersion
+            let stored = c.header.appVersion
+            if VersionChangePolicy.shouldResetCarrier(
+                carrierPresent: result.carrierPresent,
+                storedVersion: stored,
+                currentVersion: version,
+                readOnly: result.readOnly
+            ) {
+                do {
+                    // 用**返回的载体内容**刷新内存态（不再手工拼 `StateHeader`）：
+                    // 手工拼会把「自动删除开关」「上次扫描时刻」一并丢掉
+                    // —— 开关被静默关掉是 P1-2 的根因。
+                    contents = try stateFile.clearCarrierForVersionChange(
+                        newAppVersion: version,
+                        keepingRound: c.header.round,
+                        keepingAutoDeleteEnabled: c.header.autoDeleteEnabled,
+                        keepingLastScanAt: c.header.lastScanAt
+                    )
+                } catch {
+                    // 写失败不装成功：保留旧内容（下次启动会再试），并如实报错
+                    errorMessage = describeWriteError(error)
+                    contents = c
+                }
+            } else {
+                contents = c
+            }
         }
 
         // 重启后：候选清单不落盘，但 `scan.jsonl` 里有上次完整扫描的**总量**。
@@ -294,7 +358,9 @@ final class AppModel {
             executionMode: preferences.executionMode,
             capacityCapBytes: preferences.capacityCapBytes,
             itemCap: preferences.itemCap,
-            whitelist: preferences.whitelist
+            whitelist: preferences.whitelist,
+            layoutUnrecognizedSources: lastLayoutUnrecognizedSources,
+            sourceRoots: lastResolvedRoots
         )
         pageModel = PageModelBuilder.build(input)
     }
@@ -345,7 +411,10 @@ final class AppModel {
 
         let started = Date()
         let engine = self.engine          // `ScanEngine` 是 `Sendable` 值
-        let probe = self.probe            // `UpstreamRunner` 是 `Sendable` 值
+        // **每次扫描新建 runner**（CR-032 · P1-3）：N6 的总预算 10 s 是
+        // **每次扫描**的预算；复用同一个 runner 会让它跨扫描累计，
+        // 耗尽后全部探测被拒 → 回退默认路径 → 自定义缓存目录静默变 0。
+        let probe = UpstreamRunner()
         let rootsOverride = self.sourceRootsOverride
         let excludePIDs: Set<pid_t> = [getpid()]
 
@@ -378,22 +447,30 @@ final class AppModel {
             job.mode = mode
 
             // ---- 来源根（用上游只读命令定位；失败回退标准路径）----
-            let roots = resolveSourceRoots(
+            let resolved = resolveSourceRoots(
                 override: rootsOverride,
                 probe: probe,
                 upstream: &job.upstream
             )
+            job.layoutUnrecognized = resolved.layoutUnrecognized
 
             // ---- 逐来源扫描 ----
-            for (sourceName, root) in roots {
-                // **取消检查**：每条来源一次（来源只有 3 个，开销可忽略）
+            for spec in resolved.roots {
+                // **取消检查**：每条来源一次（来源只有 5 个，开销可忽略）
                 if cancelBox.isCancelled { break }
-                guard FileManager.default.fileExists(atPath: root) else { continue }
+                guard let source = Source(rawValue: spec.sourceName) else { continue }
+                // **记下真实根路径**：界面显示的是这个，不是 `canonicalCachePath`
+                job.resolvedRoots[spec.sourceName] = spec.path
+                guard FileManager.default.fileExists(atPath: spec.path) else { continue }
                 do {
                     let result = try engine.scan(
-                        root: root,
+                        root: spec.path,
                         mode: mode,
                         now: started,
+                        // **按根归因**：来源根可能被环境变量改到任意位置，
+                        // 静态路径片段会匹配不到 → 候选静默为 0（CR-032 · P0-2）。
+                        source: source,
+                        fileFilter: spec.fileFilter,
                         // **进度回流**：每 2000 条一次 → 11 万条约 56 次
                         progress: { p in
                             cancelBox.report(
@@ -407,7 +484,7 @@ final class AppModel {
                             )
                         }
                     )
-                    job.results.append((sourceName, result))
+                    job.results.append((spec.sourceName, result))
                     job.filesScanned += result.filesScanned
                     job.candidatesFound += result.candidates.count
                     if let ab = result.aborted, job.abortReason == nil {
@@ -415,7 +492,7 @@ final class AppModel {
                     }
                 } catch {
                     // 单个来源不可读不阻断整体（AC-14 第一类：来源不可读 → 降级只读该来源）
-                    job.failures.append((sourceName, error.localizedDescription))
+                    job.failures.append((spec.sourceName, error.localizedDescription))
                 }
             }
 
@@ -429,19 +506,19 @@ final class AppModel {
         var allCandidates: [ScanEngine.Candidate] = []
         var bytesScanned: Int64 = 0
         var unknownCount = 0
-        for (sourceName, result) in job.results {
+        for (_, result) in job.results {
             bytesScanned += result.candidates.reduce(Int64(0)) { $0 + $1.bytes }
             unknownCount += result.unknownCount
-            // 引擎按路径片段匹配来源；这里以「扫描根所属来源」为准做一次校正，
-            // 避免路径里恰好含别的来源片段时被误判。
-            for var c in result.candidates {
-                if c.source.isEmpty { c.source = sourceName }
-                allCandidates.append(c)
-            }
+            // 候选来源由 `ScanEngine.scan(source:)` 按**扫描根**直接赋值，
+            // 不再用路径片段推断 —— 自定义缓存目录下路径片段匹配不到，
+            // 会让整条来源的候选静默归因失败（CR-032 · P0-2）。
+            allCandidates.append(contentsOf: result.candidates)
         }
 
         candidates = allCandidates
         lastUpstreamCommands = job.upstream
+        lastLayoutUnrecognizedSources = job.layoutUnrecognized
+        lastResolvedRoots = job.resolvedRoots
         lastScanMode = job.mode
 
         // **来源级错误**（此时已在主 actor，可用 `describeScanError` 取码表文案）
@@ -740,15 +817,12 @@ final class AppModel {
         }
     }
 
-    /// 某来源的**总量**（`T`；未取快照时退回候选合计）。
+    /// 某来源的**总量字节**（AC-15 比例档的分母；**判定在 Core 的唯一实现处**）。
+    ///
+    /// ⚠️ **不得用 `entry.T`**（那是**条目数**，单位是「条」）：
+    /// 拿条数当字节会让上限算成「条数 × 10% B」→ 上限形同虚设（CR-032 · P2-1）。
     private func sourceTotalBytes(for source: Source) -> Int64 {
-        if let entry = contents.header.sources.first(where: { $0.source == source }),
-           let t = entry.T, t > 0 {
-            return Int64(t)
-        }
-        return candidates
-            .filter { $0.source == source.rawValue }
-            .reduce(Int64(0)) { $0 + $1.bytes }
+        TrashExecutor.sourceTotalBytes(candidates: candidates, source: source)
     }
 
     // MARK: - 清理策略配置（AC-03 四项 + 白名单）
@@ -932,11 +1006,19 @@ final class AppModel {
                 )
             }
         }
+        // 每次落盘都带上当前版本号 —— 否则「应用版本变更」永远检测不到
+        // （写入方不写版本号，读取方拿 `""` 无法比较，重置路径形同虚起）。
+        contents.header.appVersion = Self.currentAppVersion
         do {
             _ = try stateFile.save(header: contents.header, payloads: contents.payloads)
         } catch {
             errorMessage = describeWriteError(error)
         }
+    }
+
+    /// 当前应用版本（CFBundleShortVersionString；无 bundle 时回退 `0.0.0`）。
+    static var currentAppVersion: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0"
     }
 
     // MARK: - 导出脱敏报告（AC-13 G-5）
@@ -1038,7 +1120,7 @@ final class AppModel {
         }
 
         return Redactor.Report(
-            appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0",
+            appVersion: Self.currentAppVersion,
             schemaVersion: contents.header.schemaVersion,
             osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
             arch: Self.archName(),

@@ -295,10 +295,41 @@ public struct ScanEngine: Sendable {
 
     // MARK: - 来源规则
 
+    /// 文件名过滤（**按叶子名判断，不读内容**）。
+    ///
+    /// 用于「一个扫描根里只有一部分文件是候选」的来源：例如 Homebrew 的
+    /// `downloads/` 同时放着瓶子、瓶子清单、cask 包与源包，只有瓶子是
+    /// 本产品认可的「下载缓存」。
+    public struct FileNameFilter: Sendable, Equatable {
+        /// 文件名必须**同时包含**的片段（空 = 不限制）。
+        public var requiredSubstrings: [String]
+        /// 文件名必须以其中之一结尾（空 = 不限制）。
+        public var requiredSuffixes: [String]
+
+        public init(requiredSubstrings: [String] = [], requiredSuffixes: [String] = []) {
+            self.requiredSubstrings = requiredSubstrings
+            self.requiredSuffixes = requiredSuffixes
+        }
+
+        public func accepts(_ name: String) -> Bool {
+            requiredSubstrings.allSatisfy { name.contains($0) }
+                && (requiredSuffixes.isEmpty || requiredSuffixes.contains { name.hasSuffix($0) })
+        }
+    }
+
     /// 来源规则：**一个候选路径是否属于某个来源、命中哪些来源**。
     ///
     /// **封闭枚举**（AC-04 ①）：`uv` cache / `npm/_npx` / `pipx` run。
     /// **只做路径模式匹配**（不执行任何命令、不读内容）。
+    ///
+    /// ## CR-032 起：生产路径不再用它决定归因
+    ///
+    /// 路径片段是**静态**的，而来源根是**动态**的（`brew --cache` /
+    /// `pip cache dir` 会被环境变量改到别处）。若继续按片段匹配：
+    /// 自定义根会被扫描，但根下没有一个叶子命中片段 → 候选数静默为 0。
+    ///
+    /// 所以 `scan(root:source:)` 传了 `source` 时**按根归因**；本类型保留给
+    /// 既有测试与「一个根里区分多个来源」的场景。
     public struct SourceRule: Sendable {
         /// **来源枚举本身**（唯一标识）。
         ///
@@ -471,9 +502,12 @@ public struct ScanEngine: Sendable {
     /// - 参数 `deadline`：超时时刻（`nil` = 不限时）。
     /// - 参数 `takeSnapshot`：**只有 `full` 扫描能取快照**（R2 §7.3：增量不取快照，
     ///   否则 `T` 会由部分候选集确定 → 偏小且**静默**）。
+    /// - 参数 `source`：**按扫描根归因**（CR-032）。传了就忽略路径片段匹配 ——
+    ///   来源根可能被环境变量改到任意位置，静态片段会匹配不到、候选静默为 0。
+    /// - 参数 `fileFilter`：只收文件名满足条件的叶子（如 Homebrew 只收瓶子）。
     /// - Parameters:
     ///   - progress: 进度回调（**每 `progressEvery` 个条目调一次**）。
-    ///   - progressEvery: 回调间隔（条目数）。默认 2000 —— 
+    ///   - progressEvery: 回调间隔（条目数）。默认 2000 ——
     ///     11 万条目 → 约 56 次回调，足够让界面「动起来」，又不至于刷屏。
     public func scan(
         root: String,
@@ -483,6 +517,8 @@ public struct ScanEngine: Sendable {
         deadline: Date? = nil,
         now: Date = Date(),
         takeSnapshot: Bool? = nil,
+        source: Source? = nil,
+        fileFilter: FileNameFilter? = nil,
         progress: ProgressHandler? = nil,
         progressEvery: Int = 2000
     ) throws -> ScanResult {
@@ -568,9 +604,15 @@ public struct ScanEngine: Sendable {
                     ))
                 }
 
-                // 命中来源模式 → 收集为候选。
-                let matched = SourceRule.match(path: full, rules: rules)
-                if !matched.isEmpty {
+                // 命中来源 → 收集为候选。
+                //
+                // **显式传入 `source` 时按根归因**（不再看路径片段）：
+                // 来源根可能被 `HOMEBREW_CACHE` / `PIP_CACHE_DIR` 改到任意位置，
+                // 静态片段匹配不到会让候选数静默为 0。
+                let matched = source.map { [$0.rawValue] }
+                    ?? SourceRule.match(path: full, rules: rules)
+                let nameAccepted = fileFilter?.accepts(entry.name) ?? true
+                if !matched.isEmpty, nameAccepted {
                     if let attr = try? fileSystem.attributes(at: full) {
                         candidates.append(
                             Candidate(

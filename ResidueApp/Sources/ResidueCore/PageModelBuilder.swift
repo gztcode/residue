@@ -79,6 +79,22 @@ public enum PageModelBuilder {
         public var itemCap: Int
         /// 白名单（AC-03：加入后该路径不再出现在新候选清单中）。
         public var whitelist: [String]
+        /// **缓存布局不认识的来源**（CR-032：目前用于 pip）。
+        ///
+        /// 根目录存在、但已知布局（`http-v2` / `http` / `wheels`）一个都不存在。
+        /// 此时该来源的数值必须是 `.unavailable`，**不能显示 0** ——
+        /// 「没看见」不等于「没有」。
+        public var layoutUnrecognizedSources: Set<String>
+
+        /// **本轮实际扫描的根路径**（`source.rawValue` → 真实路径）。
+        ///
+        /// 用户可以用 `UV_CACHE_DIR` / `npm_config_cache` / `HOMEBREW_CACHE` 把缓存搬到别处，
+        /// 此时 `Source.canonicalCachePath` 只是「默认位置」，**不是本轮扫的那个目录**。
+        /// ① 页把默认路径当实际路径显示 = 指着一个从没扫过的目录说「它占了这么多」。
+        ///
+        /// 缺项（未扫描 / 重启后）时回退到 `canonicalCachePath`：那是唯一能给出的信息，
+        /// 且此时页面上其余数值本就是「—」，不会与真实观测值混淆。
+        public var sourceRoots: [String: String]
 
         /// AC-15 的顺延条目数（本次因上限而未执行的条数）。
         ///
@@ -116,7 +132,9 @@ public enum PageModelBuilder {
             executionMode: ExecutionMode = .reportOnly,
             capacityCapBytes: Int64 = 5_000_000_000,
             itemCap: Int = 200,
-            whitelist: [String] = []
+            whitelist: [String] = [],
+            layoutUnrecognizedSources: Set<String> = [],
+            sourceRoots: [String: String] = [:]
         ) {
             self.contents = contents
             self.candidates = candidates
@@ -138,6 +156,8 @@ public enum PageModelBuilder {
             self.capacityCapBytes = capacityCapBytes
             self.itemCap = itemCap
             self.whitelist = whitelist
+            self.layoutUnrecognizedSources = layoutUnrecognizedSources
+            self.sourceRoots = sourceRoots
         }
     }
 
@@ -234,23 +254,42 @@ var model = PageModel()
             totalBytes += c.bytes
         }
         model.overviewBlocks = Source.allCases.map { source in
-            OverviewBlock(
+            let layoutUnknown = input.layoutUnrecognizedSources.contains(source.rawValue)
+            return OverviewBlock(
                 title: source.displayName,
-                slot: .metric(Int(bytesBySource[source] ?? 0), unit: .bytes)
+                slot: layoutUnknown
+                    ? .unavailable(reason: UICopy.cacheLayoutUnrecognized)
+                    : .metric(Int(bytesBySource[source] ?? 0), unit: .bytes)
             )
         }
-        model.totalScannedSlot = .metric(Int(totalBytes), unit: .bytes)
+        // **任一来源「目录结构未识别」→ 总量与占比一律「无法判定」**（CR-032 · P2-3）。
+        //
+        // 未识别的来源扫不出候选 → 它的字节根本不在 `totalBytes` 里。
+        // 若此时仍报一个确定的总量，等于把「没看见」说成「没有」
+        // ——正是 PRD 明令禁止的「把未知判为安全」。
+        let hasUnrecognizedLayout = !input.layoutUnrecognizedSources.isEmpty
+        model.totalScannedSlot = hasUnrecognizedLayout
+            ? .unavailable(reason: UICopy.cacheLayoutUnrecognized)
+            : .metric(Int(totalBytes), unit: .bytes)
 
         // 来源占比行（堆叠条 + 明细表）。**分母为 0 时 share = nil**（不显示 0%）。
+        // 总量不可判定时占比一并不给：分母本身是残缺的，算出来的百分比是假精度。
         model.sourceShares = Source.allCases.map { source in
             let bytes = Int(bytesBySource[source] ?? 0)
+            let layoutUnknown = input.layoutUnrecognizedSources.contains(source.rawValue)
             return SourceShareRow(
                 sourceKey: source.rawValue,
                 displayName: source.displayName,
-                path: source.canonicalCachePath,
-                itemCount: .metric(countBySource[source] ?? 0, unit: .items),
-                bytes: .metric(bytes, unit: .bytes),
-                share: totalBytes > 0 ? RatioSlot(numerator: bytes, denominator: Int(totalBytes)) : nil,
+                path: input.sourceRoots[source.rawValue] ?? source.canonicalCachePath,
+                itemCount: layoutUnknown
+                    ? .unavailable(reason: UICopy.cacheLayoutUnrecognized)
+                    : .metric(countBySource[source] ?? 0, unit: .items),
+                bytes: layoutUnknown
+                    ? .unavailable(reason: UICopy.cacheLayoutUnrecognized)
+                    : .metric(bytes, unit: .bytes),
+                share: (!layoutUnknown && !hasUnrecognizedLayout && totalBytes > 0)
+                    ? RatioSlot(numerator: bytes, denominator: Int(totalBytes))
+                    : nil,
                 inDecisionDomain: source.isInDecisionDomain
             )
         }
@@ -281,7 +320,8 @@ var model = PageModel()
                 bytes: .metric(Int(c.bytes), unit: .bytes),
                 blockReason: nil,
                 sourceKey: source?.rawValue ?? "",
-                share: totalBytes > 0
+                // 总量不可判定时不给占比（同上：残缺分母算出的百分比是假精度）
+                share: (!hasUnrecognizedLayout && totalBytes > 0)
                     ? RatioSlot(numerator: Int(c.bytes), denominator: Int(totalBytes))
                     : nil
             )
@@ -296,7 +336,14 @@ var model = PageModel()
         )
 
         // ---------- ③ 开关区 / 策略参数 / 规则版本 ----------
-        let gateInputs = header.sources.map { entry in
+        //
+        // **门槛输入只收本轮判定域成员**（CR-032 · P0-1）：
+        // 没有快照 / `T = 0` / 静态仅报告的来源都不进门槛。
+        // 否则缺席来源的 `b = 0` 会让检查行判失败、`K/T` 缺失会让样本行无法判定，
+        // 结果是「装没装某个工具」决定产品能不能点亮 —— 与契约相反。
+        let domain = DecisionDomain.members(from: header.sources)
+        let domainEntries = header.sources.filter { domain.contains($0.source) }
+        let gateInputs = domainEntries.map { entry in
             SourceGateInput(
                 source: entry.source,
                 attributable: entry.K,
@@ -325,8 +372,14 @@ var model = PageModel()
             sources: gateInputs
         )
 
+        // ⑤ 页行集合（CR-032 · P0-1）：判定域成员 ∪ 本轮有候选的仅报告来源。
+        //
+        // 契约：总量为 0 的来源**不占行**。`slotCount > 0` 覆盖「本轮无快照但
+        // 扫描时确有候选」的新入域来源（AC-09 要求这类行占行、③ 标「本轮无快照」）。
+        let rowEntries = header.sources.filter { ($0.T ?? 0) >= 1 || $0.slotCount > 0 }
+
         // ⑤ 页逐来源样本进度（`min(K, H) / H`；未结算 / 不适用 → nil）。
-        model.sampleProgress = header.sources.map { entry in
+        model.sampleProgress = rowEntries.map { entry in
             let inDomain = entry.source.isInDecisionDomain
             let k = entry.K
             let h = entry.H
@@ -464,7 +517,7 @@ var model = PageModel()
 
         // ---------- ⑤ 矩阵 ----------
         model.reportProduced = settlementProduced
-        model.reportRows = header.sources.map { entry in
+        model.reportRows = rowEntries.map { entry in
             reportRow(for: entry, round: header.round, produced: settlementProduced)
         }
         let qualified = model.canLightUp
@@ -560,7 +613,7 @@ var model = PageModel()
                 SourceShareRow(
                     sourceKey: source.rawValue,
                     displayName: source.displayName,
-                    path: source.canonicalCachePath,
+                    path: input.sourceRoots[source.rawValue] ?? source.canonicalCachePath,
                     itemCount: dash,
                     bytes: dash,
                     share: nil,
@@ -673,15 +726,37 @@ var model = PageModel()
     ) -> ReportRow {
         let inDomain = entry.source.isInDecisionDomain
 
-        // ③ 样本 / 总量：报告产出前为「本轮未结算」
-        let sampleSlot: SemanticSlot = produced
-            ? .ratio(entry.K ?? 0, entry.T ?? 0)
-            : .unavailable(reason: UICopy.notSettledThisRound)
+        // ③ 样本 / 总量。
+        //
+        // - 判定域行：报告产出前「本轮未结算」，产出后 `K / T`（结算值）。
+        // - **非判定域行**：永远取**本窗扫描时点**的条目数，并在同一格标注
+        //   「扫描时点值 · 非结算值」（PRD AC-09 判定逐字，CR-033 / R-2）。
+        //   该行不取快照、`K` / `J` 无语义，故不能套用 `K / T`，也不套用 `K + J = T`。
+        var sampleCell: [SemanticSlot]
+        if !inDomain {
+            sampleCell = [
+                .metric(entry.slotCount, unit: .items),
+                .unavailable(reason: UICopy.scanTimeNonSettled),
+            ]
+        } else {
+            sampleCell = [
+                produced
+                    ? .ratio(entry.K ?? 0, entry.T ?? 0)
+                    : .unavailable(reason: UICopy.notSettledThisRound)
+            ]
+        }
 
-        // ④ 门槛：`H` 为 null（未取快照）或非判定域 → 不适用
+        // ④ 门槛：**报告产出前**一律「本轮未结算」（PRD 1067 行按列列举，CR-033 / R-4）。
+        //
+        // `H` 在取快照时就已存在，但它此刻只是**待验门槛**，不是本轮的结算值；
+        // 提前显示会被读成「已经按这个门槛判过了」。
         let thresholdSlot: SemanticSlot
         if !inDomain {
-            thresholdSlot = .text(L.pick("不适用", "N/A"))
+            // **逐字取 PRD AC-09**（CR-033 / M-9）：只写「不适用」读者分不清
+            // 「不参与判定」与「门槛算出来是 0」
+            thresholdSlot = .text(UICopy.notInDecisionDomain)
+        } else if !produced {
+            thresholdSlot = .unavailable(reason: UICopy.notSettledThisRound)
         } else if let h = entry.H {
             thresholdSlot = .metric(h, unit: .none)
         } else {
@@ -690,14 +765,21 @@ var model = PageModel()
 
         // ⑥ L0 误判 / 检查：**两个独立 metric**（不拼字符串）
         let aSlot: SemanticSlot
-        let bSlot: SemanticSlot
-        if !produced {
-            aSlot = .unavailable(reason: UICopy.notSettledThisRound)
+        let bSlot: SemanticSlot?
+        if !inDomain {
+            // 非判定域行**从未执行 L0 检查** → 整格一句（PRD AC-09 逐字，CR-033 / M-9）。
+            // 填 `0 / 0` 会被读成「检查了 0 次、误判 0 次 = 干净」——把未知说成安全。
+            aSlot = .text(UICopy.l0NotChecked)
+            bSlot = nil
         } else {
-            aSlot = .metric(entry.a, unit: .times)
+            if !produced {
+                aSlot = .unavailable(reason: UICopy.notSettledThisRound)
+            } else {
+                aSlot = .metric(entry.a, unit: .times)
+            }
+            // **`b` 照常填**（M4：产出前只有左值取「本轮未结算」，右值照常）
+            bSlot = .metric(entry.b, unit: .times)
         }
-        // **`b` 照常填**（M4：产出前只有左值取「本轮未结算」，右值照常）
-        bSlot = .metric(entry.b, unit: .times)
 
         // ⑦ 结论（值域封闭三值）
         let conclusionSlot: SemanticSlot
@@ -711,19 +793,20 @@ var model = PageModel()
             conclusionSlot = .text(qualified ? L.pick("达标", "Qualified") : L.pick("未达标", "Not qualified"))
         }
 
+        // 非判定域行 ⑥ **只有一个**槽位（整格一句），视图据此按整列宽渲染
+        let l0Cell: [SemanticSlot] = bSlot.map { [aSlot, $0] } ?? [aSlot]
+
         return ReportRow(
             source: entry.source.displayName,
-            slots: [
-                .text(entry.source.displayName),
-                .text(inDomain ? L.pick("在域", "In domain") : L.pick("仅报告", "Report only")),
-                sampleSlot,
-                thresholdSlot,
-                .metric(round, unit: .none),
-                aSlot,
-                conclusionSlot,
-            ],
-            multiSlotColumn: 5,
-            extraSlots: [bSlot]
+            cells: [
+                [.text(entry.source.displayName)],
+                [.text(inDomain ? L.pick("在域", "In domain") : L.pick("仅报告", "Report only"))],
+                sampleCell,
+                [thresholdSlot],
+                [.metric(round, unit: .none)],
+                l0Cell,
+                [conclusionSlot],
+            ]
         )
     }
 }

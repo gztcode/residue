@@ -191,6 +191,168 @@ final class PageModelBuilderTests: XCTestCase {
         XCTAssertFalse(m.canLightUp, "空判定域不得判为达标")
     }
 
+    // MARK: - CR-032 · 5 来源下的判定域与行集合
+
+    /// **没装的来源不得卡死门槛，也不得占 ⑤ 行**。
+    ///
+    /// `brew` 在用户机器上可能根本没装（无快照 / `T = nil` / `b = 0`）；
+    /// `pip` 静态属仅报告。若它们进了门槛输入：
+    /// 检查行取最差 `b = 0` → 直接失败 → 自动删除**永远点不亮**。
+    func testAbsentSourcesDoNotBlockGateOrOccupyRows() {
+        var entries = Source.allCases.map {
+            SourceHeaderEntry(
+                source: $0, snapshotTaken: true,
+                T: 100, K: 90, J: 10, H: 30, a: 0, b: 12, slotCount: 100
+            )
+        }
+        // brew 缺席；pip 缺席（仅报告且本轮没有任何候选）
+        for (i, e) in entries.enumerated() where e.source == .brewCache || e.source == .pipCache {
+            entries[i] = SourceHeaderEntry(source: e.source)
+        }
+
+        let m = PageModelBuilder.build(
+            PageModelBuilder.Input(contents: makeContents(makeHeader(entries: entries)))
+        )
+
+        XCTAssertTrue(m.canLightUp, "缺席的 brew / pip 不得把门槛卡死")
+        XCTAssertFalse(
+            m.sampleProgress.contains { $0.sourceKey == Source.brewCache.rawValue },
+            "T = 0 的来源不占 ⑤ 行"
+        )
+        XCTAssertFalse(
+            m.sampleProgress.contains { $0.sourceKey == Source.pipCache.rawValue },
+            "T = 0 的仅报告来源同样不占行"
+        )
+        // 其余三个来源（uv / npm）在域内 → 占行；pipx 默认 T = 100 → 也占行
+        XCTAssertEqual(m.sampleProgress.count, 3)
+    }
+
+    /// **① 页显示的是本轮实际扫描的根，不是默认位置**（CR-032 · P2-6）。
+    ///
+    /// 用户用 `UV_CACHE_DIR` / `npm_config_cache` / `HOMEBREW_CACHE` 把缓存搬走后，
+    /// `canonicalCachePath` 只是「默认位置」。照它显示 = 指着一个从没扫过的目录
+    /// 说「它占了这么多」——数值是真的，路径是假的。
+    func testSourceSharePathUsesActualScannedRoot() {
+        var input = PageModelBuilder.Input(contents: makeContents(makeHeader()))
+        input.sourceRoots = [
+            Source.uvCache.rawValue: "/Volumes/ext/uv-cache",
+            Source.brewCache.rawValue: "/Volumes/ext/brew-cache",
+        ]
+        let m = PageModelBuilder.build(input)
+
+        let uv = m.sourceShares.first { $0.sourceKey == Source.uvCache.rawValue }
+        XCTAssertEqual(uv?.path, "/Volumes/ext/uv-cache", "有实际根时必须显示它")
+        XCTAssertNotEqual(uv?.path, Source.uvCache.canonicalCachePath,
+                          "显示默认位置就是缺陷本身")
+
+        let brew = m.sourceShares.first { $0.sourceKey == Source.brewCache.rawValue }
+        XCTAssertEqual(brew?.path, "/Volumes/ext/brew-cache")
+
+        // 没给实际根的来源仍回退默认位置（本轮扫的就是默认位置）
+        let npm = m.sourceShares.first { $0.sourceKey == Source.npmNpx.rawValue }
+        XCTAssertEqual(npm?.path, Source.npmNpx.canonicalCachePath)
+    }
+
+    /// 重启后（本会话未扫描）路径同样取实际根；缺项回退默认位置。
+    ///
+    /// 路径与「是否扫过」无关：搬家这件事一旦发生，默认位置就永远是错的。
+    func testSourceSharePathKeepsActualRootAfterRestart() {
+        var input = PageModelBuilder.Input(
+            contents: makeContents(makeHeader()),
+            hasSessionScan: false,
+            lastScan: PageModelBuilder.LastScanSummary(
+                at: Date(), bytes: 3_400_000_000, files: 100, sources: []
+            )
+        )
+        input.sourceRoots = [Source.uvCache.rawValue: "/Volumes/ext/uv-cache"]
+        let m = PageModelBuilder.build(input)
+
+        let uv = m.sourceShares.first { $0.sourceKey == Source.uvCache.rawValue }
+        XCTAssertEqual(uv?.path, "/Volumes/ext/uv-cache")
+        XCTAssertEqual(uv?.bytes.displayText, "—", "字节仍未知")
+
+        let npm = m.sourceShares.first { $0.sourceKey == Source.npmNpx.rawValue }
+        XCTAssertEqual(npm?.path, Source.npmNpx.canonicalCachePath, "缺项回退默认位置")
+    }
+
+    /// **布局不认识 → 显示「无法判定」，不显示 0、不画占比**。
+    func testUnrecognizedLayoutRendersUnavailableNotZero() {
+        var input = PageModelBuilder.Input(contents: makeContents(makeHeader()))
+        input.layoutUnrecognizedSources = [Source.pipCache.rawValue]
+        let m = PageModelBuilder.build(input)
+
+        let pip = m.sourceShares.first { $0.sourceKey == Source.pipCache.rawValue }
+        XCTAssertEqual(pip?.bytes.displayText, UICopy.cacheLayoutUnrecognized)
+        XCTAssertEqual(pip?.itemCount.displayText, UICopy.cacheLayoutUnrecognized)
+        XCTAssertNil(pip?.share, "分母未知时不画占比")
+
+        let uv = m.sourceShares.first { $0.sourceKey == Source.uvCache.rawValue }
+        XCTAssertNotEqual(uv?.bytes.displayText, UICopy.cacheLayoutUnrecognized,
+                          "未标记的条目字节不受影响")
+    }
+
+    /// **有来源布局未识别 → 总扫描量「无法判定」，不报确定值**（CR-032 · P2-3）。
+    ///
+    /// 未识别的来源扫不出候选，它的字节压根不在总量里。此时报一个确定的总量，
+    /// 等于把「没看见」说成「没有」——正是「不把未知判为安全」禁止的。
+    func testUnrecognizedLayoutMakesTotalUnavailable() {
+        var input = PageModelBuilder.Input(contents: makeContents(makeHeader()))
+        input.layoutUnrecognizedSources = [Source.pipCache.rawValue]
+        let m = PageModelBuilder.build(input)
+
+        XCTAssertEqual(
+            m.totalScannedSlot.displayText,
+            UICopy.cacheLayoutUnrecognized,
+            "总量里缺了一块，就不能报成确定值"
+        )
+        XCTAssertEqual(m.totalScannedSlot, .unavailable(reason: UICopy.cacheLayoutUnrecognized))
+    }
+
+    /// **总量不可判定 → 所有来源的占比都不给**（含已识别的来源）。
+    ///
+    /// 分母残缺时算出的百分比是假精度：uv 占「已看见部分的 100%」会被读成「占全部」。
+    func testUnrecognizedLayoutSuppressesAllShares() {
+        var input = PageModelBuilder.Input(contents: makeContents(makeHeader()))
+        input.layoutUnrecognizedSources = [Source.brewCache.rawValue]
+        input.candidates = [
+            ScanEngine.Candidate(
+                path: "/tmp/uv-1", birthtime: Date(timeIntervalSince1970: 1),
+                bytes: 100, isDirectory: false, source: Source.uvCache.rawValue
+            )
+        ]
+        let m = PageModelBuilder.build(input)
+
+        XCTAssertTrue(
+            m.sourceShares.allSatisfy { $0.share == nil },
+            "分母残缺时任何来源都不画占比"
+        )
+        XCTAssertTrue(
+            m.candidateRows.allSatisfy { $0.share == nil },
+            "② 候选行的占比同源，同样不给"
+        )
+    }
+
+    /// **全部来源布局都能识别 → 总量与占比照常给**（回归：别把正常路径也压成「无法判定」）。
+    func testRecognizedLayoutKeepsTotalAndShares() {
+        var input = PageModelBuilder.Input(contents: makeContents(makeHeader()))
+        input.candidates = [
+            ScanEngine.Candidate(
+                path: "/tmp/uv-1", birthtime: Date(timeIntervalSince1970: 1),
+                bytes: 100, isDirectory: false, source: Source.uvCache.rawValue
+            ),
+            ScanEngine.Candidate(
+                path: "/tmp/npm-1", birthtime: Date(timeIntervalSince1970: 2),
+                bytes: 300, isDirectory: false, source: Source.npmNpx.rawValue
+            ),
+        ]
+        let m = PageModelBuilder.build(input)
+
+        XCTAssertEqual(m.totalScannedSlot, .metric(400, unit: .bytes))
+        let uv = m.sourceShares.first { $0.sourceKey == Source.uvCache.rawValue }
+        XCTAssertEqual(uv?.share?.numerator, 100)
+        XCTAssertEqual(uv?.share?.denominator, 400)
+    }
+
     // MARK: - ⑤ 矩阵：报告未产出时的取值
 
     /// **报告未产出**：③ 取「本轮未结算」、⑦ 取「本轮未结算」，
@@ -208,6 +370,11 @@ final class PageModelBuilderTests: XCTestCase {
 
         // ③ 样本 / 总量
         XCTAssertEqual(row.cells[2][0].displayText, UICopy.notSettledThisRound)
+        // ④ 门槛：产出前 `H` 只是**待验门槛**，不是结算值（CR-033 / R-4）
+        XCTAssertEqual(
+            row.cells[3][0].displayText, UICopy.notSettledThisRound,
+            "产出前显示 H 会被读成「已经按这个门槛判过了」"
+        )
         // ⑥ 左值（a）
         XCTAssertEqual(row.cells[5][0].displayText, UICopy.notSettledThisRound)
         // ⑥ 右值（b）**照常填**
@@ -216,7 +383,27 @@ final class PageModelBuilderTests: XCTestCase {
         XCTAssertEqual(row.cells[6][0].displayText, UICopy.notSettledThisRound)
     }
 
-    /// **`pipx` 行恒「仅报告」**，门槛取「不适用」。
+    /// **非判定域行的 ④ 不随「报告是否产出」变**（CR-033 / M-9 与 R-4 的边界）。
+    ///
+    /// 该行不参与门槛判定 —— 产出前也照样说「不适用（不入判定域）」，
+    /// 不能因为「未结算」就把一句恒真的说明改成临时状态。
+    func testReportOnlyRowThresholdIgnoresProducedFlag() {
+        let entries = [
+            SourceHeaderEntry(source: .pipxRun, snapshotTaken: true,
+                              T: 5, K: nil, J: nil, H: 5, a: 0, b: 3, slotCount: 5, doneCount: 0),
+        ]
+        let input = PageModelBuilder.Input(
+            contents: makeContents(makeHeader(countedDays: 5, produced: false, entries: entries))
+        )
+        let m = PageModelBuilder.build(input)
+
+        XCTAssertEqual(m.reportRows[0].cells[3][0].displayText, UICopy.notInDecisionDomain)
+    }
+
+    /// **`pipx` 行：④ / ⑥ 逐字取 PRD AC-09**（CR-033 / M-9）。
+    ///
+    /// ④ 只写「不适用」读者分不清「不参与判定」与「门槛算出来是 0」；
+    /// ⑥ 填 `0 / 0` 会被读成「检查了 0 次、误判 0 次 = 干净」——把未知说成安全。
     func testReportOnlySourceRow() {
         let entries = [
             SourceHeaderEntry(source: .pipxRun, snapshotTaken: true,
@@ -227,8 +414,77 @@ final class PageModelBuilderTests: XCTestCase {
         let row = m.reportRows[0]
 
         XCTAssertEqual(row.cells[1][0].displayText, "仅报告")
-        XCTAssertEqual(row.cells[3][0].displayText, "不适用")
+        XCTAssertEqual(row.cells[3][0].displayText, UICopy.notInDecisionDomain)
+        XCTAssertEqual(row.cells[3][0].displayText, "不适用（不入判定域）")
         XCTAssertEqual(row.cells[6][0].displayText, "仅报告")
+    }
+
+    /// **非判定域行 ⑥ 是「整格一句」，不是两个数值**（CR-033 / M-9）。
+    ///
+    /// 该行从未执行 L0 检查 → 没有 `a` / `b` 可填。整格只留一个槽位，
+    /// 视图据此按整列宽渲染（拆成两个 62 pt 子格会把句子截断）。
+    func testReportOnlySourceRowHasSingleL0Slot() {
+        let entries = [
+            SourceHeaderEntry(source: .pipxRun, snapshotTaken: true,
+                              T: 5, K: 5, J: 0, H: 5, a: 0, b: 1, slotCount: 5, doneCount: 0),
+            SourceHeaderEntry(source: .pipCache, snapshotTaken: true,
+                              T: 5, K: 5, J: 0, H: 5, a: 0, b: 1, slotCount: 5, doneCount: 0),
+        ]
+        let input = PageModelBuilder.Input(contents: makeContents(makeHeader(entries: entries)))
+        let m = PageModelBuilder.build(input)
+
+        for row in m.reportRows {
+            XCTAssertEqual(row.cells[5].count, 1, "⑥ 整格一句，不拆左右值")
+            XCTAssertEqual(row.cells[5][0].displayText, UICopy.l0NotChecked)
+            XCTAssertEqual(row.cells[5][0].displayText, "不适用 · 未执行 L0 检查")
+        }
+    }
+
+    /// **非判定域行 ③ = 扫描时点值 + 标注**（CR-033 · R-2）。
+    ///
+    /// 该行不取快照、`K` / `J` 无语义 → 不能套 `K / T`，也不套 `K + J = T`；
+    /// 取本窗扫描到的条目数，并在同一格标注「扫描时点值 · 非结算值」。
+    func testReportOnlyRowSampleCarriesScanTimeAnnotation() {
+        let entries = [
+            SourceHeaderEntry(source: .pipxRun, snapshotTaken: false,
+                              T: nil, K: nil, J: nil, H: nil, a: 0, b: 0,
+                              slotCount: 4, doneCount: 0),
+        ]
+        let input = PageModelBuilder.Input(contents: makeContents(makeHeader(entries: entries)))
+        let m = PageModelBuilder.build(input)
+        let row = m.reportRows[0]
+
+        XCTAssertEqual(row.cells[2].count, 2, "③ 两槽位：扫描值 + 标注")
+        XCTAssertEqual(row.cells[2][0].displayText, "4条", "取本窗扫描到的条目数")
+        XCTAssertEqual(row.cells[2][1].displayText, UICopy.scanTimeNonSettled)
+        XCTAssertEqual(row.cells[2][1].displayText, "扫描时点值 · 非结算值")
+    }
+
+    /// **判定域行 ③ 不受标注影响**（回归）。
+    func testInDomainRowSampleHasNoScanTimeAnnotation() {
+        let m = PageModelBuilder.build(
+            PageModelBuilder.Input(contents: makeContents(makeHeader()))
+        )
+        let row = m.reportRows[0]
+
+        XCTAssertEqual(row.cells[2].count, 1)
+        XCTAssertNotEqual(row.cells[2][0].displayText, UICopy.scanTimeNonSettled)
+    }
+
+    /// **判定域行 ⑥ 仍是两个数值**（回归：别把整句套到判定域行上）。
+    func testInDomainRowKeepsTwoL0Slots() {
+        let entries = [
+            SourceHeaderEntry(source: .uvCache, snapshotTaken: true,
+                              T: 30, K: 30, J: 0, H: 30, a: 0, b: 7, slotCount: 30, doneCount: 0),
+        ]
+        let input = PageModelBuilder.Input(contents: makeContents(makeHeader(entries: entries)))
+        let m = PageModelBuilder.build(input)
+        let row = m.reportRows[0]
+
+        XCTAssertEqual(row.cells[5].count, 2)
+        XCTAssertEqual(row.cells[5][0].displayText, "0次")
+        XCTAssertEqual(row.cells[5][1].displayText, "7次")
+        XCTAssertEqual(row.cells[3][0].displayText, "30", "判定域行 ④ 仍取 H")
     }
 
     /// **「上一轮」行只在轮次 ≥ 2 时出现**（首轮不显示，不是显示「—」）。
@@ -267,9 +523,9 @@ final class PageModelBuilderTests: XCTestCase {
         XCTAssertEqual(m.evidenceRows.map(\.label.text), ["可恢复", "已恢复", "已阻断"])
     }
 
-    // MARK: - ① 三区块聚合
+    // MARK: - ① 来源区块聚合
 
-    /// 三区块的字节 = **该来源候选字节之和**（聚合在 Core，界面不参与）。
+    /// 每来源区块的字节 = **该来源候选字节之和**（聚合在 Core，界面不参与）。
     func testOverviewBlocksAggregatePerSource() {
         let input = PageModelBuilder.Input(
             contents: makeContents(makeHeader()),
@@ -280,7 +536,8 @@ final class PageModelBuilderTests: XCTestCase {
             ]
         )
         let m = PageModelBuilder.build(input)
-        XCTAssertEqual(m.overviewBlocks.count, 3, "三区块 = Source.allCases 三个")
+        XCTAssertEqual(m.overviewBlocks.count, Source.allCases.count,
+                       "区块数 = Source.allCases（CR-032 起为 5 个）")
         XCTAssertEqual(m.overviewBlocks[0].slot.displayText, MetricUnit.formatBytes(3_000_000))
         XCTAssertEqual(m.overviewBlocks[1].slot.displayText, MetricUnit.formatBytes(3_000_000))
         XCTAssertEqual(m.overviewBlocks[2].slot.displayText, MetricUnit.formatBytes(0))
@@ -318,13 +575,13 @@ final class PageModelBuilderTests: XCTestCase {
         XCTAssertEqual(m.totalScannedSlot.displayText, MetricUnit.formatBytes(3_400_000_000))
 
         // 逐来源 / 可释放 / 批次：全部「—」，不是 0
-        XCTAssertEqual(m.sourceShares.count, 3)
+        XCTAssertEqual(m.sourceShares.count, Source.allCases.count)
         for row in m.sourceShares {
             XCTAssertEqual(row.bytes.displayText, "—", "来源「\(row.displayName)」的字节未知")
             XCTAssertEqual(row.itemCount.displayText, "—")
             XCTAssertNil(row.share, "分母未知时不画占比")
         }
-        XCTAssertEqual(m.overviewBlocks.count, 3)
+        XCTAssertEqual(m.overviewBlocks.count, Source.allCases.count)
         XCTAssertEqual(m.overviewBlocks[0].slot.displayText, "—")
         XCTAssertEqual(m.l1Confirmed.displayText, "—")
         XCTAssertEqual(m.l2Inferred.displayText, "—")

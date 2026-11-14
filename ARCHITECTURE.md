@@ -31,14 +31,14 @@ ResidueApp/
 ├── Sources/
 │   ├── ResidueCore/           纯逻辑，可单测（无 UI 依赖）
 │   └── ResidueApp/            SwiftUI 界面 + IO 编排
-├── Tests/ResidueCoreTests/    283 个单测
+├── Tests/ResidueCoreTests/    312 个单测
 ├── scripts/
 │   ├── make_app.sh            打包 .app（含签名/公证/钉票的完整分支）
 │   ├── verify_a9.sh           72 项：页面结构 + 空实现检测 + 数据层接线
 │   ├── verify_a5.sh           42 项：产物结构 + dmg 载体 + C1/C9 发布链路顺序 + README 信任面
 │   └── verify_codes.py        11 项：错误码表 ↔ 文档一致性
 ├── Resources/                 Info.plist 模板 / entitlements / 图标
-└── design-renders/            16 张渲染产物（设计走查的证据基础）
+└── design-renders/            17 张渲染产物（设计走查的证据基础）
 ```
 
 ### `ResidueCore` 里值得先看的几个文件
@@ -66,11 +66,11 @@ ResidueApp/
 
 | 文件 | 是什么 |
 |---|---|
-| `Residue-PRD-v5.5.md` | 需求契约。AC-01~AC-20 + M1–M6 指标定义 + §8 状态码 + 安全触发项 |
-| `Residue-R2-技术方案-v1.8.md` | 技术契约。ADR-01~10 + IF-01~12 + 错误码表 + 容量预算 + 发布准入 |
+| `Residue-PRD-v5.6.md` | 需求契约。AC-01~AC-20 + M1–M6 指标定义 + §8 状态码 + 安全触发项（CR-032：来源扩到 5 类） |
+| `Residue-R2-技术方案-v1.9.md` | 技术契约。ADR-01~10 + IF-01~12 + 错误码表 + 容量预算 + 发布准入 |
 | `Residue-视觉基线-v1.1.md` | 视觉最小集。排版刻度 / 两档语义色 / 八态映射 / 七页骨架 |
-| `Residue-DAC-v2.0.md` | 107 条可测量的设计验收标准。R3.8 走查的唯一依据 |
-| `Residue-B1-功能用例集-v1.0.md` | 98+8 条功能用例 + 20 条冒烟 + 21 条回归 |
+| `Residue-DAC-v2.1.md` | 111 条可测量的设计验收标准。R3.8 走查的唯一依据（CR-032：新增 DAC-107~110） |
+| `Residue-B1-功能用例集-v1.2.md` | 116 条功能用例 + 19 条冒烟 + 21 条回归（CR-032：补来源扩容 7 条） |
 | `Residue-R2-安全合规检查表-v1.0.md` | 12 项安全风险逐项结论 |
 | `Residue-安全验证移交清单-v1.0.md` | 27 条安全风险 → 归属人 → 验证方法 |
 
@@ -119,7 +119,7 @@ ResidueApp/
 ```bash
 cd ResidueApp
 
-swift build && swift test          # 编译 + 283 单测
+swift build && swift test          # 编译 + 312 单测
 
 ./scripts/verify_codes.py          # 错误码表（11 项）
 ./scripts/verify_a9.sh             # 页面结构 + 空实现（72 项）
@@ -127,13 +127,13 @@ swift build && swift test          # 编译 + 283 单测
 ./scripts/verify_a5.sh             # 产物结构（42 项，3 项因无签名身份如实标未覆盖）
 
 swift run ResidueApp --verify-wiring /tmp/w      # 接线自检（45 项，真 IO）
-swift run ResidueApp --render-pages /tmp/pages   # 重新渲染 16 张设计稿
+swift run ResidueApp --render-pages /tmp/pages   # 重新渲染 17 张设计稿
 
 cd .. && ./tests/contract/check_all.sh && python3 tests/contract/verify_r2.py
 #         PRD 191 + 47 项 + R2 123 项（脚本从自身位置推导仓库根，可在任意 cwd 调用）
 ```
 
-`--verify-wiring` 是这里最重要的一条：它**真的走一遍**「首启落盘 → 扫描 → 门槛链 → 导出脱敏 → 清除 → 定时任务」，靠文件系统事实而不是读代码判断。283 个单测永远替代不了它——单测验的是各模块自身契约，**没人验「模块之间接对了没有」**。
+`--verify-wiring` 是这里最重要的一条：它**真的走一遍**「首启落盘 → 扫描 → 门槛链 → 导出脱敏 → 清除 → 定时任务」，靠文件系统事实而不是读代码判断。312 个单测永远替代不了它——单测验的是各模块自身契约，**没人验「模块之间接对了没有」**。
 
 ---
 

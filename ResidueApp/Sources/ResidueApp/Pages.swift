@@ -126,11 +126,23 @@ struct OverviewPage: View {
 
             StackedShareBar(rows: model.sourceShares, height: 8)
 
-            HStack(alignment: .top, spacing: Tokens.Spacing.m) {
+            // **自适应网格**（CR-032：来源由 3 个扩到 5 个）。
+            //
+            // 不写死列数：列数由可用宽度与单格最小宽度推出来，来源再增减都不用改这里。
+            // 写死 `count: 3` 时 5 个来源被硬折成 3 + 2，将来 6 个就是 3 + 3 ——
+            // 每格宽窄与「有哪些来源」无关，却跟着来源数量变形。
+            // 单格最小 76 pt：`847.7 MB` 在 11 pt 数值字号下约 62 pt，留出余量。
+            // 取 76 而不是更大值，是为了在本页可用宽度下**仍然排成三列**
+            // （与视觉基线设计稿一致）；来源再多时它会自己多折一行，不必改这里。
+            LazyVGrid(
+                columns: [GridItem(.adaptive(minimum: 76), spacing: Tokens.Spacing.m, alignment: .leading)],
+                alignment: .leading,
+                spacing: 6
+            ) {
                 ForEach(model.sourceShares) { row in
-                    // 三列等宽（每列约 83 pt）。**字节与占比必须竖排**：
+                    // 每列约 83 pt。**字节与占比必须竖排**：
                     // 真实数据 `847.7 MB 97.0%` 横排需要约 92 pt，
-                    // 会在三列布局里被截成「847.7…」（真机走查发现）。
+                    // 会在窄列里被截成「847.7…」（真机走查发现）。
                     VStack(alignment: .leading, spacing: 2) {
                         HStack(spacing: Tokens.Spacing.xxs) {
                             SourceDot(sourceKey: row.sourceKey)
@@ -445,35 +457,45 @@ struct EnvironmentsPage: View {
     /// 保护边界条：哪些来源在判定域（可被自动删除）、白名单是否生效。
     ///
     /// 数据与 ① 页同源（`sourceShares.inDecisionDomain`），**不在视图里分组或计数**。
+    ///
+    /// 容器用 `WrapHStack` 而不是 `HStack`：CR-032 把来源从 3 个扩到 5 个后，
+    /// 「标签 + 分隔线 + 五组来源 + 白名单徽标」在 751 pt 内**放不下**
+    /// （英文比中文更宽），`HStack` 会把它挤出卡片边界、截掉末尾的来源，
+    /// 而这一段恰恰是在说明「哪些来源不会被自动删」——截掉就是漏掉保护边界。
     private var protectionStrip: some View {
-        HStack(spacing: Tokens.Spacing.s) {
-            HStack(spacing: Tokens.Spacing.xxs) {
-                Image(systemName: "shield.lefthalf.filled")
-                    .font(.system(size: 10))
-                Text(L.pick("自动删除只作用于判定域", "Auto-delete only in the decision domain"))
-                    .font(Tokens.Typography.secondary)
-            }
-            .foregroundStyle(Tokens.Color.textSecondary)
-
-            Rectangle()
-                .fill(Tokens.Color.divider)
-                .frame(width: 1, height: 12)
-
-            ForEach(model.sourceShares) { row in
-                HStack(spacing: 4) {
-                    SourceDot(sourceKey: row.sourceKey)
-                    Text(row.displayName)
+        // 左侧（标签 + 分隔线 + 逐个来源）可折行；右侧白名单徽标**钉在行尾**，
+        // 不参与折行 —— 它是「保护是否生效」的结论，跟着来源一起被挤到第二行
+        // 会让人以为是又一个来源。
+        HStack(alignment: .top, spacing: Tokens.Spacing.s) {
+            WrapHStack(spacing: Tokens.Spacing.s, lineSpacing: 4) {
+                HStack(spacing: Tokens.Spacing.xxs) {
+                    Image(systemName: "shield.lefthalf.filled")
+                        .font(.system(size: 10))
+                    Text(L.pick("自动删除只作用于判定域", "Auto-delete only in the decision domain"))
                         .font(Tokens.Typography.secondary)
-                        .foregroundStyle(Tokens.Color.textSecondary)
-                    Text(
-                        row.inDecisionDomain
-                            ? L.pick("在域", "In domain")
-                            : L.pick("仅报告", "Report only")
-                    )
-                    .font(.system(size: 9))
-                    .foregroundStyle(
-                        row.inDecisionDomain ? Tokens.Color.success : Tokens.Color.textTertiary
-                    )
+                }
+                .foregroundStyle(Tokens.Color.textSecondary)
+
+                Rectangle()
+                    .fill(Tokens.Color.divider)
+                    .frame(width: 1, height: 12)
+
+                ForEach(model.sourceShares) { row in
+                    HStack(spacing: 4) {
+                        SourceDot(sourceKey: row.sourceKey)
+                        Text(row.displayName)
+                            .font(Tokens.Typography.secondary)
+                            .foregroundStyle(Tokens.Color.textSecondary)
+                        Text(
+                            row.inDecisionDomain
+                                ? L.pick("在域", "In domain")
+                                : L.pick("仅报告", "Report only")
+                        )
+                        .font(.system(size: 9))
+                        .foregroundStyle(
+                            row.inDecisionDomain ? Tokens.Color.success : Tokens.Color.textTertiary
+                        )
+                    }
                 }
             }
 
@@ -487,10 +509,14 @@ struct EnvironmentsPage: View {
                         .font(Tokens.Typography.secondary)
                 }
                 .foregroundStyle(Tokens.Color.textSecondary)
+                .fixedSize()
             }
         }
         .padding(.horizontal, Tokens.Spacing.s)
-        .frame(height: 32)
+        // 高度由内容决定：三来源时仍是原来的 32 pt 单行，五来源折成两行时
+        // 让条子自己长高，而不是把内容裁掉。`minHeight` 保住单行时的视觉基线高度。
+        .padding(.vertical, 6)
+        .frame(minHeight: 32)
         .background(
             Tokens.Color.surface,
             in: RoundedRectangle(cornerRadius: Tokens.Radius.control)

@@ -64,15 +64,28 @@ public struct StateFile: Sendable {
         public var readOnly: Bool
         /// 遇到的错误（`nil` = 正常）。
         public var error: StateFileError?
+        /// **载体文件是否存在**（`state.residue` 主文件）。
+        ///
+        /// ## 为什么必须单独记一个「载体在不在」
+        ///
+        /// 版本变更的判定要区分两种「版本号读不出来」：
+        /// - **首启**（压根没有载体）→ **不是版本变更**，不该清零任何东西；
+        /// - **基线遗留**（载体在，但从来没写过版本号）→ **必须**按版本变更处理。
+        ///
+        /// 两者在 `header.appVersion` 上长得一模一样（都是空串），
+        /// 所以「载体在不在」是这个判定的**必要输入**，不能靠版本号空不空去猜。
+        public var carrierPresent: Bool
 
         public init(
             contents: StateFileContents? = nil,
             readOnly: Bool = false,
-            error: StateFileError? = nil
+            error: StateFileError? = nil,
+            carrierPresent: Bool = false
         ) {
             self.contents = contents
             self.readOnly = readOnly
             self.error = error
+            self.carrierPresent = carrierPresent
         }
     }
 
@@ -82,20 +95,20 @@ public struct StateFile: Sendable {
     public func load() -> LoadResult {
         let fm = FileManager.default
 
-        // 主文件不存在 → 空载体（非错误）
+        // 主文件不存在 → 空载体（非错误）；**载体不在**（首启语义）
         guard fm.fileExists(atPath: fileURL.path) else {
-            return LoadResult(contents: StateFileContents())
+            return LoadResult(contents: StateFileContents(), carrierPresent: false)
         }
 
         do {
             let data = try Data(contentsOf: fileURL)
             let contents = try StateFileCodec.decode(data)
-            return LoadResult(contents: contents)
+            return LoadResult(contents: contents, carrierPresent: true)
         } catch let err as StateFileError {
             switch err {
             case .schemaTooNew:
                 // E-301 → **只读降级，不拒绝、不重置**
-                return LoadResult(readOnly: true, error: err)
+                return LoadResult(readOnly: true, error: err, carrierPresent: true)
 
             case .segmentValidationFailed(let detail):
                 // **E-304**（段校验失败：越界 / 重叠 / CRC / 位图长度不符）
@@ -106,20 +119,20 @@ public struct StateFile: Sendable {
                 let corruptURL = directory.appendingPathComponent("state.residue.corrupt")
                 try? fm.removeItem(at: corruptURL)
                 try? fm.moveItem(at: fileURL, to: corruptURL)
-                return LoadResult(readOnly: true, error: .segmentValidationFailed(detail: detail))
+                return LoadResult(readOnly: true, error: .segmentValidationFailed(detail: detail), carrierPresent: true)
 
             case .corruptNoBackup(let detail):
                 // **E-302**（损坏且无可用 `.bak`）→ 只读；**不自动重置**
                 let corruptURL = directory.appendingPathComponent("state.residue.corrupt")
                 try? fm.removeItem(at: corruptURL)
                 try? fm.moveItem(at: fileURL, to: corruptURL)
-                return LoadResult(readOnly: true, error: .corruptNoBackup(detail: detail))
+                return LoadResult(readOnly: true, error: .corruptNoBackup(detail: detail), carrierPresent: true)
 
             default:
-                return LoadResult(readOnly: true, error: err)
+                return LoadResult(readOnly: true, error: err, carrierPresent: true)
             }
         } catch {
-            return LoadResult(readOnly: true, error: .corruptNoBackup(detail: String(describing: error)))
+            return LoadResult(readOnly: true, error: .corruptNoBackup(detail: String(describing: error)), carrierPresent: true)
         }
     }
 
@@ -234,11 +247,55 @@ public struct StateFile: Sendable {
     ///
     /// ⚠️ **这不是 N7 的「一键清除」**——N7 的清除**不作用于**本载体。
     /// 本方法只由「应用版本变更」路径调用。
+    ///
+    /// ## 哪些量清零、哪些量保留（依据 PRD M1「写入时刻」的**七量穷举式**）
+    ///
+    /// M1 列举了版本变更时**同时**发生的七件事：
+    /// ① 本轮计数日归零且起算点重置 ② `T` 待重取 ③ `K` / `J` 清零
+    /// ④ `b` 清零 ⑤ **轮次不变** ⑥ `a` 清零 ⑦ `H` 随新 `T` 重算。
+    ///
+    /// **清单之外的东西不得被静默改动**——否则就是「没写进契约的副作用」：
+    /// - `autoDeleteEnabled`（自动删除开关）→ **保留**。
+    ///   用户主动开的开关被版本升级悄悄关掉，是**用户意愿被改写**，
+    ///   且会让「曾启用过」这一状态（`Preferences.CollectionPolicy` 的依据）失真。
+    /// - `settlement`（结算报告标记）→ **清空**。M1 ③ 说「旧轮归因结果随旧报告失效」，
+    ///   留着 `producedAt` 会让 ⑤ 页一边说「样本 —」一边说「报告已产出」。
+    /// - `lastScanAt`（上次扫描时刻）→ **保留**。它是**已发生的事实**（不是派生量），
+    ///   清掉会让 ① 页把「上次扫过」说成「没扫过」。
+    ///
+    /// - Parameters:
+    ///   - newAppVersion: 新的应用版本号（写入 `header.appVersion`）。
+    ///   - keepingRound: 版本变更**不产生新轮次**（M1「写入时刻」：
+    ///     计数日归零、`T` 重算、**轮次不变**）。轮次若被重置成 1，
+    ///     ③/⑤ 页的轮次会倒退，且「未达标自动开下一轮」的轮次连续性被破坏。
+    ///     默认从**现有载体**继承；载体读不出时退回 1（首启语义）。
+    ///   - keepingAutoDeleteEnabled: 自动删除开关的继承值（`nil` = 从现有载体继承）。
+    ///   - keepingLastScanAt: 上次扫描时刻的继承值（`nil` = 从现有载体继承）。
+    ///
+    /// - Returns: **写入后的载体内容**（调用方应直接用它刷新内存态，
+    ///   免得「磁盘上的」与「内存里的」分叉）。
     @discardableResult
-    public func clearCarrierForVersionChange(newAppVersion: String) throws {
-        var header = StateHeader()
+    public func clearCarrierForVersionChange(
+        newAppVersion: String,
+        keepingRound round: Int? = nil,
+        keepingAutoDeleteEnabled autoDeleteEnabled: Bool? = nil,
+        keepingLastScanAt lastScanAt: Date? = nil
+    ) throws -> StateFileContents {
+        let existing = load().contents?.header
+        let inheritedRound = round ?? existing?.round ?? 1
+        var header = StateHeader(round: inheritedRound)
         header.appVersion = newAppVersion
+        // **开关保留**（不在 M1 七量穷举清单里 → 不得被静默改动）
+        header.autoDeleteEnabled = autoDeleteEnabled
+            ?? existing?.autoDeleteEnabled
+            ?? false
+        // **上次扫描时刻保留**（已发生的事实，不是派生量）
+        header.lastScanAt = lastScanAt ?? existing?.lastScanAt
+        // `settlement` 不赋值 → 取默认（空）→ **旧报告标记清空**（见上文依据）
+        //
         // 载荷全空 → 四项（`F` / `C_done` / 位槽占用表 / `a`）自然清零
-        try save(header: header, payloads: [:])
+        // 计数日 / 起算点随 `StateHeader()` 默认值清零；`T` / `K` / `J` / `b`
+        // 因来源行为空而在下一次扫描时重算。
+        return try save(header: header, payloads: [:])
     }
 }

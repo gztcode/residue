@@ -127,6 +127,33 @@ final class CancelBox: @unchecked Sendable {
 
 // MARK: - 来源根解析（**自由函数，不是 AppModel 的方法**）
 
+/// 一个来源的扫描根（**根 + 可选文件名过滤**）。
+///
+/// ## 为什么要带 `fileFilter`
+///
+/// Homebrew 的 `downloads/` 里不只有瓶子，还有瓶子清单、cask 包和源包。
+/// 只有 `*.bottle*.tar.gz` 是本产品认可的「下载缓存」——其余文件删了不会
+/// 释放多少空间，却会让产品叙事变成「什么都敢删」。过滤在扫描层做，
+/// 保证候选集合本身 = 可清理集合。
+struct SourceRoot: Sendable {
+    let sourceName: String
+    let path: String
+    let fileFilter: ScanEngine.FileNameFilter?
+
+    init(sourceName: String, path: String, fileFilter: ScanEngine.FileNameFilter? = nil) {
+        self.sourceName = sourceName
+        self.path = path
+        self.fileFilter = fileFilter
+    }
+}
+
+/// 解析结果：扫描根 + 「缓存布局不认识」的来源集合。
+struct ResolvedSourceRoots: Sendable {
+    var roots: [SourceRoot]
+    /// 根存在、但已知布局一个都不存在（当前用于 pip）→ 界面按「无法判定」呈现，不显示 0。
+    var layoutUnrecognized: Set<String>
+}
+
 /// 解析各来源的根目录（用上游只读命令定位；失败回退标准路径）。
 ///
 /// ## 为什么是**自由函数**而不是 `AppModel` 的方法
@@ -147,29 +174,111 @@ func resolveSourceRoots(
     override: [(String, String)]?,
     probe: UpstreamRunner,
     upstream: inout [UpstreamCommand]
-) -> [(String, String)] {
+) -> ResolvedSourceRoots {
     // 自检注入优先（不产生 upstreamCommands —— 因为压根没调上游命令）
-    if let override { return override }
+    // 注入根仍套用该来源的标准文件名过滤：否则自检里的 brew 根会把
+    // 瓶子清单也当候选，与生产行为不一致（自检就不算证明）。
+    if let override {
+        return ResolvedSourceRoots(
+            roots: override.map { pair in
+                SourceRoot(
+                    sourceName: pair.0,
+                    path: pair.1,
+                    fileFilter: Source(rawValue: pair.0).flatMap(defaultFileFilter(for:))
+                )
+            },
+            layoutUnrecognized: []
+        )
+    }
 
     let home = NSHomeDirectory()
-    var out: [(String, String)] = []
+    var out: [SourceRoot] = []
 
     // uv：`uv cache dir`（白名单内，纯本地）
     let uv = probe.run(executable: "uv", args: ["cache", "dir"])
     upstream.append(uv.record)
-    let uvRoot = (uv.stdout?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 }
-        ?? home + "/.cache/uv"
-    out.append((Source.uvCache.rawValue, uvRoot))
+    let uvRoot = nonEmpty(uv.stdout) ?? home + "/.cache/uv"
+    out.append(SourceRoot(sourceName: Source.uvCache.rawValue, path: uvRoot))
 
     // npm：`npm config get cache`（白名单内）
     let npm = probe.run(executable: "npm", args: ["config", "get", "cache"])
     upstream.append(npm.record)
-    let npmBase = (npm.stdout?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 }
-        ?? home + "/.npm"
-    out.append((Source.npmNpx.rawValue, npmBase + "/_npx"))
+    let npmBase = nonEmpty(npm.stdout) ?? home + "/.npm"
+    out.append(SourceRoot(sourceName: Source.npmNpx.rawValue, path: npmBase + "/_npx"))
 
     // pipx：规则目录固定（`.local/pipx/venv`，与 SourceRule 一致）
-    out.append((Source.pipxRun.rawValue, home + "/.local/pipx/venv"))
+    out.append(SourceRoot(sourceName: Source.pipxRun.rawValue, path: home + "/.local/pipx/venv"))
 
-    return out
+    // Homebrew：`brew --cache`（白名单内）→ 只扫 `downloads/`，且只收瓶子。
+    //
+    // **为什么不是整个 cache 根**：`bootsnap/`（Ruby 启动缓存）、`api/`
+    // （formula 元数据）、`tool-selection/` 都不是下载缓存；把它们算进
+    // 「可回收字节」会让用户清完 brew 变慢。
+    let brew = probe.run(executable: "brew", args: ["--cache"])
+    upstream.append(brew.record)
+    let brewCache = nonEmpty(brew.stdout) ?? home + "/Library/Caches/Homebrew"
+    out.append(SourceRoot(
+        sourceName: Source.brewCache.rawValue,
+        path: brewCache + "/downloads",
+        fileFilter: defaultFileFilter(for: .brewCache)
+    ))
+
+    // pip：`pip cache dir`（CR-032 新增白名单）→ 只扫已知布局。
+    //
+    // 依次尝试 `pip` / `pip3` / `python3 -m pip`：有些机器只有 `pip3`，
+    // 有些 Python 环境不提供独立入口。**每次尝试都落一条 upstreamCommands**。
+    var pipDir: String? = nil
+    let pip = probe.run(executable: "pip", args: ["cache", "dir"])
+    upstream.append(pip.record)
+    pipDir = nonEmpty(pip.stdout)
+    if pipDir == nil {
+        let pip3 = probe.run(executable: "pip3", args: ["cache", "dir"])
+        upstream.append(pip3.record)
+        pipDir = nonEmpty(pip3.stdout)
+    }
+    if pipDir == nil {
+        let py = probe.run(executable: "python3", args: ["-m", "pip", "cache", "dir"])
+        upstream.append(py.record)
+        pipDir = nonEmpty(py.stdout)
+    }
+
+    let pipCache = pipDir ?? home + "/Library/Caches/pip"
+    var pipLayoutFound = false
+    for sub in ["http-v2", "http", "wheels"] {
+        let path = pipCache + "/" + sub
+        if FileManager.default.fileExists(atPath: path) {
+            pipLayoutFound = true
+            out.append(SourceRoot(sourceName: Source.pipCache.rawValue, path: path))
+        }
+    }
+    var unrecognized: Set<String> = []
+    if !pipLayoutFound && FileManager.default.fileExists(atPath: pipCache) {
+        // 目录在、但一个已知子目录都不在 → 布局可能已变（如 http-v3）。
+        // **不显示 0**：没看见 ≠ 没有（N5 的对偶要求）。
+        unrecognized.insert(Source.pipCache.rawValue)
+    }
+
+    return ResolvedSourceRoots(roots: out, layoutUnrecognized: unrecognized)
+}
+
+/// 某来源的**标准文件名过滤**（唯一实现处，生产与自检注入共用）。
+///
+/// 只有 Homebrew 需要：`downloads/` 里瓶子、瓶子清单、cask、源码包混放，
+/// 只有 `*.bottle*.tar.gz` 是本产品认可的可回收下载缓存。
+func defaultFileFilter(for source: Source) -> ScanEngine.FileNameFilter? {
+    switch source {
+    case .brewCache:
+        return ScanEngine.FileNameFilter(
+            requiredSubstrings: [".bottle"],
+            requiredSuffixes: [".tar.gz"]
+        )
+    default:
+        return nil
+    }
+}
+
+/// 上游输出归一化：去空白；空串按「没拿到」处理。
+private func nonEmpty(_ s: String?) -> String? {
+    guard let t = s?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty else { return nil }
+    return t
 }

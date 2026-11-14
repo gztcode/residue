@@ -243,16 +243,22 @@ struct ReportMatrixView: View {
                             if ReportMatrix.columns[min(idx, ReportMatrix.columns.count - 1)] == ReportMatrix.l0ColumnTitle {
                                 // ⑥ 列：两个独立 `.metric` **并肩**（不是拼成一个字符串，
                                 // 也不是上下堆叠）——子标已在表头，此处只放数
-                                HStack(spacing: 0) {
-                                    ForEach(Array(cell.enumerated()), id: \.offset) { _, slot in
-                                        SemanticSlotView(slot: slot)
-                                            .frame(width: ReportMatrix.l0SubWidth, alignment: .leading)
+                                if cell.count == 1 {
+                                    // **非判定域行整格一句**（「不适用 · 未执行 L0 检查」，PRD AC-09 逐字）：
+                                    // 拆成两个 62 pt 子格会把它截成「不适用 · 未…」。
+                                    SemanticSlotView(slot: cell[0], font: Tokens.Typography.secondary)
+                                } else {
+                                    HStack(spacing: 0) {
+                                        ForEach(Array(cell.enumerated()), id: \.offset) { _, slot in
+                                            SemanticSlotView(slot: slot)
+                                                .frame(width: ReportMatrix.l0SubWidth, alignment: .leading)
+                                        }
                                     }
                                 }
                             } else {
                                 VStack(alignment: .leading, spacing: Tokens.Spacing.xxs) {
                                     ForEach(Array(cell.enumerated()), id: \.offset) { _, slot in
-                                        SemanticSlotView(slot: slot)
+                                        SemanticSlotView(slot: slot, font: cellFont(index: idx, slot: slot))
                                     }
                                 }
                             }
@@ -272,10 +278,28 @@ struct ReportMatrixView: View {
         .background(Tokens.Color.surface, in: RoundedRectangle(cornerRadius: Tokens.Radius.card))
     }
 
+    /// 单元格字号：**③ / ④ 两列的非数值槽位取 11 pt**（CR-033 / M-9 · R-2）。
+    ///
+    /// 这两列的列宽按数值定。非判定域行放的是整句契约文案
+    ///（「扫描时点值 · 非结算值」/「不适用（不入判定域）」），13 pt 在这个宽度下
+    /// 折成两行会超出 32 pt 的固定行高（v2 契约值，不动）——
+    /// 11 pt 两行 28.6 pt 装得下，且与 ⑥ 列整句同字号。
+    private func cellFont(index: Int, slot: SemanticSlot) -> Font {
+        guard index == 2 || index == 3 else { return Tokens.Typography.body }
+        switch slot {
+        case .metric, .ratio, .percent, .duration: return Tokens.Typography.body
+        default: return Tokens.Typography.secondary
+        }
+    }
+
     /// 列宽（**加总必须 ≤ 可用宽度**，否则整页被撑宽、右侧截断）。
     ///
     /// 可用宽度 = 1000（窗口）− 208（侧栏）− 1（分隔线）− 40（页内边距）≈ **751 pt**。
-    /// 7 列合计 688 pt + 列间距 56 pt = **744 pt**，中英文都留有余量。
+    /// 7 列合计 **695 pt** + 单元格左右内边距 56 pt = **751 pt**（顶格，不再留余量）。
+    ///
+    /// **CR-033 / M-9 重排**：④ / ⑥ 两列要装下非判定域行的整句契约文案
+    /// （「不适用（不入判定域）」/「不适用 · 未执行 L0 检查」），各自加宽；
+    /// 差额从 ① 来源、② 判定域、③ 样本、⑤ 观察期、⑦ 结论 匀出。
     ///
     /// ⚠️ 按**列序**取值，不按列名。列名是多语言的（`ReportMatrix.columns`
     /// 随 `L.current` 变化），拿中文列名去 `case` 匹配在英文界面下会全部落到
@@ -283,13 +307,13 @@ struct ReportMatrixView: View {
     private func columnWidth(for column: String) -> CGFloat {
         guard let idx = ReportMatrix.columns.firstIndex(of: column) else { return 90 }
         switch idx {
-        case 0: return 100                              // 来源
-        case 1: return 70                               // 判定域
-        case 2: return ReportMatrix.sampleColumnWidth   // 样本 / 总量
-        case 3: return 70                               // 门槛
-        case 4: return 90                               // 观察期
-        case 5: return ReportMatrix.l0SubWidth * 2 + Tokens.Spacing.xxs
-        case 6: return 80                               // 结论
+        case 0: return 86                               // 来源
+        case 1: return 56                               // 判定域
+        case 2: return ReportMatrix.sampleColumnWidth   // 样本 / 总量（130）
+        case 3: return 144                              // 门槛（整句文案，11 pt 单行）
+        case 4: return 62                               // 观察期
+        case 5: return 141                              // L0 误判 · 检查（整句文案，11 pt 单行）
+        case 6: return 76                               // 结论
         default: return 90
         }
     }

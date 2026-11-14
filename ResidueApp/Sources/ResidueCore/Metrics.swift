@@ -40,19 +40,27 @@ public struct CandidateID: Hashable, Codable, Sendable, Comparable {
 
 // ---------- 来源（M3 / M4 的分组键第一维） ----------
 
-/// 上游来源。首版封闭枚举（契约：判定域 = `uv` cache / `npm/_npx` 两类；
-/// `pipx` run 只报告、不自动删、不进判定域）。
+/// 上游来源。封闭枚举（CR-032：判定域 = `uv` cache / `npm/_npx` /
+/// Homebrew cache 三类；`pipx` run 与 pip cache 只报告、不自动删、不进判定域）。
+///
+/// **新增 case 必须追加在末尾**：状态文件的段表用 `sourceIndex`（= 本枚举声明序）
+/// 索引载荷，插队会让老文件里的 `pipx_run` 段被读成别的来源（不崩，读数全错）。
 public enum Source: String, Codable, Sendable, CaseIterable {
     case uvCache = "uv_cache"
     case npmNpx = "npm_npx"
     case pipxRun = "pipx_run"
+    case brewCache = "brew_cache"
+    case pipCache = "pip_cache"
 
     /// 是否属判定域（参与自动删除的来源）。
-    /// 契约：判定域 = 本轮观察期开始快照内命中的来源（封闭枚举两类）。
+    /// 契约：判定域 = 本轮观察期开始快照内命中的来源（封闭枚举三类）。
+    ///
+    /// **注意**：这里只是「静态成员资格」。本轮是否真的入域还要看
+    /// `DecisionDomain.members(from:)`（必须同时满足快照已取、`T ≥ 1`）。
     public var isInDecisionDomain: Bool {
         switch self {
-        case .uvCache, .npmNpx: return true
-        case .pipxRun: return false
+        case .uvCache, .npmNpx, .brewCache: return true
+        case .pipxRun, .pipCache: return false
         }
     }
 
@@ -62,6 +70,10 @@ public enum Source: String, Codable, Sendable, CaseIterable {
         case .uvCache: return "uv cache"
         case .npmNpx: return "npm/_npx"
         case .pipxRun: return "pipx run"
+        // 展示名取短形式：① 页来源列约 83 pt、浮层列宽 72 pt，
+        // 「Homebrew cache」在 11 pt 下会截成「Homebrew…」（重渲染设计稿实测）。
+        case .brewCache: return "Homebrew"
+        case .pipCache: return "pip cache"
         }
     }
 
@@ -74,6 +86,8 @@ public enum Source: String, Codable, Sendable, CaseIterable {
         case .uvCache: return "~/.cache/uv"
         case .npmNpx: return "~/.npm/_npx"
         case .pipxRun: return "~/.local/pipx/venv"
+        case .brewCache: return "~/Library/Caches/Homebrew/downloads"
+        case .pipCache: return "~/Library/Caches/pip"
         }
     }
 }
@@ -427,10 +441,29 @@ public enum CheckCounter {
 // ---------- 判定域（M3 / AC-04 ②） ----------
 
 public enum DecisionDomain {
-    /// 判定域成员 = **本轮观察期开始快照内命中的来源**（契约：判定域以快照内命中为准）。
-    /// 新入域但无本轮快照的来源**不属于判定域**，不参与逐来源判定、不阻断点亮。
-    public static func members(snapshotSources: Set<Source>) -> Set<Source> {
-        Set(snapshotSources.filter { $0.isInDecisionDomain })
+    /// 从状态头求本轮判定域成员（**唯一实现处**）。
+    ///
+    /// 三个条件缺一不可：
+    /// 1. 静态上属判定域（`isInDecisionDomain`）；
+    /// 2. 本轮已取快照（`snapshotTaken`）；
+    /// 3. 快照总量 `T ≥ 1`（`T = 0` 的来源不进判定域、第 ⑤ 页不占行）。
+    ///
+    /// ## 为什么必须在这里判，而不是只看 `isInDecisionDomain`
+    ///
+    /// 静态枚举成员资格 ≠ 本轮入域。用户没装 Homebrew / 从未用过 pipx 时，
+    /// 它们没有快照、`T = nil`、`b = 0`。若把它们塞进门槛输入：
+    /// - 样本行会因「K/T 缺失」变成 `nil`（无法判定）；
+    /// - 检查行会取到最差 `b = 0` → 直接判失败；
+    /// - 未达项会显示一条并不存在的「L0 误判」。
+    ///
+    /// 结果是**门槛永远点不亮**，且用户看不到真实原因。CR-032 把来源从 3 个
+    /// 增到 5 个后，这个缺口会从「偶发」变成「必现」。
+    public static func members(from entries: [SourceHeaderEntry]) -> Set<Source> {
+        Set(entries.filter {
+            $0.source.isInDecisionDomain
+                && $0.snapshotTaken
+                && ($0.T ?? 0) >= 1
+        }.map(\.source))
     }
 }
 
