@@ -189,6 +189,15 @@ jobs:
           | 处理器 | **仅 Apple Silicon（arm64）** |
           | 网络 | **完全不需要**（零外发） |
 
+          ### 本次更新（v${VERSION}）
+
+          - **界面重做**：七页改为深色分层与来源识别色，导航按「看清 / 回收 / 设置」分组，
+            新增总量堆叠条、来源占比、门槛清单与比例进度条（CR-031）
+          - **菜单栏浮层**：从 `.menu` 改为 `.window`，可直接看到总量、观察期与三来源占比
+          - **修复重启后把未知显示为 0**：候选清单按契约不落盘，此前重启后会把
+            「未知」画成 `0 B` / `0 条`；现在总量取上次扫描记录，其余派生值显示「—」，
+            并在本次启动尚未扫描时禁止执行清理、说明原因
+
           ### 这个版本能做什么
 
           - 只读扫描 \`uv\` / \`npm(npx)\` / \`pipx\` 的缓存来源，显示占用
@@ -208,20 +217,25 @@ jobs:
 
           ---
 
-          **完整校验状态**：283 单测全绿、码表 11 项、页面结构 72 项、接线自检 45 项、
+          **完整校验状态**：304 单测全绿、码表 11 项、页面结构 86 项、接线自检 45 项、
           产物结构 42 项（3 项因无身份如实标未覆盖）、PRD 238 项（191 + 47）、R2 123 项。
 
           这些是 CI 每次构建都会重跑的，不是一次性声明。
           EOF
 
-          # workflow_dispatch 时可能没有 tag，用 main 作为 target
-          TARGET="${GITHUB_REF_NAME}"
-          if [ "${GITHUB_REF_TYPE}" != "tag" ]; then
-            TARGET="main"
+          # **tag 触发时不能传 --target**：`target_commitish` 只接受分支名或
+          # commit SHA，传 tag 名会被 API 判 422「Release.target_commitish is
+          # invalid」。tag 已经存在，release 直接指向它即可。
+          # 只有 workflow_dispatch（没有 tag）才需要显式给 main。
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            gh release create "v${VERSION}" \
+              --title "Residue v${VERSION}" \
+              --notes-file /tmp/notes.md \
+              "$DMG" out/SHA256SUMS.txt
+          else
+            gh release create "v${VERSION}" \
+              --target "main" \
+              --title "Residue v${VERSION}" \
+              --notes-file /tmp/notes.md \
+              "$DMG" out/SHA256SUMS.txt
           fi
-
-          gh release create "v${VERSION}" \
-            --target "$TARGET" \
-            --title "Residue v${VERSION}" \
-            --notes-file /tmp/notes.md \
-            "$DMG" out/SHA256SUMS.txt
