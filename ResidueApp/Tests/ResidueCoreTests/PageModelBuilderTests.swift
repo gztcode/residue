@@ -227,6 +227,54 @@ final class PageModelBuilderTests: XCTestCase {
         XCTAssertEqual(m.sampleProgress.count, 3)
     }
 
+    /// **① 页显示的是本轮实际扫描的根，不是默认位置**（CR-032 · P2-6）。
+    ///
+    /// 用户用 `UV_CACHE_DIR` / `npm_config_cache` / `HOMEBREW_CACHE` 把缓存搬走后，
+    /// `canonicalCachePath` 只是「默认位置」。照它显示 = 指着一个从没扫过的目录
+    /// 说「它占了这么多」——数值是真的，路径是假的。
+    func testSourceSharePathUsesActualScannedRoot() {
+        var input = PageModelBuilder.Input(contents: makeContents(makeHeader()))
+        input.sourceRoots = [
+            Source.uvCache.rawValue: "/Volumes/ext/uv-cache",
+            Source.brewCache.rawValue: "/Volumes/ext/brew-cache",
+        ]
+        let m = PageModelBuilder.build(input)
+
+        let uv = m.sourceShares.first { $0.sourceKey == Source.uvCache.rawValue }
+        XCTAssertEqual(uv?.path, "/Volumes/ext/uv-cache", "有实际根时必须显示它")
+        XCTAssertNotEqual(uv?.path, Source.uvCache.canonicalCachePath,
+                          "显示默认位置就是缺陷本身")
+
+        let brew = m.sourceShares.first { $0.sourceKey == Source.brewCache.rawValue }
+        XCTAssertEqual(brew?.path, "/Volumes/ext/brew-cache")
+
+        // 没给实际根的来源仍回退默认位置（本轮扫的就是默认位置）
+        let npm = m.sourceShares.first { $0.sourceKey == Source.npmNpx.rawValue }
+        XCTAssertEqual(npm?.path, Source.npmNpx.canonicalCachePath)
+    }
+
+    /// 重启后（本会话未扫描）路径同样取实际根；缺项回退默认位置。
+    ///
+    /// 路径与「是否扫过」无关：搬家这件事一旦发生，默认位置就永远是错的。
+    func testSourceSharePathKeepsActualRootAfterRestart() {
+        var input = PageModelBuilder.Input(
+            contents: makeContents(makeHeader()),
+            hasSessionScan: false,
+            lastScan: PageModelBuilder.LastScanSummary(
+                at: Date(), bytes: 3_400_000_000, files: 100, sources: []
+            )
+        )
+        input.sourceRoots = [Source.uvCache.rawValue: "/Volumes/ext/uv-cache"]
+        let m = PageModelBuilder.build(input)
+
+        let uv = m.sourceShares.first { $0.sourceKey == Source.uvCache.rawValue }
+        XCTAssertEqual(uv?.path, "/Volumes/ext/uv-cache")
+        XCTAssertEqual(uv?.bytes.displayText, "—", "字节仍未知")
+
+        let npm = m.sourceShares.first { $0.sourceKey == Source.npmNpx.rawValue }
+        XCTAssertEqual(npm?.path, Source.npmNpx.canonicalCachePath, "缺项回退默认位置")
+    }
+
     /// **布局不认识 → 显示「无法判定」，不显示 0、不画占比**。
     func testUnrecognizedLayoutRendersUnavailableNotZero() {
         var input = PageModelBuilder.Input(contents: makeContents(makeHeader()))

@@ -103,6 +103,12 @@ final class AppModel {
         var abortReason: String?
         /// 缓存布局不认识的来源（根在、已知子目录都不在；当前用于 pip）。
         var layoutUnrecognized: Set<String> = []
+        /// **本轮实际扫描的根路径**（`source.rawValue` → 真实路径）。
+        ///
+        /// 界面原来显示 `Source.canonicalCachePath`（写死的标准路径）——
+        /// 一旦用户用 `UV_CACHE_DIR` / `npm_config_cache` 之类改了位置，
+        /// ① 页会指着一个**根本没扫过的目录**说「这是你的缓存」。
+        var resolvedRoots: [String: String] = [:]
     }
 
     /// **当前扫描的进度**（供界面显示「在动」）。
@@ -158,6 +164,12 @@ final class AppModel {
     ///
     /// 界面据它显示「缓存布局未识别」而不是 0 —— 没看见 ≠ 没有。
     private var lastLayoutUnrecognizedSources: Set<String> = []
+
+    /// **本轮实际扫描的根路径**（`source.rawValue` → 真实路径）。
+    ///
+    /// 界面显示「缓存目录」时必须显示这个，而不是写死的 `canonicalCachePath` ——
+    /// 用户改了 `UV_CACHE_DIR` 之类以后，标准路径根本没被扫过。
+    private var lastResolvedRoots: [String: String] = [:]
 
     init(
         stateFile: StateFile = StateFile(),
@@ -347,7 +359,8 @@ final class AppModel {
             capacityCapBytes: preferences.capacityCapBytes,
             itemCap: preferences.itemCap,
             whitelist: preferences.whitelist,
-            layoutUnrecognizedSources: lastLayoutUnrecognizedSources
+            layoutUnrecognizedSources: lastLayoutUnrecognizedSources,
+            sourceRoots: lastResolvedRoots
         )
         pageModel = PageModelBuilder.build(input)
     }
@@ -446,6 +459,8 @@ final class AppModel {
                 // **取消检查**：每条来源一次（来源只有 5 个，开销可忽略）
                 if cancelBox.isCancelled { break }
                 guard let source = Source(rawValue: spec.sourceName) else { continue }
+                // **记下真实根路径**：界面显示的是这个，不是 `canonicalCachePath`
+                job.resolvedRoots[spec.sourceName] = spec.path
                 guard FileManager.default.fileExists(atPath: spec.path) else { continue }
                 do {
                     let result = try engine.scan(
@@ -503,6 +518,7 @@ final class AppModel {
         candidates = allCandidates
         lastUpstreamCommands = job.upstream
         lastLayoutUnrecognizedSources = job.layoutUnrecognized
+        lastResolvedRoots = job.resolvedRoots
         lastScanMode = job.mode
 
         // **来源级错误**（此时已在主 actor，可用 `describeScanError` 取码表文案）

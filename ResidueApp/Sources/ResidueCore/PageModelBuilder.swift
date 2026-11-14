@@ -86,6 +86,16 @@ public enum PageModelBuilder {
         /// 「没看见」不等于「没有」。
         public var layoutUnrecognizedSources: Set<String>
 
+        /// **本轮实际扫描的根路径**（`source.rawValue` → 真实路径）。
+        ///
+        /// 用户可以用 `UV_CACHE_DIR` / `npm_config_cache` / `HOMEBREW_CACHE` 把缓存搬到别处，
+        /// 此时 `Source.canonicalCachePath` 只是「默认位置」，**不是本轮扫的那个目录**。
+        /// ① 页把默认路径当实际路径显示 = 指着一个从没扫过的目录说「它占了这么多」。
+        ///
+        /// 缺项（未扫描 / 重启后）时回退到 `canonicalCachePath`：那是唯一能给出的信息，
+        /// 且此时页面上其余数值本就是「—」，不会与真实观测值混淆。
+        public var sourceRoots: [String: String]
+
         /// AC-15 的顺延条目数（本次因上限而未执行的条数）。
         ///
         /// 界面 ⑥ 页直接显示它。**填 0 也是有效值**（没触顶），
@@ -123,7 +133,8 @@ public enum PageModelBuilder {
             capacityCapBytes: Int64 = 5_000_000_000,
             itemCap: Int = 200,
             whitelist: [String] = [],
-            layoutUnrecognizedSources: Set<String> = []
+            layoutUnrecognizedSources: Set<String> = [],
+            sourceRoots: [String: String] = [:]
         ) {
             self.contents = contents
             self.candidates = candidates
@@ -146,6 +157,7 @@ public enum PageModelBuilder {
             self.itemCap = itemCap
             self.whitelist = whitelist
             self.layoutUnrecognizedSources = layoutUnrecognizedSources
+            self.sourceRoots = sourceRoots
         }
     }
 
@@ -268,7 +280,7 @@ var model = PageModel()
             return SourceShareRow(
                 sourceKey: source.rawValue,
                 displayName: source.displayName,
-                path: source.canonicalCachePath,
+                path: input.sourceRoots[source.rawValue] ?? source.canonicalCachePath,
                 itemCount: layoutUnknown
                     ? .unavailable(reason: UICopy.cacheLayoutUnrecognized)
                     : .metric(countBySource[source] ?? 0, unit: .items),
@@ -601,7 +613,7 @@ var model = PageModel()
                 SourceShareRow(
                     sourceKey: source.rawValue,
                     displayName: source.displayName,
-                    path: source.canonicalCachePath,
+                    path: input.sourceRoots[source.rawValue] ?? source.canonicalCachePath,
                     itemCount: dash,
                     bytes: dash,
                     share: nil,
