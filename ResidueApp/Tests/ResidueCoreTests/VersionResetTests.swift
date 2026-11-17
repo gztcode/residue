@@ -42,18 +42,31 @@ final class VersionResetTests: XCTestCase {
     }
 
     /// 造一个「有安全凭证」的载体：`a = 0`、`b = 12`、已取快照。
-    private func saveCarrier(appVersion: String, round: Int = 2) throws {
+    private func saveCarrier(
+        appVersion: String,
+        round: Int = 2,
+        configure: (inout StateHeader) -> Void = { _ in }
+    ) throws {
         var header = StateHeader()
         header.appVersion = appVersion
         header.round = round
         header.countedDays = 14
+        header.roundStartAnchor = Date(timeIntervalSince1970: 1_700_000_000)
+        header.settlement = SettlementHeader(
+            producedAt: Date(timeIntervalSince1970: 1_700_000_500),
+            reportId: "report-1"
+        )
         header.sources = Source.allCases.map {
             SourceHeaderEntry(
                 source: $0, snapshotTaken: true,
                 T: 100, K: 90, J: 10, H: 30,
-                a: 0, b: 12, slotCount: 100, doneCount: 0
+                a: 0, b: 12, slotCount: 100, doneCount: 0,
+                snapshotDate: Date(timeIntervalSince1970: 1_700_000_100),
+                settlementDate: Date(timeIntervalSince1970: 1_700_000_400),
+                unattributableCount: 3
             )
         }
+        configure(&header)
         try stateFile.save(header: header, payloads: [:])
     }
 
@@ -93,5 +106,84 @@ final class VersionResetTests: XCTestCase {
         try saveCarrier(appVersion: "1.0.0", round: 3)
         try stateFile.clearCarrierForVersionChange(newAppVersion: "2.0.0", preservedRound: 3)
         XCTAssertEqual(try loadHeader().round, 3, "轮次必须保留（M1：不产生新轮次）")
+    }
+
+    // MARK: - 〔v5.6 · CR-031〕版本变更七量终值（穷举式 · PRD v5.6 M1「写入时刻」）
+
+    /// **用户设置类字段不随版本变更清零**（M1 写入时刻 ⑧）。
+    ///
+    /// 原实现无条件造 `StateHeader()` → `autoDeleteEnabled` 被静默置 `false`：
+    /// 用户升级后，自动删除总开关被**替用户改主意**关掉。
+    func testVersionChangePreservesAutoDeleteEnabled() throws {
+        try saveCarrier(appVersion: "1.0.0", configure: { $0.autoDeleteEnabled = true })
+
+        try stateFile.clearCarrierForVersionChange(newAppVersion: "1.1.0")
+
+        XCTAssertTrue(
+            try loadHeader().autoDeleteEnabled,
+            "版本变更只清观察期凭证与误判凭证，不碰用户的开关选择"
+        )
+    }
+
+    /// **来源条目必须留在载体里** —— 版本变更清的是「量」，不是「来源本身」。
+    ///
+    /// 原实现造全新 `StateHeader()` → `sources` 为空 → 界面上的每来源读数全部消失。
+    ///
+    /// ⚠️ 既有断言 `for entry in after.sources { ... }` 在 `sources` 为空时
+    /// **一次都不执行** → 假绿。测试要造出能区分两者的样本（CLAUDE.md §七第 1 条）。
+    func testVersionChangeKeepsAllSourceEntries() throws {
+        try saveCarrier(appVersion: "1.0.0")
+
+        try stateFile.clearCarrierForVersionChange(newAppVersion: "1.1.0")
+
+        let after = try loadHeader()
+        XCTAssertEqual(after.sources.count, Source.allCases.count, "来源条目不得被版本变更抹掉")
+        XCTAssertEqual(after.sources.map(\.source), Source.allCases, "来源条目顺序 = `Source.allCases` 声明序")
+    }
+
+    /// **计数日归零 + 起算点重置**（M1 写入时刻 ①）。
+    ///
+    /// 起算点重置 = 版本变更后的**下一次**成功扫描完成所在日 ⇒ 重置瞬间无起算点。
+    func testVersionChangeResetsCountedDaysAndAnchor() throws {
+        try saveCarrier(appVersion: "1.0.0", configure: {
+            $0.countedDays = 9
+            $0.roundStartAnchor = Date(timeIntervalSince1970: 1_700_000_000)
+        })
+
+        try stateFile.clearCarrierForVersionChange(newAppVersion: "1.1.0")
+
+        let after = try loadHeader()
+        XCTAssertEqual(after.countedDays, 0, "本轮计数日必须归零")
+        XCTAssertNil(after.roundStartAnchor, "本轮计数日起算点必须重置")
+    }
+
+    /// **结算凭证随 `K` / `J` 一并清零**（M1 写入时刻 ③）。
+    ///
+    /// 凭证与结算值不同源 → 会造出「有报告、无样本」的假态。
+    func testVersionChangeClearsSettlementCredential() throws {
+        try saveCarrier(appVersion: "1.0.0")
+
+        try stateFile.clearCarrierForVersionChange(newAppVersion: "1.1.0")
+
+        let after = try loadHeader()
+        XCTAssertNil(after.settlement.producedAt, "报告产出时刻必须清零")
+        XCTAssertNil(after.settlement.reportId, "报告标识必须清零")
+    }
+
+    /// **每来源的快照/结算时刻、「无法归因条数」、门槛 `H` 随量一并清零**。
+    ///
+    /// 不变量③：`nil`（尚未结算，无从归因）≠ `0`（已结算但无失联）——
+    /// 旧快照的归因结论对新快照无效 ⇒ 必须回到 `nil`，不能留 `0`。
+    func testVersionChangeClearsPerSourceDatesAndUnattributable() throws {
+        try saveCarrier(appVersion: "1.0.0")
+
+        try stateFile.clearCarrierForVersionChange(newAppVersion: "1.1.0")
+
+        for entry in try loadHeader().sources {
+            XCTAssertNil(entry.snapshotDate, "\(entry.source) 的取快照时刻必须清零")
+            XCTAssertNil(entry.settlementDate, "\(entry.source) 的结算时刻必须清零")
+            XCTAssertNil(entry.unattributableCount, "\(entry.source) 的无法归因条数必须回到「尚未结算」")
+            XCTAssertNil(entry.H, "\(entry.source) 的门槛 H 随新 T 重算 ⇒ 先回到 nil")
+        }
     }
 }

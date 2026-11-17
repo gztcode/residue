@@ -319,6 +319,32 @@ final class MetricsTests: XCTestCase {
         XCTAssertLessThan(st.negativeSeen.byteSize, 2_000_000, "位图必须是稠密位、不是路径集合")
     }
 
+    /// `F` 位图的**置位数**必须数得准 —— 取证字段 `fSetBits` 的唯一来源就是它。
+    ///
+    /// ## 为什么单独立一条
+    /// `fSetBits` 曾被写死为 `0`。CR-031 之前 `F` 位图恒空，`0` 碰巧是对的；
+    /// CR-031 之后位图**首次真实承载数据**，`0` 从「碰巧对」变成「稳定的错」
+    /// —— 而当时**没有任何测试守得住这个字段**（报告里的 `fSetBits` 一直是 0，
+    /// 没人发现）。
+    ///
+    /// 样本覆盖三种：**空位图** / **普通置位** / **跨 64 位字边界**
+    /// （位槽 63 与 64 分属两个字 —— 逐字 popcount 写错一处就漏计）。
+    func testBitmapSetBitCountCountsEverySetBit() {
+        XCTAssertEqual(NegativeBitmap.setBitCount(ofBytes: Data()), 0, "空位图的置位数 = 0")
+
+        var bitmap = NegativeBitmap()
+        for slot in [0, 5, 63, 64, 127, 128] {
+            bitmap.set(slot)
+        }
+        let bytes = bitmap.dataRepresentation(bitCount: 129)
+
+        XCTAssertEqual(bytes.count, (129 + 7) / 8, "字节数 = ceil(位槽域 / 8)")
+        XCTAssertEqual(
+            NegativeBitmap.setBitCount(ofBytes: bytes), 6,
+            "跨 64 位字边界的置位必须都数上"
+        )
+    }
+
     func testQualifiedRequiresAllThree() {
         let p = ObservationProgress(round: 1, startAnchor: Date(), countedDays: 14)
         // 达标

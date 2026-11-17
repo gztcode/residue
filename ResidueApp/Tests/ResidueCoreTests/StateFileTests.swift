@@ -120,11 +120,11 @@ final class StateFileTests: XCTestCase {
         XCTAssertEqual(SegmentDescriptor.byteCount, 24)
     }
 
-    /// 段数 = 来源数 × 3。
-    func testSegmentCountIsSourcesTimesThree() throws {
+    /// 段数 = 来源数 × 4（schema 2：每来源四段 F / C_done / Slots / Snapshot）。
+    func testSegmentCountIsSourcesTimesFour() throws {
         let data = try StateFileCodec.encode(header: makeHeader(), payloads: makePayloads())
         let contents = try StateFileCodec.decode(data)
-        XCTAssertEqual(contents.segments.count, Source.allCases.count * 3)
+        XCTAssertEqual(contents.segments.count, Source.allCases.count * 4)
     }
 
     // MARK: - ② 段长恒 = ceil(slotCount/8)
@@ -531,13 +531,14 @@ final class StateFileTests: XCTestCase {
             XCTAssertLessThan(Int(seg.sourceIndex), Source.allCases.count)
             XCTAssertTrue(SegmentKind.allCases.contains(seg.kind))
         }
-        // 每个来源三段齐
+        // 每个来源四段齐（schema 2）
         for (index, _) in Source.allCases.enumerated() {
             let kinds = contents.segments.filter { Int($0.sourceIndex) == index }.map { $0.kind }
-            XCTAssertEqual(kinds.count, 3, "每个来源应有 3 段")
+            XCTAssertEqual(kinds.count, 4, "每个来源应有 4 段")
             XCTAssertTrue(kinds.contains(.fBitmap))
             XCTAssertTrue(kinds.contains(.countedDone))
             XCTAssertTrue(kinds.contains(.slots))
+            XCTAssertTrue(kinds.contains(.snapshot))
         }
     }
 

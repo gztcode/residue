@@ -20,6 +20,23 @@ final class UpstreamAndRecordTests: XCTestCase {
         try? FileManager.default.removeItem(at: tmpDir)
     }
 
+    /// 造一个**真实位图**并返回它的置位数 —— 夹具里的 `fSetBits` 由它推导。
+    ///
+    /// ## 为什么夹具也必须「真」
+    /// `fSetBits` 的契约语义 = 「`F` 位图的**置位数**」。夹具若写死一个与位图
+    /// 无关的自造值（早先写的是 `90`），则「这个数必须来自位图」这件事
+    /// **永远没人守** —— 生产侧把字段写死成 `0` 时，夹具照样全绿。
+    ///
+    /// 改为从**真实位图**推导 ⇒ 夹具与生产共用同一原语（`NegativeBitmap`），
+    /// 口径一旦漂移，夹具立刻显形（不变量②：同一判定只有一个实现处）。
+    private func realFSetBits(setSlots: Int) -> Int {
+        var bitmap = NegativeBitmap()
+        for slot in 0..<setSlots { bitmap.set(slot) }
+        return NegativeBitmap.setBitCount(
+            ofBytes: bitmap.dataRepresentation(bitCount: setSlots)
+        )
+    }
+
     // ========================================================================
     // MARK: - AC-19 白名单（全称命题：任何删文件命令必须被拒）
     // ========================================================================
@@ -169,7 +186,7 @@ final class UpstreamAndRecordTests: XCTestCase {
         let diag = ScanLogRecord.Diagnostics(
             degraded: false,
             coverage: .init(sameUIDTotal: 100, sameUIDRead: 100, statOtherUID: 20),
-            pNowCount: 5, fSetBits: 90, doneCount: 2,
+            pNowCount: 5, fSetBits: realFSetBits(setSlots: 90), doneCount: 2,
             a: 0, b: 12, round: 2, countedDays: 3,
             contentReads: 0
         )

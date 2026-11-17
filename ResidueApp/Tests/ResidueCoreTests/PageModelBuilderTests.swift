@@ -287,6 +287,67 @@ final class PageModelBuilderTests: XCTestCase {
                       "必须是前置数字式（三处同构）")
     }
 
+    // MARK: - ⑤ 矩阵：`nil` 不得被当成 0（CR-031 §1.1b）
+
+    /// **报告已产出、但该来源 `K` 仍为 `nil`** → ③ 列不得显示「0 / 总量」。
+    ///
+    /// `0` 会被读成「一条都没归因成功」——那是**另一件事**。
+    /// 不变量③：`nil ≠ 0`（不变量③ = 看不见的东西如实显示「无法判定」）。
+    func testProducedButKNilIsNotRenderedAsZero() {
+        let entries = [
+            SourceHeaderEntry(source: .uvCache, snapshotTaken: true,
+                              T: 30, K: nil, J: nil, H: 30, a: 0, b: 7, slotCount: 30, doneCount: 0),
+        ]
+        let input = PageModelBuilder.Input(
+            contents: makeContents(makeHeader(countedDays: 14, produced: true, entries: entries))
+        )
+        let m = PageModelBuilder.build(input)
+        let row = m.reportRows[0]
+
+        XCTAssertNotEqual(row.cells[2][0].displayText, "0 / 30", "`nil` 不得渲染成 0")
+        XCTAssertTrue(row.cells[2][0].isUnavailable, "③ 列必须是不可用态")
+    }
+
+    /// **报告已产出、但该来源 `T` 为 `nil`** → ⑦ 结论**不得**是「达标」。
+    ///
+    /// 这是 §1.1b 里比「未达标」更危险的一支：
+    /// 旧写法 `k = K ?? 0, t = T ?? 0` ⇒ `h(0) = min(30, 0) = 0`
+    /// ⇒ `0 >= 0` 成立 ⇒ 只要 `a == 0 && b >= 1` 就被判「**达标**」。
+    ///
+    /// 「达标」比「未达标」危险得多 —— 用户会以为可以删，程序却不会删。
+    func testProducedButTNilDoesNotQualify() {
+        let entries = [
+            SourceHeaderEntry(source: .uvCache, snapshotTaken: false,
+                              T: nil, K: nil, J: nil, H: nil, a: 0, b: 7, slotCount: 0, doneCount: 0),
+        ]
+        let input = PageModelBuilder.Input(
+            contents: makeContents(makeHeader(countedDays: 14, produced: true, entries: entries))
+        )
+        let m = PageModelBuilder.build(input)
+        let row = m.reportRows[0]
+
+        XCTAssertNotEqual(row.cells[6][0].displayText, "达标", "未定量的来源不得判「达标」")
+        XCTAssertTrue(row.cells[6][0].isUnavailable, "⑦ 结论必须是不可用态")
+    }
+
+    /// **守卫**：`K` / `T` 都有值时，③ 与 ⑦ 的取值不受影响。
+    ///
+    /// 本用例在改动前后都应通过 —— 挡住「一律改成不可用」这种过度修法。
+    func testSettledRowStillRendersRatioAndConclusion() {
+        let entries = [
+            SourceHeaderEntry(source: .uvCache, snapshotTaken: true,
+                              T: 100, K: 90, J: 10, H: 30, a: 0, b: 12, slotCount: 100, doneCount: 0),
+        ]
+        let input = PageModelBuilder.Input(
+            contents: makeContents(makeHeader(countedDays: 14, produced: true, entries: entries))
+        )
+        let m = PageModelBuilder.build(input)
+        let row = m.reportRows[0]
+
+        XCTAssertEqual(row.cells[2][0].displayText, "90 / 100", "已结算来源的 ③ 列照常显示")
+        XCTAssertEqual(row.cells[6][0].displayText, "达标", "已结算来源的 ⑦ 结论照常判")
+    }
+
     // MARK: - ⑦ 执行记录标签
 
     /// 三个动作映射到三个标签，且 **`restoredByUser` 是「已恢复」不是「可恢复」**。

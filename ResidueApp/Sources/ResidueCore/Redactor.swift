@@ -133,16 +133,25 @@ public enum Redactor {
         public var t: Int?
         public var k: Int?
         public var j: Int?
+        /// 失联条目中「无法归因」的条数（PRD v5.6 M3：**单列、不并入已归因**）。
+        ///
+        /// `nil` = 本轮尚未结算 → 必须渲染为「—」，不得写成 0
+        /// （0 会被读成「一条都无法归因」，而事实是「还没结算」）。
+        public var unattributable: Int?
         public var h: Int?
         public var a: Int
         public var b: Int
 
-        public init(source: String, state: String, t: Int?, k: Int?, j: Int?, h: Int?, a: Int, b: Int) {
+        public init(
+            source: String, state: String, t: Int?, k: Int?, j: Int?,
+            unattributable: Int? = nil, h: Int?, a: Int, b: Int
+        ) {
             self.source = source
             self.state = state
             self.t = t
             self.k = k
             self.j = j
+            self.unattributable = unattributable
             self.h = h
             self.a = a
             self.b = b
@@ -305,13 +314,13 @@ public enum Redactor {
         lines.append(Section.metrics.marker)
         lines.append("")
         lines.append(L.pick(
-            "| 来源 | 状态 | T | K | J | H | a | b |",
-            "| Source | State | T | K | J | H | a | b |"
+            "| 来源 | 状态 | T | K | J | 其中无法归因 | H | a | b |",
+            "| Source | State | T | K | J | Of which unattributable | H | a | b |"
         ))
-        lines.append("|---|---|---|---|---|---|---|---|")
+        lines.append("|---|---|---|---|---|---|---|---|---|")
         for s in report.sources {
             func cell(_ v: Int?) -> String { v.map(String.init) ?? "—" }
-            lines.append("| \(s.source) | \(s.state) | \(cell(s.t)) | \(cell(s.k)) | \(cell(s.j)) | \(cell(s.h)) | \(s.a) | \(s.b) |")
+            lines.append("| \(s.source) | \(s.state) | \(cell(s.t)) | \(cell(s.k)) | \(cell(s.j)) | \(cell(s.unattributable)) | \(cell(s.h)) | \(s.a) | \(s.b) |")
         }
         lines.append("")
 

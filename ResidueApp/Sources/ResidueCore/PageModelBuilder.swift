@@ -489,9 +489,17 @@ var model = PageModel()
         let inDomain = entry.source.isInDecisionDomain
 
         // ③ 样本 / 总量：报告产出前为「本轮未结算」
-        let sampleSlot: SemanticSlot = produced
-            ? .ratio(entry.K ?? 0, entry.T ?? 0)
-            : .unavailable(reason: UICopy.notSettledThisRound)
+        //
+        // 报告**已产出**但该来源仍未结算时（`K` 或 `T` 为 `nil`），
+        // 不得填 `0` —— `0` 会被读成「一条都没归因成功」（不变量③：`nil ≠ 0`）。
+        let sampleSlot: SemanticSlot
+        if !produced {
+            sampleSlot = .unavailable(reason: UICopy.notSettledThisRound)
+        } else if let k = entry.K, let t = entry.T {
+            sampleSlot = .ratio(k, t)
+        } else {
+            sampleSlot = .unavailable(reason: UICopy.sourceNotSettled)
+        }
 
         // ④ 门槛：`H` 为 null（未取快照）或非判定域 → 不适用
         let thresholdSlot: SemanticSlot
@@ -515,15 +523,20 @@ var model = PageModel()
         bSlot = .metric(entry.b, unit: .times)
 
         // ⑦ 结论（值域封闭三值）
+        //
+        // `K` / `T` 任一为 `nil` ⇒ 该来源尚未结算 ⇒ **不得判「达标」也不得判「未达标」**。
+        // 旧写法 `k = K ?? 0, t = T ?? 0` 在 `T` 也为 `nil` 时会算出
+        // `h(0) = min(30, 0) = 0` ⇒ `0 >= 0` 成立 ⇒ 判成「**达标**」（假达标）。
         let conclusionSlot: SemanticSlot
         if !inDomain {
             conclusionSlot = .text(L.pick("仅报告", "Report only"))
         } else if !produced {
             conclusionSlot = .unavailable(reason: UICopy.notSettledThisRound)
-        } else {
-            let k = entry.K ?? 0, t = entry.T ?? 0
+        } else if let k = entry.K, let t = entry.T {
             let qualified = k >= Threshold.h(forTotal: t) && entry.a == 0 && entry.b >= 1
             conclusionSlot = .text(qualified ? L.pick("达标", "Qualified") : L.pick("未达标", "Not qualified"))
+        } else {
+            conclusionSlot = .unavailable(reason: UICopy.sourceNotSettled)
         }
 
         return ReportRow(

@@ -35,7 +35,7 @@ import Foundation
 // 本文件不引用任何 UI；纯 IO + 序列化，便于单测。
 // ============================================================
 
-/// 状态载体的段种类（§5.1 payload 三段）。
+/// 状态载体的段种类（§5.1 payload：schema 1 三段、schema 2 四段）。
 public enum SegmentKind: UInt8, Sendable, CaseIterable {
     /// `0x01 F` · 每来源：位图。
     case fBitmap = 0x01
@@ -43,6 +43,21 @@ public enum SegmentKind: UInt8, Sendable, CaseIterable {
     case countedDone = 0x02
     /// `0x03 Slots` · 每来源：位槽占用表。
     case slots = 0x03
+    /// `0x04 Snapshot` · 每来源：快照成员集合（**schema 2 起**）。
+    case snapshot = 0x04
+
+    /// 该段种类在给定 schema 版本中**是否存在**。
+    ///
+    /// schema 1 只有前三段；读到 schema 1 声称的 `0x04` 段 → `E-304`
+    /// （**不猜、不部分加载**）。
+    public func exists(inSchema version: Int) -> Bool {
+        switch self {
+        case .fBitmap, .countedDone, .slots:
+            return true
+        case .snapshot:
+            return version >= 2
+        }
+    }
 }
 
 /// 状态载体的错误码（§6 错误码表）。
@@ -111,7 +126,7 @@ public struct SegmentDescriptor: Sendable, Equatable {
     public static let byteCount = 24
 }
 
-/// 一个来源在载体中的三段内容。
+/// 一个来源在载体中的段内容（schema 2 四段）。
 public struct SourcePayload: Sendable, Equatable {
     /// `F` 位图（长度 = `ceil(slotCount/8)`，与置位数无关）。
     public var bitmap: Data
@@ -119,11 +134,51 @@ public struct SourcePayload: Sendable, Equatable {
     public var countedDoneSlots: [UInt32]
     /// 位槽占用表：槽号 → 身份键。
     public var slots: [UInt32: CandidateID]
+    /// 本轮快照的候选清单（`T` 的成员，逐条归因的对象）。
+    ///
+    /// **只在「本轮首次成功 full 扫描」时写入一次**，此后冻结。
+    /// 与 `slots` 的区别见 CR-031 §1.3 —— 不能互相顶替。
+    public var snapshotMembers: [CandidateID]
 
-    public init(bitmap: Data = Data(), countedDoneSlots: [UInt32] = [], slots: [UInt32: CandidateID] = [:]) {
+    public init(
+        bitmap: Data = Data(),
+        countedDoneSlots: [UInt32] = [],
+        slots: [UInt32: CandidateID] = [:],
+        snapshotMembers: [CandidateID] = []
+    ) {
         self.bitmap = bitmap
         self.countedDoneSlots = countedDoneSlots
         self.slots = slots
+        self.snapshotMembers = snapshotMembers
+    }
+
+    /// 还原成运行期状态（`SourceL0State`）——**载荷 ⇄ 状态互逆的唯一桥**。
+    ///
+    /// - Parameter missCount: 累计误判数 `a`（**载体里没有这一项**：它只活在文件头）。
+    ///
+    /// ## 位容量的口径
+    /// 位图按**字节长度**反解（`bitmap.count * 8` 位）——载体里存的是**位槽域**
+    /// 的大小，域大小再由 `slots` 的最大槽号 + 1 交叉核对（解码端已验过恒等式）。
+    public func l0State(missCount: Int) -> SourceL0State {
+        let table = SlotTable(assignments: Dictionary(
+            uniqueKeysWithValues: slots.map { (slot: UInt32, id: CandidateID) in (id, Int(slot)) }
+        ))
+        let done = Set(countedDoneSlots.compactMap { slots[$0] })
+        return SourceL0State(
+            negativeSeen: NegativeBitmap(data: bitmap, bitCount: bitmap.count * 8),
+            countedDone: done,
+            slotTable: table,
+            missCount: missCount
+        )
+    }
+
+    /// `F` 位图的**置位数**（取证字段 `fSetBits` 的唯一来源）。
+    ///
+    /// 数的是**载体里这串字节本身** —— 不是重新推算的（不变量②：
+    /// 同一判定只有一个实现处）。位图的字节表示与位槽表示无损互逆，
+    /// 所以这个数就是「被判过阴性的候选数」。
+    public var fSetBitCount: Int {
+        NegativeBitmap.setBitCount(ofBytes: bitmap)
     }
 }
 
@@ -174,6 +229,77 @@ public struct StateHeader: Codable, Sendable, Equatable {
     }
 }
 
+// MARK: - 观察期凭证清零（共享原语）
+
+extension StateHeader {
+
+    /// 清零**本轮观察期凭证**（PRD v5.6 M1「写入时刻」①–⑦）。
+    ///
+    /// ## 为什么是共享原语
+    ///
+    /// 「版本变更」与「schema 迁移」都要把观察期打回起点 —— 两处各写一遍必然漂移：
+    /// 迁移漏清一项 = 旧快照的 `K` 被新格式继承 = 门槛拿旧证据放行。
+    /// 不变量②：**同一判定只有一个实现处**。
+    ///
+    /// ## 清什么 / 不清什么
+    ///
+    /// | 清零 | 保留 |
+    /// |---|---|
+    /// | 计数日、起算点、结算凭证 | `appVersion`（应用版本 ≠ 载体格式） |
+    /// | `T` / `K` / `J` / `H` / 快照标志 | `round`（重置当前轮次，不产生新轮次） |
+    /// | `a` / `b` / 位槽数 / 已计误判数 | `autoDeleteEnabled`（用户设置） |
+    /// | 取快照时刻 / 结算时刻 / 无法归因条数 / 上次判定时刻 | `countedDaysCap`（用户设置） |
+    ///
+    /// 载荷侧（`F` 位图 / `C_done` / 位槽占用表 / 快照成员集合）随 `a` 清零 ——
+    /// 由**载荷全空**实现，不在本方法内。
+    ///
+    /// ⚠️ 不变量③：尚未结算的量回到 `nil`，**不留 `0`**
+    /// （`nil` = 无从归因；`0` = 已结算但无失联）。
+    public mutating func resetObservationCredentials() {
+        // ① 计数日归零 + 起算点重置
+        countedDays = 0
+        roundStartAnchor = nil
+        // ③ 结算凭证（报告产出时刻与报告标识）随 `K` / `J` 一并清零
+        settlement = SettlementHeader()
+
+        for index in sources.indices {
+            // ② `T` 待重取（快照成员集合随 `T` 一并待重取）
+            sources[index].snapshotTaken = false
+            sources[index].T = nil
+            // ③ `K` / `J` 清零
+            sources[index].K = nil
+            sources[index].J = nil
+            // ④ `b` 清零
+            sources[index].b = 0
+            // ⑥ `a` 清零（位图 / `C_done` / 位槽占用表随 `a` 一并清零）
+            sources[index].a = 0
+            sources[index].slotCount = 0
+            sources[index].doneCount = 0
+            // ⑦ `H` 随新 `T` 重算 ⇒ 先回到「未取快照」态
+            sources[index].H = nil
+            // 取快照时刻 / 结算时刻 / 无法归因条数 / 上次判定时刻随量一并清零
+            sources[index].snapshotDate = nil
+            sources[index].settlementDate = nil
+            sources[index].unattributableCount = nil
+            sources[index].lastJudgmentAt = nil
+        }
+    }
+
+    /// 幂等补齐每个来源的行（**顺序 = `Source.allCases` 声明序**）。
+    ///
+    /// 已有行**原样保留**（不重置任何值）；缺失的来源补一行空行。
+    ///
+    /// ## 为什么需要它
+    /// 载体里「每来源一行」是**载荷段表的锚**（每来源 4 段）——
+    /// 行缺了就对不上段，界面上该来源的读数也整列消失。
+    /// 补齐必须是**幂等**的：写回层每轮都调用它，重复调用不得改动任何既有值。
+    public mutating func ensureSourceRows() {
+        var existing: [Source: SourceHeaderEntry] = [:]
+        for row in sources { existing[row.source] = row }
+        sources = Source.allCases.map { existing[$0] ?? SourceHeaderEntry(source: $0) }
+    }
+}
+
 /// 单来源的可读状态。
 public struct SourceHeaderEntry: Codable, Sendable, Equatable {
     public var source: Source
@@ -195,6 +321,15 @@ public struct SourceHeaderEntry: Codable, Sendable, Equatable {
     public var slotCount: Int
     /// 已计过误判的候选数（`doneCount`）。
     public var doneCount: Int
+    /// 取快照时刻（M3「取快照时刻唯一」）。
+    public var snapshotDate: Date?
+    /// 结算时刻。
+    public var settlementDate: Date?
+    /// 「有 N 条无法归因」（裁决 ③）。
+    ///
+    /// **`nil` = 尚未结算，无从归因**；`0` = 已结算但无无法归因条目。
+    /// 二者**不等价**（不变量③：`nil ≠ 0`）。
+    public var unattributableCount: Int?
     /// 上次判定时刻。
     public var lastJudgmentAt: Date?
 
@@ -209,6 +344,9 @@ public struct SourceHeaderEntry: Codable, Sendable, Equatable {
         b: Int = 0,
         slotCount: Int = 0,
         doneCount: Int = 0,
+        snapshotDate: Date? = nil,
+        settlementDate: Date? = nil,
+        unattributableCount: Int? = nil,
         lastJudgmentAt: Date? = nil
     ) {
         self.source = source
@@ -221,6 +359,9 @@ public struct SourceHeaderEntry: Codable, Sendable, Equatable {
         self.b = b
         self.slotCount = slotCount
         self.doneCount = doneCount
+        self.snapshotDate = snapshotDate
+        self.settlementDate = settlementDate
+        self.unattributableCount = unattributableCount
         self.lastJudgmentAt = lastJudgmentAt
     }
 }
@@ -272,6 +413,56 @@ public struct StateFileContents: Sendable, Equatable {
     }
 }
 
+/// birthtime 在二进制段里的**记录基准**（决定 f64 位模式怎么解读）。
+///
+/// | schema | 基准 | 为什么 |
+/// |---|---|---|
+/// | 1 | Unix 纪元（`timeIntervalSince1970`） | 已发布格式 —— 存量文件按此解读，不得改动 |
+/// | 2 | 参考纪元 2001-01-01（`timeIntervalSinceReferenceDate`） | 往返逐位无损 |
+///
+/// ## 为什么 schema 2 必须换基准
+///
+/// `Date` 的内部表示是「相对 2001-01-01 的秒」（一个 `Double`），
+/// 而 `timeIntervalSince1970` 与它之间隔着 978307200 秒
+/// ⇒ 两者落在**不同的 f64 网格**上（当前量级：内部值刻度 2^-23 秒、
+/// Unix 值刻度 2^-22 秒）⇒ 用 Unix 基准编码、用内部基准解读，
+/// **往返必然丢 1 位**（1 ULP ≈ 1.19e-7 秒）。
+///
+/// 丢位的后果不是「精度略差」，而是**身份键不再相等**：
+/// 1. 归因判据「路径 + birthtime 命中」不命中 ⇒ 同路径但 birthtime 不同
+///    ⇒ 判「同名重建」⇒ `K = 0`、`J = T`（一份全是假失联的报告）；
+/// 2. 位槽占用表的身份键被破坏 ⇒ 每轮扫描都分配新位槽 ⇒ `F` 位永不命中
+///    ⇒ `a` 恒为 0。
+///
+/// 参考纪元基准 = `Date` 自身的 `Double` 表示 ⇒ 位模式往返 **100% 无损**。
+public enum BirthtimeBase: Sendable {
+    /// Unix 纪元（schema 1 存量格式）。
+    case unixEpoch
+    /// 参考纪元 2001-01-01（schema 2 起）。
+    case referenceDate
+
+    /// 该 schema 版本用的基准。
+    public static func forSchema(_ schemaVersion: Int) -> BirthtimeBase {
+        schemaVersion >= 2 ? .referenceDate : .unixEpoch
+    }
+
+    /// 编码：日期 → 待写入的 f64 值。
+    public func encode(_ date: Date) -> Double {
+        switch self {
+        case .unixEpoch: return date.timeIntervalSince1970
+        case .referenceDate: return date.timeIntervalSinceReferenceDate
+        }
+    }
+
+    /// 解码：f64 值 → 日期。
+    public func decode(_ value: Double) -> Date {
+        switch self {
+        case .unixEpoch: return Date(timeIntervalSince1970: value)
+        case .referenceDate: return Date(timeIntervalSinceReferenceDate: value)
+        }
+    }
+}
+
 // ============================================================
 // 序列化 / 反序列化
 // ============================================================
@@ -281,8 +472,8 @@ public enum StateFileCodec {
 
     /// Magic 4 B。
     public static let magic: [UInt8] = Array("RSD1".utf8)
-    /// 当前支持的 schema 版本。
-    public static let currentSchemaVersion = 1
+    /// 当前支持的 schema 版本（schema 2 = 每来源四段，含 `0x04 Snapshot`）。
+    public static let currentSchemaVersion = 2
 
     /// 当前 schema 版本（供 `StateFile` 引用）。
     public static var schemaVersion: Int { currentSchemaVersion }
@@ -291,10 +482,31 @@ public enum StateFileCodec {
 
     /// 把载体内容编码成文件字节。
     ///
-    /// - Parameter payloads: 各来源的三段内容。
+    /// **写出的 schema 版本 = `header.schemaVersion`**（不是常量）——
+    /// 迁移要能造出旧版载体，读方才有东西可迁移。
+    ///
+    /// - Parameter payloads: 各来源的段内容。
     /// - Returns: 完整文件字节。
     public static func encode(header: StateHeader, payloads: [Source: SourcePayload]) throws -> Data {
-        // 段序固定：按 `Source.allCases` 声明序遍历，**每来源三段、顺序 F → C_done → Slots**
+        // 版本闸门：写不出版本不支持的载体（写出来的文件读方必然拒绝 = 在制造坏文件）。
+        guard header.schemaVersion <= currentSchemaVersion else {
+            throw StateFileError.schemaTooNew(
+                found: header.schemaVersion,
+                supported: currentSchemaVersion
+            )
+        }
+        guard header.schemaVersion >= 1 else {
+            throw StateFileError.segmentValidationFailed(
+                detail: "非法 schema 版本 \(header.schemaVersion)"
+            )
+        }
+        // schema 2 起才有第 4 段（`0x04 Snapshot`）。
+        let writesSnapshot = header.schemaVersion >= 2
+        // birthtime 基准随 schema 版本走（schema 1 = Unix 纪元，schema 2 = 参考纪元）。
+        let birthtimeBase = BirthtimeBase.forSchema(header.schemaVersion)
+
+        // 段序固定：按 `Source.allCases` 声明序遍历，
+        // **每来源三段（schema 1）或四段（schema 2）、顺序 F → C_done → Slots → Snapshot**
         var segments: [SegmentDescriptor] = []
         var payloadBytes = Data()
 
@@ -328,7 +540,7 @@ public enum StateFileCodec {
                 guard let id = p.slots[slot] else { continue }
                 var s = slot.littleEndian
                 withUnsafeBytes(of: &s) { slotsBytes.append(contentsOf: $0) }
-                var bt = id.birthtime.timeIntervalSince1970.bitPattern
+                var bt = birthtimeBase.encode(id.birthtime).bitPattern
                 withUnsafeBytes(of: &bt) { slotsBytes.append(contentsOf: $0) }
                 let pathBytes = Array(id.path.utf8)
                 var pathLen = UInt16(min(pathBytes.count, Int(UInt16.max))).littleEndian
@@ -337,6 +549,24 @@ public enum StateFileCodec {
             }
             segments.append(SegmentDescriptor(offset: 0, length: UInt64(slotsBytes.count), kind: .slots, sourceIndex: index))
             payloadBytes.append(slotsBytes)
+
+            // ④ Snapshot（count u32 + count × { birthtime f64, pathLen u16, path UTF8 }）
+            //    顺序 = 快照顺序（语义有序，不排序）。
+            if writesSnapshot {
+                var snapBytes = Data()
+                var snapCount = UInt32(p.snapshotMembers.count).littleEndian
+                withUnsafeBytes(of: &snapCount) { snapBytes.append(contentsOf: $0) }
+                for member in p.snapshotMembers {
+                    var bt = birthtimeBase.encode(member.birthtime).bitPattern
+                    withUnsafeBytes(of: &bt) { snapBytes.append(contentsOf: $0) }
+                    let pathBytes = Array(member.path.utf8)
+                    var pathLen = UInt16(min(pathBytes.count, Int(UInt16.max))).littleEndian
+                    withUnsafeBytes(of: &pathLen) { snapBytes.append(contentsOf: $0) }
+                    snapBytes.append(contentsOf: pathBytes.prefix(Int(pathLen)))
+                }
+                segments.append(SegmentDescriptor(offset: 0, length: UInt64(snapBytes.count), kind: .snapshot, sourceIndex: index))
+                payloadBytes.append(snapBytes)
+            }
         }
 
         // 段表偏移：payload 起点 = 头部 + 段表之后（**此刻段数已知**）
@@ -382,7 +612,7 @@ public enum StateFileCodec {
 
         var out = Data()
         out.append(contentsOf: magic)
-        var ver = UInt32(currentSchemaVersion).littleEndian
+        var ver = UInt32(header.schemaVersion).littleEndian
         withUnsafeBytes(of: &ver) { out.append(contentsOf: $0) }
         var hlen = UInt32(headerLen).littleEndian
         withUnsafeBytes(of: &hlen) { out.append(contentsOf: $0) }
@@ -442,6 +672,13 @@ public enum StateFileCodec {
         if schemaVersion > currentSchemaVersion {
             throw StateFileError.schemaTooNew(found: schemaVersion, supported: currentSchemaVersion)
         }
+        // schema 更低 → 迁移（由 `StateFile.load()` 负责，**不在 codec 层做**）；
+        // 但 schema < 1 是非法版本 → 判 E-304。
+        guard schemaVersion >= 1 else {
+            throw StateFileError.segmentValidationFailed(
+                detail: "非法 schema 版本 \(schemaVersion)"
+            )
+        }
 
         let headerEnd = 12 + headerLen
         guard headerEnd + 4 <= fileLen else {
@@ -469,6 +706,13 @@ public enum StateFileCodec {
             let kindRaw = bytes[base + 16]
             guard let kind = SegmentKind(rawValue: kindRaw) else {
                 throw StateFileError.segmentValidationFailed(detail: "未知段种类 \(kindRaw)")
+            }
+            // 段种类必须**存在于该 schema 版本** —— 文件头谎称 schema 1 却带
+            // schema 2 才有的 `0x04 Snapshot` 段 → 判 E-304（**不猜、不部分加载**）。
+            guard kind.exists(inSchema: schemaVersion) else {
+                throw StateFileError.segmentValidationFailed(
+                    detail: "段种类 \(kindRaw) 不存在于 schema \(schemaVersion)"
+                )
             }
             let sourceIndex = bytes[base + 17]
             let r16 = UInt16(bytes[base + 18]) | (UInt16(bytes[base + 19]) << 8)
@@ -530,6 +774,9 @@ public enum StateFileCodec {
         guard var header = try? decoder.decode(StateHeader.self, from: headerData) else {
             throw StateFileError.segmentValidationFailed(detail: "header JSON 解析失败")
         }
+        // **文件里的版本优先** —— header JSON 里的 `schemaVersion` 只是冗余副本。
+        // 旧载体（schema 1）的 JSON 无新字段 → 合成的 `decodeIfPresent` 天然可解。
+        header.schemaVersion = schemaVersion
         header.bytes = ByteCounts(
             header: headerLen,
             segTable: segCount * SegmentDescriptor.byteCount,
@@ -537,6 +784,10 @@ public enum StateFileCodec {
         )
 
         // 解析各段内容（**按 (sourceIndex, kind) 索引，不按位置猜**）
+        //
+        // birthtime 基准随**文件里的 schema 版本**走 —— schema 1 的存量文件
+        // 用 Unix 纪元，schema 2 用参考纪元（往返逐位无损）。
+        let birthtimeBase = BirthtimeBase.forSchema(schemaVersion)
         var payloads: [Source: SourcePayload] = [:]
         let sourceList = Source.allCases
         for seg in segments {
@@ -557,7 +808,9 @@ public enum StateFileCodec {
             case .countedDone:
                 payload.countedDoneSlots = try decodeCountedDone(segBytes)
             case .slots:
-                payload.slots = try decodeSlots(segBytes)
+                payload.slots = try decodeSlots(segBytes, base: birthtimeBase)
+            case .snapshot:
+                payload.snapshotMembers = try decodeSnapshot(segBytes, base: birthtimeBase)
             }
             payloads[source] = payload
         }
@@ -604,7 +857,7 @@ public enum StateFileCodec {
         return out
     }
 
-    private static func decodeSlots(_ data: Data) throws -> [UInt32: CandidateID] {
+    private static func decodeSlots(_ data: Data, base: BirthtimeBase) throws -> [UInt32: CandidateID] {
         let bytes = [UInt8](data)
         guard bytes.count >= 4 else { return [:] }
         var count: UInt32 = 0
@@ -630,12 +883,51 @@ public enum StateFileCodec {
             let pathBytes = Array(bytes[off..<(off + pl)])
             off += pl
             let path = String(decoding: pathBytes, as: UTF8.self)
-            let birthtime = Date(timeIntervalSince1970: Double(bitPattern: btBits))
+            let birthtime = base.decode(Double(bitPattern: btBits))
             out[slot] = CandidateID(path: path, birthtime: birthtime)
         }
         guard off == bytes.count else {
             throw StateFileError.segmentValidationFailed(
                 detail: "Slots 段有尾随字节：解析到 \(off)，全长 \(bytes.count)"
+            )
+        }
+        return out
+    }
+
+    /// 解析 `0x04 Snapshot` 段：`count u32` + `count × { birthtime f64, pathLen u16, path UTF8 }`。
+    ///
+    /// **顺序 = 快照顺序**（语义有序，不排序）—— 结算逐条归因依赖顺序可核对。
+    private static func decodeSnapshot(_ data: Data, base: BirthtimeBase) throws -> [CandidateID] {
+        let bytes = [UInt8](data)
+        guard bytes.count >= 4 else { return [] }
+        var count: UInt32 = 0
+        for i in 0..<4 { count |= UInt32(bytes[i]) << (8 * UInt32(i)) }
+        var out: [CandidateID] = []
+        out.reserveCapacity(Int(count))
+        var off = 4
+        for _ in 0..<Int(count) {
+            guard off + 10 <= bytes.count else {
+                throw StateFileError.segmentValidationFailed(detail: "Snapshot 段被截断")
+            }
+            var btBits: UInt64 = 0
+            for j in 0..<8 { btBits |= UInt64(bytes[off + j]) << (8 * UInt64(j)) }
+            var pathLen: UInt16 = 0
+            pathLen |= UInt16(bytes[off + 8])
+            pathLen |= UInt16(bytes[off + 9]) << 8
+            off += 10
+            let pl = Int(pathLen)
+            guard off + pl <= bytes.count else {
+                throw StateFileError.segmentValidationFailed(detail: "Snapshot 段路径被截断")
+            }
+            let pathBytes = Array(bytes[off..<(off + pl)])
+            off += pl
+            let path = String(decoding: pathBytes, as: UTF8.self)
+            let birthtime = base.decode(Double(bitPattern: btBits))
+            out.append(CandidateID(path: path, birthtime: birthtime))
+        }
+        guard off == bytes.count else {
+            throw StateFileError.segmentValidationFailed(
+                detail: "Snapshot 段有尾随字节：解析到 \(off)，全长 \(bytes.count)"
             )
         }
         return out

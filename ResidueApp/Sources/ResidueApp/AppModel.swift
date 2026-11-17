@@ -93,6 +93,13 @@ final class AppModel {
         var upstream: [UpstreamCommand] = []
         /// L0 快照。
         var snapshot: L0Snapshot?
+        /// 本轮各来源的候选（键 = `source.rawValue`）。
+        var candidatesBySource: [String: [ScanEngine.Candidate]] = [:]
+        /// 本轮各来源的 L0 判定结果（键 = `source.rawValue`）。
+        ///
+        /// **判定在主 actor 之外做完**（每条候选一次 `lstat`，是重 I/O），
+        /// 这里只把**结果**带回来 —— 写回层只吃结果、不做探测。
+        var judgmentsBySource: [String: [CandidateID: L0Verdict]] = [:]
         /// 本轮实际扫描的模式。
         var mode: ScanEngine.Mode = .full
         /// 累计扫描条目数。
@@ -122,9 +129,6 @@ final class AppModel {
 
     /// **当前扫描的取消令牌**（主 actor 写、后台任务读）。
     private var scanCancelBox: CancelBox?
-
-    /// 上次扫描的 L0 是否降级（无法枚举同 uid 进程）。
-    private(set) var lastScanDegraded = false
 
     /// AC-15 的顺延条目数（本次因上限而未执行的条数）。
     private(set) var deferredCount: Int = 0
@@ -609,6 +613,22 @@ final class AppModel {
             // ---- L0 探测（排除自身，防自污染）----
             // **也在主 actor 之外**：它要枚举同 uid 进程的 fd，同样是重 I/O。
             job.snapshot = L0Probe.snapshot(excludePIDs: excludePIDs)
+
+            // ---- 逐候选 L0 判定（**也在主 actor 之外**）----
+            //
+            // 每条候选一次 `lstat`（十万级）⇒ 同样是重 I/O，
+            // 放主 actor 会让界面卡住（§七坑 8）。
+            //
+            // 判定结果**按来源分组**带回主 actor：探测在 `L0Judge`、
+            // 归因在 `ObservationWriteback`，两层分开，写回层可纯函数单测。
+            let judgeSnapshot = job.snapshot ?? L0Snapshot()
+            for (sourceName, result) in job.results {
+                job.candidatesBySource[sourceName] = result.candidates
+                job.judgmentsBySource[sourceName] = L0Judge.judge(
+                    candidates: result.candidates,
+                    snapshot: judgeSnapshot
+                )
+            }
             return job
         }.value
 
@@ -639,7 +659,42 @@ final class AppModel {
         }
 
         let snapshot = job.snapshot ?? L0Snapshot()
-        lastScanDegraded = snapshot.degraded
+
+        // ---- 写回层（Core · 「一次扫描 → 载体」的**唯一**转换处）----
+        //
+        // 取快照 / 结算 / `a` 写入 / `b` 累计 / 计数日推进 **全在这里发生**。
+        // 编排层只负责把扫描结果**收集齐**再交给它 ——
+        // 编排层一旦自己算这些量，就出现了第二套实现，两处必然分叉
+        // （这正是 CR-031 要修的断链：`K` / `J` / `producedAt` 从未被写过非空值）。
+        var scannedSources: Set<Source> = []
+        var writebackCandidates: [Source: [CandidateID]] = [:]
+        var writebackJudgments: [Source: [CandidateID: L0Verdict]] = [:]
+        for (sourceName, _) in job.results {
+            guard let source = Source(rawValue: sourceName) else { continue }
+            scannedSources.insert(source)
+            writebackCandidates[source] = (job.candidatesBySource[sourceName] ?? []).map {
+                CandidateID(path: $0.path, birthtime: $0.birthtime)
+            }
+            writebackJudgments[source] = job.judgmentsBySource[sourceName] ?? [:]
+        }
+
+        let outcome = ObservationWriteback.apply(
+            input: ObservationWriteback.Input(
+                now: started,
+                // **中止 ≠ 失败，但中止的那次扫描不算「完成」**：
+                // 中止不取快照、不结算、不推进计数日（仍累计 `a` / `b`）。
+                succeeded: job.abortReason == nil,
+                mode: job.mode,
+                degraded: snapshot.degraded,
+                scannedSources: scannedSources,
+                candidates: writebackCandidates,
+                judgments: writebackJudgments
+            ),
+            header: contents.header,
+            payloads: contents.payloads
+        )
+        contents.header = outcome.header
+        contents.payloads = outcome.payloads
 
         // **`pNowCount` 与 `b` 是两个不同的量，曾经被混成一个变量**
         //
@@ -652,10 +707,14 @@ final class AppModel {
         // **「缓存满满但没有任何进程在用」是最理想的可清理场景，
         // 而它恰好 `countHeld = 0` → `b = 0` → 门槛永远不满足 → 永远点不亮。**
         //
-        // 正确口径（M5）：「计数对象 = 对某候选执行 L0 判定的一次」。
-        // 每条候选都会被判一次，所以 `b` = 参与判定的候选数。
-        let pNowCount = countHeld(in: snapshot)
-        let checkedCount = countL0Checks()
+        // 现在两者都从**判定结果**导出（判定是唯一来源）：
+        // `pNowCount` = 判为「有活引用」的条数；`b` = 本轮真正执行了判定的条数。
+        let pNowCount = writebackJudgments.values.reduce(0) { total, verdicts in
+            total + verdicts.values.filter { $0 == .hasLiveReference }.count
+        }
+        // 降级（无法枚举同 uid 进程）⇒ 本轮**没有真正执行检查** ⇒ 如实记 0，
+        // 让门槛自然不满足（不假装检查过）。
+        let checkedCount = snapshot.degraded ? 0 : writebackJudgments.values.reduce(0) { $0 + $1.count }
 
         // ---- 更新诊断 ----
         lastScanDiagnostics = ScanLogRecord.Diagnostics(
@@ -666,10 +725,16 @@ final class AppModel {
                 statOtherUID: snapshot.coverage.statOtherUID
             ),
             pNowCount: pNowCount,
-            fSetBits: 0,
-            doneCount: 0,
-            // `a`（累计误判数）**本轮尚无判定结果**，如实取载体里的累计值。
-            // 不写死 0：`a` 只增不减（CR-022 偏差 3），清采集物也不清它。
+            // `fSetBits` = `F` 位图的**置位数** —— 从**载体**读（写回层刚更新过），
+            // 不另算一份（与 `doneCount` 同一口径；不变量②：同一判定只有一个实现处）。
+            //
+            // ⚠️ 曾被**写死为 `0`**：CR-031 之前 `F` 位图恒空，`0` 碰巧是对的；
+            // CR-031 之后位图首次真实承载数据 ⇒ `0` 从「碰巧对」变成「稳定的错」。
+            fSetBits: contents.payloads.values.reduce(0) { $0 + $1.fSetBitCount },
+            // `doneCount` = 已计误判的候选数（`C_done` 规模）——
+            // 从**载体**读（写回层刚更新过），不另算一份。
+            doneCount: contents.header.sources.reduce(0) { $0 + $1.doneCount },
+            // `a`（累计误判数）**只增不减**（CR-022 偏差 3），清采集物也不清它。
             a: accumulatedMisjudgment(for: nil),
             b: checkedCount,
             round: contents.header.round,
@@ -677,9 +742,6 @@ final class AppModel {
             // **内容读取次数恒为 0**：扫描只读元数据、不读内容（AC-07 载体）
             contentReads: 0
         )
-
-        // ---- 观测进度推进（成功扫描 +1 计数日）----
-        advanceCountedDayIfNeeded(now: started)
 
         // ---- 落盘（**必须真写**，否则 A-10 第 9 步不可达）----
         persist()
@@ -1184,22 +1246,6 @@ final class AppModel {
 
     // MARK: - 私有
 
-    /// 定位各来源根。优先用上游只读命令（AC-19 白名单内），失败回退标准路径。
-    /// 本轮 **L0 检查次数** `b`（M5：门槛项）。
-    ///
-    /// 计数对象 = 「对某候选执行 L0 判定的一次」。本实现对**每条候选都判一次**
-    /// （`countHeld` 会遍历全部），所以 `b` = 参与判定的候选数。
-    ///
-    /// **不由 `countHeld` 的结果充当** —— 那是「被判为被持有的条数」，
-    /// 是 `pNowCount` 的定义。两者混用会让「缓存满满但无人使用」
-    /// 这个最理想的可清理场景永远点不亮（`b` 会是 0）。
-    private func countL0Checks() -> Int {
-        // 若 L0 降级（无法枚举），本轮**没有真正执行检查** → 如实记 0，
-        // 让门槛自然不满足（不假装检查过）
-        guard !lastScanDegraded else { return 0 }
-        return candidates.count
-    }
-
     /// 累计误判数 `a`（M4：**只增不减**，清采集物也不清它）。
     ///
     /// 从载体读；`source` 为 `nil` 时返回全部来源之和（⑤ 页的矩阵行会各自取）。
@@ -1211,36 +1257,13 @@ final class AppModel {
         return contents.header.sources.reduce(0) { $0 + $1.a }
     }
 
-    /// 数「被持有」的候选数（`P_now` 规模，仅用于诊断）。
-    private func countHeld(in snapshot: L0Snapshot) -> Int {
-        var n = 0
-        for c in candidates {
-            var st = stat()
-            guard stat(c.path, &st) == 0 else { continue }
-            let id = FileIdentity(dev: UInt32(truncatingIfNeeded: st.st_dev), ino: UInt64(st.st_ino))
-            if L0Probe.isHeld(identity: id, isDirectory: c.isDirectory, path: c.path, by: snapshot) {
-                n += 1
-            }
-        }
-        return n
-    }
-
-    /// 计数日推进 —— **调 Core 的 M1 唯一实现，本层不自行加一**。
+    /// 落盘（**只落盘，不算数**）。
     ///
-    /// 原先这里写了 `countedDays + 1`，那是把 M1 的判定口径复制到编排层，
-    /// 正是「同一判定两处实现必然分叉」的起点（`verify_a9` 的域内算术检查抓到的）。
-    private func advanceCountedDayIfNeeded(now: Date) {
-        var progress = ObservationProgress(
-            round: contents.header.round,
-            countedDays: contents.header.countedDays
-        )
-        progress.startAnchor = contents.header.roundStartAnchor
-        progress.advanceCountedDay(on: now)
-        contents.header.countedDays = progress.countedDays
-        contents.header.roundStartAnchor = progress.startAnchor
-        contents.header.lastScanAt = now
-    }
-
+    /// `T` / `H` / `K` / `J` / `a` / `b` / 计数日 **全部由写回层**
+    /// （`ObservationWriteback`）算好并写进 `contents`。
+    /// 编排层在这里**只做一件事：把载体存下去** ——
+    /// 一旦在这里自己算这些量，就会出现第二套实现，两处必然分叉
+    /// （CR-031 修的正是这种断链：`T` 恒 nil → 门槛链断在起点）。
     private func persist() {
         // **纵深防御**：只读态一律不落盘。
         //
@@ -1248,66 +1271,6 @@ final class AppModel {
         // 任何基于「文件不存在 = 首启」的判断都会误判。只读是一条硬闸：
         // 载体读不出来的时候，我们**没有资格**用内存里的空壳去覆盖它。
         guard !readOnly else { return }
-
-        // ---- 保证每个来源都有一行（**字段值必须真实，不能留 nil 冒充「还没算」**）----
-        //
-        // ## 这里曾经有个会锁死产品的缺口
-        //
-        // 原实现给每个来源写 `T: nil, K: nil, J: nil, H: nil` 且 `slotCount: 0`，
-        // 然后**再也不更新**（`if idx < count { continue }`）。
-        //
-        // 后果是整条门槛链断在起点：
-        // - `T` 恒 null → `H = min(30, T)` 永远取不到值
-        // - 门槛永远不满足 → **自动删除永远点不亮**
-        // - 产品退化成一个只读扫描器
-        //
-        // 这正是复必现 M-02 怀疑的形态（他当时只从两页矛盾推断，
-        // 没有看到代码；现在确认它在实现层是**结构性**的）。
-        //
-        // 修法：按 M3 的规则真取快照 ——
-        // **`T` 的唯一来源 = 本轮首次成功 `full` 扫描**，取到后**冻结不再覆盖**。
-        let now = Date()
-        for source in Source.allCases {
-            // 该来源本轮扫描到的候选数（`slotCount` 的载体）
-            let slotCount = candidates.filter { $0.source == source.rawValue }.count
-            // 该来源本轮参与 L0 判定的次数（`b` 是门槛项）
-            let bCount = lastScanDegraded ? 0 : slotCount
-
-            if let idx = contents.header.sources.firstIndex(where: { $0.source == source }) {
-                var entry = contents.header.sources[idx]
-                // **只增不减、只冻结不覆盖**：
-                // 已取过快照的来源，`T` / `H` 一律不动（M3：冻结时刻唯一）
-                if !entry.snapshotTaken, lastScanMode == .full, slotCount > 0 {
-                    entry.snapshotTaken = true
-                    entry.T = slotCount
-                    // `H = min(30, T)`（AC-08 组 A 的门槛式）
-                    entry.H = Swift.min(30, slotCount)
-                }
-                // 每次成功扫描都更新观测面（`b` / `slotCount` / 判定时刻）
-                entry.b = bCount
-                entry.slotCount = slotCount
-                entry.lastJudgmentAt = now
-                // `a` 不动：只增不减，且只在真实判定出错时由 GateEvaluator 写
-                contents.header.sources[idx] = entry
-            } else {
-                contents.header.sources.append(
-                    SourceHeaderEntry(
-                        source: source,
-                        // **快照只在 full 扫描且有候选时取**（M3）
-                        snapshotTaken: (lastScanMode == .full && slotCount > 0),
-                        T: (lastScanMode == .full && slotCount > 0) ? slotCount : nil,
-                        K: nil, J: nil,
-                        H: (lastScanMode == .full && slotCount > 0)
-                            ? Swift.min(30, slotCount) : nil,
-                        a: 0,
-                        b: bCount,
-                        slotCount: slotCount,
-                        doneCount: 0,
-                        lastJudgmentAt: now
-                    )
-                )
-            }
-        }
         do {
             _ = try stateFile.save(header: contents.header, payloads: contents.payloads)
         } catch {
@@ -1375,6 +1338,10 @@ final class AppModel {
                 t: entry.T,
                 k: entry.K,
                 j: entry.J,
+                // **失联条目中「无法归因」的条数**（PRD v5.6 M3 · CR-031 §五③）：
+                // 单列披露，**不并入已归因、也不静默丢弃**。
+                // `nil`（尚未结算）原样保留 ⇒ 渲染为「—」，不得写成 0。
+                unattributable: entry.unattributableCount,
                 h: entry.H,
                 a: entry.a,
                 b: entry.b

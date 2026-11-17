@@ -210,6 +210,50 @@ public struct NegativeBitmap: Codable, Sendable, Equatable {
     }
 
     public mutating func clearAll() { words = [] }
+
+    /// 位图的**字节表示**（LSB 优先：位槽 `i` → 第 `i/8` 字节的第 `i%8` 位）。
+    ///
+    /// ## 长度恒等式（解码端会验，违者报 `E-304`）
+    /// 长度**必须恰为 `ceil(bitCount/8)`** —— 不能是 64 位字对齐的 `byteSize`
+    /// （后者会多出 1~7 个字节，解码端立刻判「段长不符」）。
+    ///
+    /// - Parameter bitCount: **位槽域大小**（不是候选数、也不是置位数）。
+    public func dataRepresentation(bitCount: Int) -> Data {
+        let byteCount = (bitCount + 7) / 8
+        var bytes = [UInt8](repeating: 0, count: byteCount)
+        for slot in 0..<bitCount where isSet(slot) {
+            bytes[slot / 8] |= UInt8(1 << UInt8(slot % 8))
+        }
+        return Data(bytes)
+    }
+
+    /// 从字节表示还原（LSB 优先，与 `dataRepresentation(bitCount:)` 互逆）。
+    ///
+    /// - Parameter bitCount: 位槽域大小；**超出 `bitCount` 的位一律丢弃**
+    ///   （字节对齐多出来的位恒为 0，丢弃无损）。
+    public init(data: Data, bitCount: Int) {
+        var words = [UInt64](repeating: 0, count: (bitCount + 63) / 64)
+        let limit = min(bitCount, data.count * 8)
+        for slot in 0..<limit {
+            let byte = data[slot / 8]
+            if byte & (UInt8(1) << UInt8(slot % 8)) != 0 {
+                words[slot / 64] |= (UInt64(1) << UInt64(slot % 64))
+            }
+        }
+        self.words = words
+    }
+
+    /// 字节表示里的**置位数** —— 置位数的**唯一实现处**（不变量②）。
+    ///
+    /// ## 为什么数「字节表示」而不是位槽表示
+    /// 载体内 `F` 位图存的就是**字节**（`SourcePayload.bitmap`），
+    /// 取证字段 `fSetBits` 必须与**盘上的字节**一致 —— 那是它唯一的口径。
+    /// 两种表示互为无损映射（字节补齐位恒为 0），数出来的数必然相同。
+    ///
+    /// - Parameter bytes: `dataRepresentation(bitCount:)` 产出的字节表示。
+    public static func setBitCount(ofBytes bytes: Data) -> Int {
+        bytes.reduce(0) { $0 + $1.nonzeroBitCount }
+    }
 }
 
 /// M4 · 按来源的误判状态载体（**四项字段**，契约 CR-019 / CR-020）。
@@ -256,6 +300,33 @@ public struct SourceL0State: Codable, Sendable, Equatable {
     public func hasBeenJudgedClean(_ id: CandidateID) -> Bool {
         guard let slot = slotTable.slotIfAssigned(for: id) else { return false }
         return negativeSeen.isSet(slot)
+    }
+
+    /// 转成载体载荷（`SourcePayload`）——**载荷 ⇄ 状态互逆的唯一桥**。
+    ///
+    /// ## 位图长度恒等式（解码端会验，违者报 `E-304`）
+    /// 长度 = `ceil(位槽域大小 / 8)` —— **不是** `NegativeBitmap.byteSize`
+    /// （后者按 64 位字对齐，会多出 1~7 字节，解码端立刻判「段长不符」）。
+    ///
+    /// - Parameter snapshotMembers: 快照成员集合（**不属于 M4 四项**，
+    ///   是 CR-031 新增的第 4 段）。
+    public func payload(snapshotMembers: [CandidateID] = []) -> SourcePayload {
+        let domain = slotTable.slotDomainSize
+        let slotMap = Dictionary(
+            uniqueKeysWithValues: slotTable.assignments.map { (id: CandidateID, slot: Int) in
+                (UInt32(slot), id)
+            }
+        )
+        let done = countedDone.compactMap { id -> UInt32? in
+            guard let slot = slotTable.slotIfAssigned(for: id) else { return nil }
+            return UInt32(slot)
+        }.sorted()
+        return SourcePayload(
+            bitmap: negativeSeen.dataRepresentation(bitCount: domain),
+            countedDoneSlots: done,
+            slots: slotMap,
+            snapshotMembers: snapshotMembers
+        )
     }
 }
 
@@ -348,6 +419,15 @@ public struct SlotTable: Codable, Sendable, Equatable {
     public init() {
         self.assignments = [:]
         self.nextSlot = 0
+    }
+
+    /// 从「身份键 → 位槽号」映射构造（**载荷重建用**）。
+    ///
+    /// `nextSlot` 由映射里的最大槽号推导（与解码器口径一致）——
+    /// 位槽**只增不减**，故域大小 = 最大槽号 + 1。
+    public init(assignments: [CandidateID: Int]) {
+        self.assignments = assignments
+        self.nextSlot = (assignments.values.max() ?? -1) + 1
     }
 
     public init(from decoder: Decoder) throws {

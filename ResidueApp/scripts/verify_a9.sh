@@ -266,9 +266,17 @@ else
   ok "产品路径不读渲染样例数据"
 fi
 
+# M1 计数日推进：实现与调用点**都**必须在 Core，编排层一行都不许碰。
+#
+# 〔v4 · CR-031〕调用点从 `AppModel.swift` 搬进了 Core 的写回层
+# （`ObservationWriteback.swift`）——「中止扫描不得推进计数日」要求
+# **推进与否由 Core 判定**（编排层无从判断扫描是否被中止）。
+# 检查从「AppModel 里能 grep 到调用」改成「AppModel 里 grep 不到调用」：
+# 不是放宽，是**更强**（编排层连调用口都不留）。
 if grep -q "advanceCountedDay" "$CORE_DIR/Metrics.swift" 2>/dev/null \
-   && grep -q "advanceCountedDay" "$UI_DIR/AppModel.swift" 2>/dev/null; then
-  ok "M1 计数日推进在 Core（编排层只调用，不自行加一）"
+   && grep -rq "advanceCountedDay" "$CORE_DIR" 2>/dev/null \
+   && ! grep -qE "advanceCountedDay|countedDays[[:space:]]*(\+=|[[:space:]]=[[:space:]]*countedDays[[:space:]]*\+)" "$UI_DIR/AppModel.swift" 2>/dev/null; then
+  ok "M1 计数日推进在 Core（编排层不调用、不自行加一）"
 else
   bad "M1 计数日推进未归位到 Core（存在第二套算法风险）"
 fi

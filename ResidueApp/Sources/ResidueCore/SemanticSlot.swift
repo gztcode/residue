@@ -292,6 +292,18 @@ public enum UICopy {
     /// 报告产出前的结论列取值（**不得填「未达标」——那是假值**）。
     public static var notSettledThisRound: String { L.pick("本轮未结算", "Not settled this round") }
 
+    /// **报告已产出、但该来源尚未结算**时的取值。
+    ///
+    /// 与 `notSettledThisRound` 的区别：**整体**结算了 ≠ **每个来源**都结算了。
+    /// 一个来源结算了 ⇒ `settlement.producedAt` 落盘 ⇒ 矩阵整体进入「已产出」态，
+    /// 但**别的来源**（判定域外的、这轮没扫到的）仍可能 `K = nil`。
+    ///
+    /// 此时填 `0` 是**假值**：`0` 会被读成「一条都没归因成功」，
+    /// 而 `h(0) = min(30, 0) = 0` ⇒ `0 >= 0` 成立 ⇒ 结论还会被判成「**达标**」。
+    public static var sourceNotSettled: String {
+        L.pick("本来源未结算", "Not settled for this source")
+    }
+
     /// ⑤ 页「上一轮」行的前缀（`轮次 ≥ 2` 时才显示该行）。
     ///
     /// **前置数字式**（视觉基线 §五 跨页规则：三处轮次同构）。

@@ -38,13 +38,30 @@ public struct StateFile: Sendable {
     public let backupURL: URL
     /// 临时文件（写中）。
     public let tempURL: URL
+    /// 迁移进度游标（`<stateDir>/state/migrating.json`）。
+    ///
+    /// R2 v1.9 §10.3 —— `step` 只在特定时刻被**原子写入 + `fsync`**，
+    /// 它本身就是断电/崩溃后的恢复判据（**不按 CRC 二分**）。
+    public let migrationProgressURL: URL
+    /// 可用字节查询的**注入点**（`nil` = 用卷的真实剩余容量）。
+    ///
+    /// 空间预检必须能被测：没有注入点，`E-305` 那条分支就只能靠
+    /// 「把磁盘塞满」来触发（不可自动化）。
+    internal let availableBytesProvider: (@Sendable (URL) -> Int?)?
 
-    public init(directory: URL? = nil) {
+    public init(
+        directory: URL? = nil,
+        availableBytesProvider: (@Sendable (URL) -> Int?)? = nil
+    ) {
         let dir = directory ?? StateFile.defaultDirectory()
         self.directory = dir
         self.fileURL = dir.appendingPathComponent("state.residue")
         self.backupURL = dir.appendingPathComponent("state.residue.bak")
         self.tempURL = dir.appendingPathComponent("state.residue.tmp")
+        self.migrationProgressURL = dir
+            .appendingPathComponent("state", isDirectory: true)
+            .appendingPathComponent("migrating.json")
+        self.availableBytesProvider = availableBytesProvider
     }
 
     /// 默认状态目录：`~/Library/Application Support/Residue`
@@ -79,7 +96,20 @@ public struct StateFile: Sendable {
     /// 加载状态。
     ///
     /// **不抛错**——所有失败路径都以 `LoadResult` 表达，保证首启可用。
+    ///
+    /// ## 恢复前置（R2 v1.9 §10.3）
+    ///
+    /// 磁盘上留有 `state/migrating.json` ⇒ **迁移被中断过** ⇒ 必须**先按 `step`
+    /// 判定恢复**，再谈加载目标。否则会拿半迁移状态当正常态。
     public func load() -> LoadResult {
+        if let recovered = recoverFromInterruptedMigrationIfNeeded() {
+            return recovered
+        }
+        return loadTarget()
+    }
+
+    /// 正常加载路径（**不含**崩溃恢复前置）。
+    private func loadTarget() -> LoadResult {
         let fm = FileManager.default
 
         // 主文件不存在 → 空载体（非错误）**除非**有 `.corrupt` 留档
@@ -104,6 +134,10 @@ public struct StateFile: Sendable {
         do {
             let data = try Data(contentsOf: fileURL)
             let contents = try StateFileCodec.decode(data)
+            // schema 低一档 → **就地升级**（R2 v1.9 §10.3；codec 层不做迁移）
+            if contents.header.schemaVersion < StateFileCodec.currentSchemaVersion {
+                return migrateCarrierInPlace(contents)
+            }
             return LoadResult(contents: contents)
         } catch let err as StateFileError {
             switch err {
@@ -153,15 +187,10 @@ public struct StateFile: Sendable {
     /// **只在「迁移失败」路径调用**（§10.3）——不是段校验失败的兜底。
     /// - Returns: 恢复成功后的内容；失败返回 `nil`（→ `E-306`）。
     public func tryRestoreFromBackupForMigration() -> StateFileContents? {
-        let fm = FileManager.default
-        guard fm.fileExists(atPath: backupURL.path),
-              let data = try? Data(contentsOf: backupURL),
-              let contents = try? StateFileCodec.decode(data)
-        else { return nil }
-        // 恢复成功后把备份**内容**写回主文件（`.bak` 本身**保留**）
-        try? fm.removeItem(at: fileURL)
-        try? data.write(to: fileURL, options: [.atomic])
-        return contents
+        // 三态判定在 `restoreFromBackup()` 里（区分「无可用 `.bak`」与「写回失败」）；
+        // 对外仍只暴露「成功 / 失败」两态。
+        if case .restored(let contents) = restoreFromBackup() { return contents }
+        return nil
     }
 
     // MARK: - 写入
@@ -190,50 +219,18 @@ public struct StateFile: Sendable {
             }
         }
 
-        // ① 写临时文件
-        let fd = try fm.createFile(atPath: tempURL.path, contents: data)
-        guard fd else {
-            throw StateFileError.writeFailed(detail: "无法创建临时文件")
-        }
+        // ① 写临时文件（fsync + 短写检测）
         defer { try? fm.removeItem(at: tempURL) }
+        try writeTempFile(data)
 
-        // ② fsync（确保数据落盘后再 rename）
-        let handle = try FileHandle(forWritingTo: tempURL)
-        try handle.synchronize()
-        try handle.close()
-
-        // ③ 校验临时文件长度 == 预期长度（**短写检测**）
-        let writtenSize = ((try? fm.attributesOfItem(atPath: tempURL.path))?[.size] as? Int) ?? 0
-        guard writtenSize == data.count else {
-            // **短写 → 不 rename**，主文件保持原样（E-303）
-            throw StateFileError.writeFailed(
-                detail: "短写：写盘 \(writtenSize) B ≠ 预期 \(data.count) B"
-            )
-        }
-
-        // ④ 保留 `.bak`（把现主文件复制为备份；**不删旧 `.bak`** 直到新文件成功落地）
+        // ② 保留 `.bak`（把现主文件复制为备份；**不删旧 `.bak`** 直到新文件成功落地）
         if fm.fileExists(atPath: fileURL.path) {
             try? fm.removeItem(at: backupURL)
             try? fm.copyItem(at: fileURL, to: backupURL)
         }
 
-        // ⑤ rename 覆盖（原子）
-        //
-        // ⚠️ `FileManager.moveItem` **不会覆盖已存在的目标**（会报「已经存在同名项目」）
-        //    → 第二次写入必然失败。原子覆盖必须用 `replaceItemAt`。
-        do {
-            if fm.fileExists(atPath: fileURL.path) {
-                // `replaceItemAt` 是**同卷原子替换**：先备份原文件，再把新文件移到位。
-                // 保留项 `originalItemURL` = 备份位置（我们已有 `.bak`，故传 nil 避免重复备份）。
-                _ = try fm.replaceItemAt(fileURL, withItemAt: tempURL,
-                                         backupItemName: nil,
-                                         options: [.usingNewMetadataOnly])
-            } else {
-                try fm.moveItem(at: tempURL, to: fileURL)
-            }
-        } catch {
-            throw StateFileError.writeFailed(detail: "rename 失败：\(error.localizedDescription)")
-        }
+        // ③ rename 覆盖（原子）
+        try replaceWithTempFile()
 
         // ⑥ 写完删 `.bak`？**不删** —— `.bak` 是迁移期唯一可回退点，
         //    §10.3 的要求是「**不删唯一 `.bak`**」；成功落地后新文件即为最新，
@@ -245,12 +242,63 @@ public struct StateFile: Sendable {
     }
 
     /// 剩余可用字节（空间预检用）。
-    private func availableBytes(at path: URL) -> Int? {
+    ///
+    /// 注入点优先（`availableBytesProvider`）—— 空间预检必须能被自动化测试。
+    internal func availableBytes(at path: URL) -> Int? {
+        if let availableBytesProvider { return availableBytesProvider(path) }
         let url = path.deletingLastPathComponent()
         guard let values = try? url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]),
               let capacity = values.volumeAvailableCapacityForImportantUsage
         else { return nil }
         return Int(capacity)
+    }
+
+    // MARK: - 原子写原语（§8.2）
+
+    /// 写临时文件：`fsync` + **短写检测**（§8.2）。
+    ///
+    /// **不删 `.tmp`** —— 调用方要么把它 rename 到位，要么在失败时清理。
+    /// （`save()` 与迁移流程共用本原语 —— 不变量②。）
+    internal func writeTempFile(_ data: Data) throws {
+        let fm = FileManager.default
+        let fd = fm.createFile(atPath: tempURL.path, contents: data)
+        guard fd else {
+            throw StateFileError.writeFailed(detail: "无法创建临时文件")
+        }
+
+        // fsync（确保数据落盘后再 rename）
+        let handle = try FileHandle(forWritingTo: tempURL)
+        try handle.synchronize()
+        try handle.close()
+
+        // 校验临时文件长度 == 预期长度（**短写检测**）
+        let writtenSize = ((try? fm.attributesOfItem(atPath: tempURL.path))?[.size] as? Int) ?? 0
+        guard writtenSize == data.count else {
+            // **短写 → 不 rename**，主文件保持原样（E-303）
+            throw StateFileError.writeFailed(
+                detail: "短写：写盘 \(writtenSize) B ≠ 预期 \(data.count) B"
+            )
+        }
+    }
+
+    /// 用 `.tmp` **原子替换**主文件（同卷 `replaceItemAt`）。
+    ///
+    /// ⚠️ `FileManager.moveItem` **不会覆盖已存在的目标** → 原子覆盖必须用
+    ///    `replaceItemAt`（同卷原子替换：先备份原文件，再把新文件移到位）。
+    internal func replaceWithTempFile() throws {
+        let fm = FileManager.default
+        do {
+            if fm.fileExists(atPath: fileURL.path) {
+                // 保留项 `originalItemURL` = 备份位置（我们已有 `.bak`，故传 nil 避免重复备份）。
+                _ = try fm.replaceItemAt(fileURL, withItemAt: tempURL,
+                                         backupItemName: nil,
+                                         options: [.usingNewMetadataOnly])
+            } else {
+                try fm.moveItem(at: tempURL, to: fileURL)
+            }
+        } catch {
+            throw StateFileError.writeFailed(detail: "rename 失败：\(error.localizedDescription)")
+        }
     }
 
     // MARK: - 清除
@@ -260,7 +308,17 @@ public struct StateFile: Sendable {
     /// ⚠️ **这不是 N7 的「一键清除」**——N7 的清除**不作用于**本载体。
     /// 本方法只由「应用版本变更」路径调用。
     ///
-    /// - Parameter preservedRound: **要保留的轮次**。
+    /// ## 为什么必须**基于现有载体**改字段，而不是造全新 `StateHeader()`
+    ///
+    /// 造全新 header 会把**用户设置类字段**一并重置 ⇒ 用户升级应用 =
+    /// **被替用户改主意**（自动删除总开关被静默关掉）。PRD v5.6 M1「写入时刻」⑧：
+    /// **用户设置类字段不随版本变更清零**。
+    ///
+    /// 同时，造全新 header 还会把 `sources` 抹成空 ⇒ 界面上的每来源读数全部消失。
+    ///
+    /// - Parameters:
+    ///   - newAppVersion: 新的应用版本号。
+    ///   - preservedRound: **要保留的轮次**（`nil` = 沿用载体里的轮次）。
     ///
     ///   M4 写的是「应用版本变更时 `F` / `C_done` / 位槽占用表 / `a` 一并清零」，
     ///   而 **M1 写的是「版本变更重置当前轮次，不产生新轮次」**。
@@ -268,15 +326,35 @@ public struct StateFile: Sendable {
     ///
     ///   原实现无条件造 `StateHeader()`（round 默认 1）→ 一个已经跑到第 3 轮的用户
     ///   升级后会被打回第 1 轮。那不是「重置」，是**倒退**。
-    @discardableResult
     public func clearCarrierForVersionChange(
         newAppVersion: String,
-        preservedRound: Int = 1
+        preservedRound: Int? = nil
     ) throws {
-        var header = StateHeader()
+        // **基于现有载体改字段** —— 不造全新 `StateHeader()`。
+        //
+        // 载体读不出来（损坏 / 只读）时**抛错**，不静默新建空载体：
+        // 那会把 `a` 清零（= 放行），是「静默重建」（不变量④）。
+        let loaded = load()
+        if let error = loaded.error { throw error }
+
+        var header = loaded.contents?.header ?? StateHeader()
+        // 写出的永远是**当前** schema 版本（载体可能是旧 schema）。
+        header.schemaVersion = StateFileCodec.currentSchemaVersion
         header.appVersion = newAppVersion
         // **轮次不变**（M1：版本变更重置当前轮次，不产生新轮次）
-        header.round = preservedRound
+        header.round = preservedRound ?? header.round
+
+        // ① 本轮计数日归零 + 本轮计数日起算点重置
+        //    （起算点重置 = 版本变更后的**下一次**成功扫描完成所在日 ⇒ 此刻无起算点）
+        // ③ 结算凭证（报告产出时刻与报告标识）随 `K` / `J` 一并清零
+        //    （凭证与结算值不同源 → 会造出「有报告、无样本」的假态）
+        // ② `T` 待重取 / ③ `K`·`J` 清零 / ④ `b` 清零 / ⑥ `a` 清零 /
+        // ⑦ `H` 回到 nil / 取快照·结算时刻与无法归因条数随量一并清零
+        //
+        // ⚠️ 走**共享原语**（不变量②）：schema 迁移要清的是同一套量，
+        //    两处各写一遍必然漂移。
+        header.resetObservationCredentials()
+
         // 载荷全空 → 四项（`F` / `C_done` / 位槽占用表 / `a`）自然清零
         try save(header: header, payloads: [:])
     }
