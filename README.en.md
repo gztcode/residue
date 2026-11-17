@@ -187,7 +187,7 @@ The UI ships with **简体中文 / English**, follows the system language, and c
 
 ```bash
 cd ResidueApp
-swift test                                  # 440 unit tests (Core, zero UI deps)
+swift test                                  # 445 unit tests (Core, zero UI deps)
 ./scripts/verify_a9.sh                      # page structure + no-arithmetic-in-UI + wiring (80)
 python3 scripts/verify_codes.py             # error-code table ↔ docs (11)
 swift run --disable-sandbox ResidueApp --verify-wiring /tmp/w   # real IO round-trip (79)
