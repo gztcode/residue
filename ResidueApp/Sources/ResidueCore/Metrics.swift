@@ -615,9 +615,14 @@ public enum GateEvaluator {
     /// - 来源项：按判定域顺序分组逐行
     ///
     /// **来源项只在报告产出后判定**（`K`/`T`/`J`/`a`/`b` 同前置）。
+    ///
+    /// - Parameter decisionDomain: 判定域 = **本轮观察期开始快照内命中的来源**
+    ///   （契约：PRD v5.6 R9 / 架构 A1）。域外来源**从未参与判定**，
+    ///   既不产未达项、也不阻断点亮。
     public static func unmetItems(
         progress: ObservationProgress,
         settlementProduced: Bool,
+        decisionDomain: Set<Source>,
         sources: [SourceGateInput]
     ) -> UnmetItems {
         var global: UnmetGlobalItem? = nil
@@ -628,7 +633,7 @@ public enum GateEvaluator {
         guard settlementProduced else {
             return UnmetItems(global: global, bySource: items)
         }
-        for input in sources {
+        for input in sources where decisionDomain.contains(input.source) {
             // 样本不足：`K < H` —— **与 FDA 态无关**，必须先判
             // （第 18 轮 ②‴：未取得 FDA 且手删 1 条 → 必须列「样本不足」+「L0 未判定」两项两行）
             if let k = input.attributable, let t = input.total, k < Threshold.h(forTotal: t) {
@@ -655,12 +660,16 @@ public enum GateEvaluator {
     ///
     /// 三项**同时**满足：观察期已满 ∧ `K ≥ H` ∧ `a = 0`（且 `b ≥ 1`）。
     /// 判定域为空时**不适用**（不判为达标）——全称量词在空集上恒真。
+    ///
+    /// - Parameter decisionDomain: 判定域 = **本轮观察期开始快照内命中的来源**。
+    ///   域外来源（无本轮快照）**不参与逐来源判定**、不阻断点亮。
     public static func isQualified(
         progress: ObservationProgress,
         settlementProduced: Bool,
+        decisionDomain: Set<Source>,
         sources: [SourceGateInput]
     ) -> Bool {
-        let domain = sources.filter { $0.source.isInDecisionDomain }
+        let domain = sources.filter { decisionDomain.contains($0.source) }
         guard !domain.isEmpty else { return false }
         guard settlementProduced, progress.isDayQuotaReached else { return false }
         for input in domain {

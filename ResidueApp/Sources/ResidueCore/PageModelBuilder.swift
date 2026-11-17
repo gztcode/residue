@@ -222,9 +222,16 @@ var model = PageModel()
                 undetermined: entry.a == 0 && entry.b == 0 && entry.T != nil && entry.K == nil
             )
         }
+        // 判定域 = **本轮观察期开始快照内命中的来源**（契约：PRD v5.6 R9 / 架构 A1）。
+        // 载体判据：`snapshotTaken == true` ⇔ 本观察期已取快照 ⇔ `T != nil`
+        // （取快照时两者同写、结算不改、迁移同清 ⇒ 恒同步）。
+        let decisionDomain = DecisionDomain.members(
+            snapshotSources: Set(header.sources.filter { $0.snapshotTaken }.map { $0.source })
+        )
         let unmet = GateEvaluator.unmetItems(
             progress: progress,
             settlementProduced: settlementProduced,
+            decisionDomain: decisionDomain,
             sources: gateInputs
         )
         model.unmetNotice = .text(unmetNoticeText(unmet, progress: progress))
@@ -232,6 +239,7 @@ var model = PageModel()
         model.canLightUp = GateEvaluator.isQualified(
             progress: progress,
             settlementProduced: settlementProduced,
+            decisionDomain: decisionDomain,
             sources: gateInputs
         )
         model.autoDeleteEnabled = header.autoDeleteEnabled

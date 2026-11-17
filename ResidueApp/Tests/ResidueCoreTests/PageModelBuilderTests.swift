@@ -232,6 +232,50 @@ final class PageModelBuilderTests: XCTestCase {
         XCTAssertFalse(m.canLightUp, "空判定域不得判为达标")
     }
 
+    // MARK: - 判定域口径（CR-032）：**本轮快照内命中**
+
+    /// **域内来源本轮无快照 → 不得阻断点亮**。
+    ///
+    /// 契约：判定域 = **本轮观察期开始快照内命中**的来源（PRD v5.6 架构 A1 / R9）——
+    /// 「入域」与「本轮有快照」分列，新入域来源不阻断点亮。
+    ///
+    /// 旧口径按枚举取域（`uv` / `npm` 恒在域内）⇒ 无快照的 `npm`（`T = nil`）
+    /// 在 `isQualified` 的 `guard let t = input.total` 处**直接判死**
+    /// ⇒ **只用 `uv` 的用户永远点不亮**。
+    func testDomainSourceWithoutSnapshotDoesNotBlockLightUp() {
+        let entries = [
+            SourceHeaderEntry(source: .uvCache, snapshotTaken: true,
+                              T: 30, K: 30, J: 0, H: 30, a: 0, b: 5, slotCount: 30, doneCount: 0),
+            // 本轮无快照 ⇒ `T` / `K` 皆 nil；`a` / `b` 皆 0（从未参与任何判定）
+            SourceHeaderEntry(source: .npmNpx, snapshotTaken: false,
+                              T: nil, K: nil, J: nil, H: nil, a: 0, b: 0, slotCount: 0, doneCount: 0),
+        ]
+        let input = PageModelBuilder.Input(contents: makeContents(makeHeader(entries: entries)))
+        let m = PageModelBuilder.build(input)
+
+        XCTAssertTrue(m.canLightUp, "域内但本轮无快照的来源不得阻断点亮")
+        XCTAssertFalse(
+            m.unmetNotice?.displayText.contains(Source.npmNpx.displayName) ?? false,
+            "无快照的来源从未参与判定，不得出现在未达项里（实为「\(m.unmetNotice?.displayText ?? "nil")」）"
+        )
+    }
+
+    /// **域内来源有快照但未结算 → 仍不得点亮**（口径修复不得把门槛放松成「只看 `uv`」）。
+    ///
+    /// `uv` 已取快照（`T = 30`）但**未结算**（`K = nil`）⇒ 不达标。
+    func testDomainSourceWithSnapshotButNotSettledStillBlocks() {
+        let entries = [
+            SourceHeaderEntry(source: .uvCache, snapshotTaken: true,
+                              T: 30, K: nil, J: nil, H: 30, a: 0, b: 0, slotCount: 30, doneCount: 0),
+            SourceHeaderEntry(source: .npmNpx, snapshotTaken: false,
+                              T: nil, K: nil, J: nil, H: nil, a: 0, b: 0, slotCount: 0, doneCount: 0),
+        ]
+        let input = PageModelBuilder.Input(contents: makeContents(makeHeader(entries: entries)))
+        let m = PageModelBuilder.build(input)
+
+        XCTAssertFalse(m.canLightUp, "有快照但未结算 → 不得判为达标")
+    }
+
     // MARK: - ⑤ 矩阵：报告未产出时的取值
 
     /// **报告未产出**：③ 取「本轮未结算」、⑦ 取「本轮未结算」，

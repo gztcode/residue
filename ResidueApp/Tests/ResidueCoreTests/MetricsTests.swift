@@ -218,6 +218,7 @@ final class MetricsTests: XCTestCase {
         let items = GateEvaluator.unmetItems(
             progress: ObservationProgress(round: 1, startAnchor: Date(), countedDays: 9),
             settlementProduced: false,
+            decisionDomain: [.uvCache],
             sources: [input(.uvCache, a: 0, b: 10)]
         )
         XCTAssertEqual(items.global, .observationUnfinished)
@@ -229,6 +230,7 @@ final class MetricsTests: XCTestCase {
         let items = GateEvaluator.unmetItems(
             progress: ObservationProgress(round: 1, startAnchor: Date(), countedDays: 14),
             settlementProduced: true,
+            decisionDomain: [.uvCache],
             sources: [input(.uvCache, k: 4, t: 5, a: 0, b: 100)]
         )
         XCTAssertNil(items.global)
@@ -241,6 +243,7 @@ final class MetricsTests: XCTestCase {
         let items = GateEvaluator.unmetItems(
             progress: ObservationProgress(round: 1, startAnchor: Date(), countedDays: 14),
             settlementProduced: true,
+            decisionDomain: [.uvCache],
             sources: [input(.uvCache, k: 5, t: 5, a: 1, b: 100)]
         )
         XCTAssertEqual(items.bySource.count, 1)
@@ -256,6 +259,7 @@ final class MetricsTests: XCTestCase {
         let items = GateEvaluator.unmetItems(
             progress: ObservationProgress(round: 1, startAnchor: Date(), countedDays: 14),
             settlementProduced: true,
+            decisionDomain: [.uvCache],
             sources: [input(.uvCache, k: 5, t: 5, undetermined: true)]
         )
         XCTAssertEqual(items.bySource.count, 1)
@@ -270,6 +274,7 @@ final class MetricsTests: XCTestCase {
         let items = GateEvaluator.unmetItems(
             progress: ObservationProgress(round: 1, startAnchor: Date(), countedDays: 14),
             settlementProduced: true,
+            decisionDomain: [.uvCache],
             sources: [input(.uvCache, k: 4, t: 5, a: 1, b: 100)]
         )
         XCTAssertEqual(items.bySource.count, 2, "必须两项两行、不得合并")
@@ -290,6 +295,7 @@ final class MetricsTests: XCTestCase {
         let items = GateEvaluator.unmetItems(
             progress: ObservationProgress(round: 1, startAnchor: Date(), countedDays: 14),
             settlementProduced: true,
+            decisionDomain: [.uvCache],
             sources: [input(.uvCache, k: 4, t: 5, undetermined: true)]
         )
         XCTAssertEqual(items.bySource.count, 2, "样本不足 + L0 未判定 必须两项两行")
@@ -350,21 +356,25 @@ final class MetricsTests: XCTestCase {
         // 达标
         XCTAssertTrue(GateEvaluator.isQualified(
             progress: p, settlementProduced: true,
+            decisionDomain: [.uvCache],
             sources: [input(.uvCache, k: 30, t: 30, a: 0, b: 128)]
         ))
         // a ≠ 0 → 不达标
         XCTAssertFalse(GateEvaluator.isQualified(
             progress: p, settlementProduced: true,
+            decisionDomain: [.uvCache],
             sources: [input(.uvCache, k: 30, t: 30, a: 1, b: 128)]
         ))
         // K < H → 不达标
         XCTAssertFalse(GateEvaluator.isQualified(
             progress: p, settlementProduced: true,
+            decisionDomain: [.uvCache],
             sources: [input(.uvCache, k: 29, t: 30, a: 0, b: 128)]
         ))
         // 未取得 FDA → 不达标
         XCTAssertFalse(GateEvaluator.isQualified(
             progress: p, settlementProduced: true,
+            decisionDomain: [.uvCache],
             sources: [input(.uvCache, k: 30, t: 30, undetermined: true)]
         ))
     }
@@ -374,8 +384,66 @@ final class MetricsTests: XCTestCase {
         XCTAssertFalse(GateEvaluator.isQualified(
             progress: ObservationProgress(round: 1, startAnchor: Date(), countedDays: 14),
             settlementProduced: true,
+            decisionDomain: DecisionDomain.members(snapshotSources: [.pipxRun]),
             sources: [input(.pipxRun, k: 5, t: 5, a: 0, b: 0)]
         ))
+    }
+
+    // MARK: - 判定域口径（CR-032）：**本轮快照内命中**
+
+    /// 域内来源**本轮无快照**（`T = null`）⇒ 不阻断点亮。
+    ///
+    /// 现状（枚举口径）会把该来源一并纳入逐来源判定，`guard let t = input.total`
+    /// 处直接判死 ⇒ 只有 `uv` 缓存的用户**永远点不亮**。
+    func testDomainSourceWithoutSnapshotDoesNotBlockLightUp() {
+        let qualified = GateEvaluator.isQualified(
+            progress: ObservationProgress(round: 1, startAnchor: Date(), countedDays: 14),
+            settlementProduced: true,
+            decisionDomain: DecisionDomain.members(snapshotSources: [.uvCache]),
+            sources: [
+                input(.uvCache, k: 30, t: 30, a: 0, b: 128),
+                // npm 本轮无快照 ⇒ `T` / `K` 皆 nil；`a` / `b` 皆 0（从未参与任何判定）
+                input(.npmNpx, a: 0, b: 0)
+            ]
+        )
+        XCTAssertTrue(qualified, "域内但本轮无快照的来源不得阻断点亮")
+    }
+
+    /// 域内来源**本轮无快照** ⇒ 不产任何未达项。
+    ///
+    /// 现状会把它算成「L0 误判」（`a = 0` 且 `b = 0` ⇒ 落入 `b == 0` 分支）——
+    /// 把「没判定」说成「判错了」，违反不变量③。
+    func testDomainSourceWithoutSnapshotProducesNoUnmetItem() {
+        let items = GateEvaluator.unmetItems(
+            progress: ObservationProgress(round: 1, startAnchor: Date(), countedDays: 14),
+            settlementProduced: true,
+            decisionDomain: DecisionDomain.members(snapshotSources: [.uvCache]),
+            sources: [
+                input(.uvCache, k: 30, t: 30, a: 0, b: 128),
+                input(.npmNpx, a: 0, b: 0)
+            ]
+        )
+        XCTAssertNil(items.global)
+        XCTAssertTrue(
+            items.bySource.isEmpty,
+            "无快照的来源从未参与判定，不得出现在未达项里（实为 \(items.bySource)）"
+        )
+    }
+
+    /// 口径不得被放松成「只看有快照的那一个来源」：
+    /// 域内来源**有快照但未结算** ⇒ 仍然不得判为达标。
+    func testDomainSourceWithSnapshotButNotSettledStillBlocks() {
+        let qualified = GateEvaluator.isQualified(
+            progress: ObservationProgress(round: 1, startAnchor: Date(), countedDays: 14),
+            settlementProduced: true,
+            decisionDomain: DecisionDomain.members(snapshotSources: [.uvCache]),
+            sources: [
+                // 有快照（`T` 非空）但未结算（`K` 为 nil）⇒ 未判定
+                input(.uvCache, t: 30, undetermined: true),
+                input(.npmNpx, a: 0, b: 0)
+            ]
+        )
+        XCTAssertFalse(qualified, "有快照但未结算 → 不得判为达标")
     }
 
     // MARK: - M6 留存
