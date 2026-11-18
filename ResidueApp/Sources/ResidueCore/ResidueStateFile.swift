@@ -182,6 +182,50 @@ public struct SourcePayload: Sendable, Equatable {
     }
 }
 
+extension SourcePayload {
+    /// 轮次切换时清本轮快照成员集合（**不动 `a` 的三项载体**）。
+    ///
+    /// `bitmap`（`F`）/ `countedDoneSlots`（`C_done`）/ `slots`（位槽占用表）**必须保留** ——
+    /// 它们是 `a` 的载体，保留 `a` 就必须保留它们（PRD v5.6 :68 / :71〔R7〕）。
+    public mutating func clearSnapshotMembers() {
+        snapshotMembers = []
+    }
+}
+
+/// 上一轮的结算记录（**开轮时写入，覆盖式单槽**）。
+///
+/// ## 为什么必须落盘
+/// 开轮时本轮的 `T` / `K` 被清零（下一轮重新取快照、重新结算），
+/// 若不留存，⑤ 页的「上一轮」行就没有可显示的结算值（PRD v5.6 :69 ③）。
+///
+/// ## 为什么是单槽而不是按来源留档
+/// 契约只要求**一行**（DAC-50（修订）四要素、TC-045 ③），
+/// 且「直到下一轮开轮时才由本轮结算值替换」（PRD :69 ③）⇒ 单槽覆盖即可。
+public struct PreviousRoundRecord: Codable, Sendable, Equatable {
+    /// 被结算的那一轮的轮次号（显示为「第 `<N>` 轮」）。
+    public var round: Int
+
+    /// 触发开轮的来源（**只供审计，不显示**）。
+    public var source: Source
+
+    /// 样本量 `K`（该来源本轮的归因命中数）。
+    public var sample: Int
+
+    /// 快照总量 `T`（该来源本轮的快照成员数）。
+    public var total: Int
+
+    /// 冻结时刻 = 该来源完成结算的时刻。
+    public var settledAt: Date
+
+    public init(round: Int, source: Source, sample: Int, total: Int, settledAt: Date) {
+        self.round = round
+        self.source = source
+        self.sample = sample
+        self.total = total
+        self.settledAt = settledAt
+    }
+}
+
 /// 载体文件头（可读 JSON，供审计）。
 public struct StateHeader: Codable, Sendable, Equatable {
     public var schemaVersion: Int
@@ -199,6 +243,9 @@ public struct StateHeader: Codable, Sendable, Equatable {
     /// 结算状态。
     public var settlement: SettlementHeader
 
+    /// 上一轮结算记录（**单槽**；无上一轮 = `nil` ⇒ 首轮不显示「上一轮」行）。
+    public var previousRound: PreviousRoundRecord?
+
     /// 各段的字节数（供审计；不参与加载校验）。
     public var bytes: ByteCounts
 
@@ -213,6 +260,7 @@ public struct StateHeader: Codable, Sendable, Equatable {
         lastScanAt: Date? = nil,
         sources: [SourceHeaderEntry] = [],
         settlement: SettlementHeader = SettlementHeader(),
+        previousRound: PreviousRoundRecord? = nil,
         bytes: ByteCounts = ByteCounts()
     ) {
         self.schemaVersion = schemaVersion
@@ -225,6 +273,7 @@ public struct StateHeader: Codable, Sendable, Equatable {
         self.lastScanAt = lastScanAt
         self.sources = sources
         self.settlement = settlement
+        self.previousRound = previousRound
         self.bytes = bytes
     }
 }
@@ -282,6 +331,58 @@ extension StateHeader {
             sources[index].settlementDate = nil
             sources[index].unattributableCount = nil
             sources[index].lastJudgmentAt = nil
+        }
+    }
+
+    /// 轮次切换（**未达标自动开下一轮**）——清本轮派生量，**保留 `a`**。
+    ///
+    /// ## 与 `resetObservationCredentials()` 的区别（**不可复用**）
+    /// 那条是「应用版本变更」用的，**会清 `a`**（M4：`a` 只在应用版本变更时清零）；
+    /// 本条是「轮次切换」用的，**必须保留 `a`**（PRD v5.6 :68 / :71〔R7〕/ G-3）。
+    ///
+    /// ## 清 / 不清对照表
+    ///
+    /// | 字段 | 处理 | 依据 |
+    /// |---|---|---|
+    /// | `round` | **+1** | PRD :110「开轮时归零（并轮次 +1）」 |
+    /// | `countedDays` | 归零 | PRD :68「计时器归零（本轮计数日归零）」 |
+    /// | `roundStartAnchor` | 清空 | PRD :62〔R4〕起算点 = 新轮首次成功扫描完成时刻 |
+    /// | `settlement`（结算凭证） | 清零 | PRD :110「结算凭证随 `K`/`J` 一并清零」 |
+    /// | 每来源 `snapshotTaken` | 清 false | 新轮要重新取快照（PRD :68「重新取快照」） |
+    /// | 每来源 `T` / `H` | 清 nil | `H` 随新 `T` 重算（PRD :68 / :110⑦） |
+    /// | 每来源 `K` / `J` | 清 nil | 新轮要重新结算 |
+    /// | 每来源 `snapshotDate` / `settlementDate` / `unattributableCount` | 清 nil | 上一轮的时刻与条数不适用于新轮 |
+    /// | 每来源 `b` | 归零 | PRD :68「计时器归零」+ R2 :1394「`b` 按来源累加…轮次切换时归零」 |
+    /// | 每来源 `a` / `slotCount` / `doneCount` | **保留** | PRD :68 / :71〔R7〕「保留 L0 误判计数 `a`」（S2「错 1 次永久」） |
+    /// | 每来源 `lastJudgmentAt` | **保留** | 判定记录随 `a` 一并保留 ⇒ 其时刻仍然成立 |
+    /// | `appVersion` / `autoDeleteEnabled` / `countedDaysCap` | **保留** | PRD :110⑧「用户设置类字段不清零」 |
+    /// | `lastScanAt` | **保留** | 本次扫描确实发生过 |
+    /// | `previousRound` | **写入新记录（覆盖）** | PRD :69 ③「直到下一轮开轮时才由本轮结算值替换」 |
+    public mutating func beginNextRound(previous: PreviousRoundRecord) {
+        var progress = ObservationProgress(
+            round: round,
+            startAnchor: roundStartAnchor,
+            countedDays: countedDays
+        )
+        progress.beginNextRound()
+        round = progress.round
+        roundStartAnchor = progress.startAnchor
+        countedDays = progress.countedDays
+
+        settlement = SettlementHeader()
+        self.previousRound = previous
+
+        for index in sources.indices {
+            sources[index].snapshotTaken = false
+            sources[index].T = nil
+            sources[index].H = nil
+            sources[index].K = nil
+            sources[index].J = nil
+            sources[index].b = 0
+            sources[index].snapshotDate = nil
+            sources[index].settlementDate = nil
+            sources[index].unattributableCount = nil
+            // `a` / `slotCount` / `doneCount` / `lastJudgmentAt` —— 保留
         }
     }
 

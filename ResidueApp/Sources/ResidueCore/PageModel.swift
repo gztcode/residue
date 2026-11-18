@@ -258,7 +258,7 @@ public struct PageModel: Sendable {
     public var reportRows: [ReportRow] = []
     /// ⑤ 页页级状态。
     public var pageLevelSlot: SemanticSlot?
-    /// ⑤ 页「上一轮」行（**仅轮次 ≥ 2 时非 nil**）。
+    /// ⑤ 页「上一轮」行（**存在上一轮结算记录时非 nil**）。
     public var previousRoundSlot: SemanticSlot?
     /// ⑤ 页：报告是否已产出（未产出 → 结论列取「本轮未结算」）。
     public var reportProduced: Bool = false

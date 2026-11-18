@@ -234,7 +234,9 @@ var model = PageModel()
             decisionDomain: decisionDomain,
             sources: gateInputs
         )
-        model.unmetNotice = .text(unmetNoticeText(unmet, progress: progress))
+        model.unmetNotice = .text(
+            unmetNoticeText(unmet, progress: progress, previous: header.previousRound)
+        )
         model.remainingDays = .duration(days: progress.remainingDays)
         model.canLightUp = GateEvaluator.isQualified(
             progress: progress,
@@ -358,10 +360,13 @@ var model = PageModel()
                     : (unmetReason(unmet) ?? L.pick("未达标", "Gate not met"))
             )
         )
-        // 「上一轮」行**仅轮次 ≥ 2 时显示**（首轮不显示，不是显示「—」）
-        model.previousRoundSlot = header.round >= 2
-            ? .text(UICopy.previousRound(round: header.round))
-            : nil
+        // 「上一轮」行**在存在上一轮结算记录时显示**（首轮不显示，不是显示「—」）。
+        //
+        // 判据是「有记录」而不是「轮次 ≥ 2」：轮次 ≥ 2 但无记录时，
+        // 那行会变成一个没有数据的壳（比不显示更糟）。
+        model.previousRoundSlot = header.previousRound.map { record in
+            .text(UICopy.previousRoundSettlement(record))
+        }
 
         // ---------- ⑦ 举证链八字段（AC-18） ----------
         // V4 的 8 个顶层字段；**没有值时显示「不适用 + 原因」，不显示空白**
@@ -433,16 +438,19 @@ var model = PageModel()
     ///
     /// 优先级：全局项（观察期未满）> 来源项（样本不足 / L0 未判定）——
     /// 与 AC-08 组 A 的「全局项至多一项」一致。
-    private static func unmetNoticeText(_ unmet: UnmetItems, progress: ObservationProgress) -> String {
+    private static func unmetNoticeText(
+        _ unmet: UnmetItems,
+        progress: ObservationProgress,
+        previous: PreviousRoundRecord? = nil
+    ) -> String {
         if unmet.global != nil {
-            if progress.isDayQuotaReached {
-                // 计数日已满但报告未产出 —— M1 第二串
-                return UICopy.awaitingSettlementScan(round: progress.round)
-            }
-            // 计数日未满 —— M1 第一串
-            return UICopy.observationInProgress(
+            // **只调 Core 的 M1 唯一实现**：两串的选择只留一处
+            // （这里再拼一遍 ⇒ 多语言后两处译文必然分叉）。
+            // 判据互补：`isDayQuotaReached` ⇔ `countedDays >= 14`。
+            return UnmetGlobalItem.text(
                 round: progress.round,
-                observed: progress.countedDays
+                countedDays: progress.countedDays,
+                previous: previous
             )
         }
         if let first = unmet.bySource.first {
@@ -541,7 +549,7 @@ var model = PageModel()
         } else if !produced {
             conclusionSlot = .unavailable(reason: UICopy.notSettledThisRound)
         } else if let k = entry.K, let t = entry.T {
-            let qualified = k >= Threshold.h(forTotal: t) && entry.a == 0 && entry.b >= 1
+            let qualified = !SampleSufficiency.isInsufficient(k: k, t: t) && entry.a == 0 && entry.b >= 1
             conclusionSlot = .text(qualified ? L.pick("达标", "Qualified") : L.pick("未达标", "Not qualified"))
         } else {
             conclusionSlot = .unavailable(reason: UICopy.sourceNotSettled)

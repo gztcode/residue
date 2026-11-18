@@ -150,18 +150,73 @@ final class SemanticSlotTests: XCTestCase {
         )
     }
 
-    /// **「上一轮」行只在轮次 ≥ 2 时出现**，且是**前置数字式**（`第 N 轮 · …`）。
+    /// **M1 第一串 + 条件性后缀**（存在上一轮结算记录时）。
+    ///
+    /// 契约：PRD v5.6 :69 ① ——「第 2 轮 · 观察期 0/14 天（上一轮样本 27/30 未达标，已自动重开）」。
+    /// ⚠️ ③ 页括注的 `K`/`T` 用**无空格斜杠**（`11/12`），与 ⑤ 页行（有空格）不同。
+    func testObservationInProgressCopyAppendsPreviousRoundNote() {
+        let record = PreviousRoundRecord(
+            round: 1, source: .uvCache, sample: 11, total: 12,
+            settledAt: localDate(2023, 11, 14)
+        )
+        XCTAssertEqual(
+            UICopy.observationInProgress(round: 2, observed: 0, previous: record),
+            "第 2 轮 · 观察期 0/14 天（上一轮样本 11/12 未达标，已自动重开）"
+        )
+    }
+
+    /// **无上一轮记录时第一串逐字不变**（不得凭空多出括注）。
+    func testObservationInProgressCopyWithoutPreviousRoundIsUnchanged() {
+        XCTAssertEqual(
+            UICopy.observationInProgress(round: 2, observed: 5, previous: nil),
+            "第 2 轮 · 观察期 5/14 天"
+        )
+    }
+
+    /// **⑤ 页「上一轮」行的四要素**（DAC v2.0 :176 DAC-50（修订）：缺一即不通过）。
+    ///
+    /// 契约格式（PRD v5.6 :69 ③ / B1 TC-045 ③ / TC-054）：
+    /// `第 <N−1> 轮 · 样本 <K> / 总量 <T> · 未达标 · 冻结于 <YYYY-MM-DD>`
+    func testPreviousRoundSettlementCopyMatchesContractString() {
+        let record = PreviousRoundRecord(
+            round: 1, source: .uvCache, sample: 11, total: 12,
+            settledAt: localDate(2023, 11, 14)
+        )
+        XCTAssertEqual(
+            UICopy.previousRoundSettlement(record),
+            "第 1 轮 · 样本 11 / 总量 12 · 未达标 · 冻结于 2023-11-14"
+        )
+    }
+
+    /// **「上一轮」行是前置数字式**（`第 N 轮 · …`），且**四要素缺一即不通过**。
     ///
     /// 视觉基线 §五 跨页规则：轮次表述统一为前置数字式，**三处同构**
     /// （③ 页未达项 / ⑤ 页页级 / ⑤ 页上一轮行）。原写法「上一轮（第 1 轮）」
     /// 是括号式，三处不同构 → DAC-55 判不通过。
+    ///
+    /// 只写标签（「上一轮结算」）也不合格 —— DAC-50（修订）要求四要素齐全。
     func testPreviousRoundCopyIsPrefixNumeric() {
-        let copy = UICopy.previousRound(round: 2)
-        XCTAssertEqual(copy, "第 1 轮 · 上一轮结算")
+        let record = PreviousRoundRecord(
+            round: 1, source: .uvCache, sample: 11, total: 12,
+            settledAt: localDate(2023, 11, 14)
+        )
+        let copy = UICopy.previousRoundSettlement(record)
         XCTAssertTrue(copy.hasPrefix("第 1 轮 · "), "必须是前置数字式")
-        // 显示的轮次是**上一轮**（round - 1）
+        // 显示的轮次是**上一轮**（结算记录里的那一轮）
         XCTAssertTrue(copy.contains("第 1 轮"))
         XCTAssertFalse(copy.contains("（第 1 轮）"), "不得用括号式，三处必须同构")
+        // 四要素逐个点名
+        XCTAssertTrue(copy.contains("样本 11 / 总量 12"), "缺「样本 / 总量」")
+        XCTAssertTrue(copy.contains("未达标"), "缺「未达标」")
+        XCTAssertTrue(copy.contains("冻结于 2023-11-14"), "缺「冻结于 <日期>」")
+    }
+
+    /// **Core 侧日期原语**：`yyyy-MM-dd`（Core 内唯一样式串）。
+    func testDayTextUsesISODateShape() {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: "UTC")!
+        let date = cal.date(from: DateComponents(year: 2023, month: 11, day: 14))!
+        XCTAssertEqual(UICopy.dayText(date, calendar: cal), "2023-11-14")
     }
 
     /// **⑤ 页页级状态行也必须前置数字式**（三处同构的第二处）。
@@ -175,10 +230,14 @@ final class SemanticSlotTests: XCTestCase {
     ///
     /// 这是 DAC-55 的直接断言：三串都以 `第 N 轮 · ` 开头。
     func testThreeRoundCopiesAreIsomorphic() {
+        let record = PreviousRoundRecord(
+            round: 1, source: .uvCache, sample: 11, total: 12,
+            settledAt: localDate(2023, 11, 14)
+        )
         let three = [
             UICopy.observationInProgress(round: 2, observed: 5),
             UICopy.pageLevelVerdict(round: 2, reason: "x"),
-            UICopy.previousRound(round: 2),
+            UICopy.previousRoundSettlement(record),
         ]
         for s in three {
             XCTAssertTrue(
@@ -266,5 +325,19 @@ final class SemanticSlotTests: XCTestCase {
     func testReportMatrixContainsSampleOverTotalColumn() {
         let columns = ["来源", "判定域", "样本 / 总量", "门槛", "观察期", "L0 误判 · 检查", "结论"]
         XCTAssertTrue(columns.contains("样本 / 总量"))
+    }
+
+    // ========================================================================
+    // MARK: - 辅助
+    // ========================================================================
+
+    /// 造一个**本地日历日**的时刻。
+    ///
+    /// 用 `.current` 日历 ⇒ 断言与运行机器的时区无关：
+    /// 「当天零点」在哪个时区都是「当天」。
+    private func localDate(_ year: Int, _ month: Int, _ day: Int) -> Date {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = .current
+        return cal.date(from: DateComponents(year: year, month: month, day: day))!
     }
 }

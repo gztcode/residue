@@ -149,8 +149,18 @@ enum WiringSelfCheck {
         //    路径不命中 ⇒ 候选数为 0 ⇒ 自检测的其实是「空目录」，不是结算链。
         let cr031UV = cr031Root.appendingPathComponent("fakehome/.cache/uv")
         try? FileManager.default.createDirectory(at: cr031UV, withIntermediateDirectories: true)
-        try? Data(repeating: 0x51, count: 4096).write(to: cr031UV.appendingPathComponent("blob-a"))
-        try? Data(repeating: 0x52, count: 8192).write(to: cr031UV.appendingPathComponent("blob-b"))
+        // ⚠️ **候选数取 31 而不是 2**（CR-033 引入的新约束）：
+        //    结算后若「未达标」（`K < H`）⇒ **自动开下一轮** ⇒ 本轮 `T` / `K` / `J` / `b`
+        //    **在同一次扫描里被清零** ⇒ 结算结果**永远看不到**（载体上没有中间态）。
+        //    而 `H = min(30, T)` ⇒ 「达标（`K ≥ H`）且 `J > 0`（有失联）」的**最小**构造是
+        //    `T = 31`（⇒ `H = 30`）、`K = 30`、`J = 1` —— 故取 31 条候选、次轮删 1 条。
+        //    这样本段既覆盖「结算写进载体」，又覆盖「失联 `J > 0`」，
+        //    还顺带覆盖 `H` 的封顶分支（`T ≥ 30 ⇒ H = 30`）。
+        for index in 0..<31 {
+            try? Data(repeating: 0x51, count: 4096).write(
+                to: cr031UV.appendingPathComponent(String(format: "blob-%02d", index))
+            )
+        }
 
         let cr031StateFile = StateFile(directory: cr031Root.appendingPathComponent("state"))
         let cr031Model = AppModel(
@@ -181,14 +191,14 @@ enum WiringSelfCheck {
         // ---- ① 首轮：只取快照，不结算 ----
         if let c = cr031StateFile.load().contents {
             let uv = c.header.sources.first { $0.source == .uvCache }
-            check(uv?.T == 2, "首轮 full 扫描取到快照：T = 2（实为 \(uv?.T ?? -1)）")
-            check(uv?.H == 2, "H = min(30, T) = 2（实为 \(uv?.H ?? -1)）")
+            check(uv?.T == 31, "首轮 full 扫描取到快照：T = 31（实为 \(uv?.T ?? -1)）")
+            check(uv?.H == 30, "H = min(30, T) = 30（阈值封顶分支；实为 \(uv?.H ?? -1)）")
             check(uv?.K == nil, "首轮**不结算**：K 仍为 null（取快照与结算互斥）")
             check(uv?.J == nil, "首轮**不结算**：J 仍为 null")
             check(c.header.settlement.producedAt == nil, "首轮无结算凭证：settlement.producedAt 仍为 null")
             check(c.header.settlement.reportId == nil, "首轮无结算凭证：reportId 仍为 null")
-            check(c.payloads[.uvCache]?.snapshotMembers.count == 2,
-                  "快照成员集合已落盘（2 条，实为 \(c.payloads[.uvCache]?.snapshotMembers.count ?? -1)）")
+            check(c.payloads[.uvCache]?.snapshotMembers.count == 31,
+                  "快照成员集合已落盘（31 条，实为 \(c.payloads[.uvCache]?.snapshotMembers.count ?? -1)）")
             check((c.payloads[.uvCache]?.bitmap.count ?? 0) > 0,
                   "F 位图已落盘（\(c.payloads[.uvCache]?.bitmap.count ?? 0) B）—— `a` 的写入路径真的走了")
             check(c.header.countedDays == 1, "计数日推进到 1（实为 \(c.header.countedDays)）")
@@ -209,26 +219,31 @@ enum WiringSelfCheck {
             let carrierCount = c.payloads.values.reduce(0) { $0 + $1.fSetBitCount }
             // ⚠️ **不能只断言「两边相等」** —— 载体为 0 位时 `0 == 0` **假绿**
             //    （这正是缺陷本身的样子：诊断 0 / 载体 0）。
-            //    所以必须钉住**绝对值**：首轮 2 条候选全判「无活引用」⇒ `F` 有 2 位。
+            //    所以必须钉住**绝对值**：首轮 31 条候选全判「无活引用」⇒ `F` 有 31 位。
             //
-            //    「判不出」不会走到这里：本段已有的 `b == 3` 断言要求
-            //    `!degraded`（降级时 `b` 不累计），且两条假候选是刚写的真实文件
+            //    「判不出」不会走到这里：本段已有的 `b == 61` 断言要求
+            //    `!degraded`（降级时 `b` 不累计），且这些假候选是刚写的真实文件
             //    ⇒ `lstat` 必然成功 ⇒ 判定必然落到 `noLiveReference`。
             check(
-                cr031Model.lastScanDiagnostics.fSetBits == carrierCount && carrierCount == 2,
+                cr031Model.lastScanDiagnostics.fSetBits == carrierCount && carrierCount == 31,
                 "取证字段 `fSetBits` 来自载体真实位图（诊断 \(cr031Model.lastScanDiagnostics.fSetBits) / 载体 \(carrierCount)）"
             )
         } else {
             check(false, "CR-031：首轮扫描后读不到载体内容（`fSetBits` 对账）")
         }
 
-        // ---- ② 删掉一条候选 ----
-        try? FileManager.default.removeItem(at: cr031UV.appendingPathComponent("blob-b"))
+        // ---- ② 删掉一条候选（`T = 31` ⇒ 次轮 `K = 30` / `J = 1`）----
+        try? FileManager.default.removeItem(at: cr031UV.appendingPathComponent("blob-30"))
 
         // ---- ③ 把观察期计数日推到 14（真实路径要 14 天）----
         if var c = cr031StateFile.load().contents {
             c.header.countedDays = ObservationProgress.requiredDays
-            try? cr031StateFile.save(header: c.header, payloads: c.payloads)
+            // 保存失败必须**显式报红**：静默吞掉会让后续断言读到旧状态 ⇒ 假绿。
+            do {
+                _ = try cr031StateFile.save(header: c.header, payloads: c.payloads)
+            } catch {
+                check(false, "CR-031：手工推进计数日时写回载体失败：\(error)")
+            }
         }
         cr031Model.loadAndProject()
 
@@ -237,20 +252,30 @@ enum WiringSelfCheck {
         // ---- ④ 次轮：结算 ----
         if let c = cr031StateFile.load().contents {
             let uv = c.header.sources.first { $0.source == .uvCache }
-            check(uv?.T == 2, "结算不改动 T（快照冻结，实为 \(uv?.T ?? -1)）")
-            check(uv?.K == 1, "K = 1（归因到 1 条，实为 \(uv?.K ?? -1)）")
-            check(uv?.J == 1, "J = T − K = 1（实为 \(uv?.J ?? -1)）")
+            check(uv?.T == 31, "结算不改动 T（快照冻结，实为 \(uv?.T ?? -1)）")
+            check(uv?.K == 30, "K = 30（归因到 30 条，实为 \(uv?.K ?? -1)）")
+            check(uv?.J == 1, "J = T − K = 1（失联 1 条；实为 \(uv?.J ?? -1)）")
             check((uv?.K ?? 0) + (uv?.J ?? 0) == (uv?.T ?? -1), "K + J == T（恒等式）")
             check(c.header.settlement.producedAt != nil, "结算凭证已写入：settlement.producedAt 非 null")
             check(c.header.settlement.reportId != nil, "结算凭证已写入：reportId 非 null")
             check(uv?.settlementDate != nil, "结算时刻已落盘（settlementDate 非 null）")
             check(uv?.unattributableCount == 0,
                   "「有 N 条无法归因」如实落盘（实为 \(String(describing: uv?.unattributableCount))）")
-            // `b`（M5）是**累计**判定次数：首轮 2 条 + 次轮 1 条 = 3。
-            // 覆盖写（每轮都写本轮数）⇒ 恒为 1 ⇒ 门槛项 `b ≥ 1` 仍过，
-            // 但「M5 累计」这条契约就没了 ⇒ 这里必须钉住 3。
-            check(uv?.b == 3, "b 是**累计**（2 + 1 = 3），不是覆盖（实为 \(uv?.b ?? -1)）")
+            // `b`（M5）是**累计**判定次数：首轮 31 条 + 次轮 30 条 = 61。
+            // 覆盖写（每轮都写本轮数）⇒ 恒为 30 ⇒ 门槛项 `b ≥ 1` 仍过，
+            // 但「M5 累计」这条契约就没了 ⇒ 这里必须钉住 61。
+            check(uv?.b == 61, "b 是**累计**（31 + 30 = 61），不是覆盖（实为 \(uv?.b ?? -1)）")
             check(uv?.a == 0, "a = 0（无人持有 ⇒ 无误判，实为 \(uv?.a ?? -1)）")
+            // —— CR-033：**达标 ⇒ 不开轮**（`K = 30 ≥ H = 30`）⇒ 结算值留在载体上 ——
+            //
+            // 这三条不是多余的断言，而是**本段能看见结算值的前提**：
+            // 未达标 ⇒ 自动开下一轮 ⇒ `T` / `K` / `J` / `b` 在同一次扫描里被清零
+            // ⇒ 上面几条结算断言全部读到 `nil`（此时「读到 nil」既可能是
+            // 「结算没写」也可能是「写完又被开轮清掉」⇒ **无法区分** = 假绿）。
+            check(c.header.round == 1, "达标（K ≥ H）⇒ **不开轮**：轮次仍为 1（实为 \(c.header.round)）")
+            check(c.header.previousRound == nil, "首轮无「上一轮」记录（previousRound 仍为 null）")
+            check(c.header.countedDays == ObservationProgress.requiredDays,
+                  "不开轮 ⇒ 计数日停在 14（实为 \(c.header.countedDays)）")
         } else {
             check(false, "CR-031：次轮扫描后读不到载体内容")
         }
@@ -271,12 +296,12 @@ enum WiringSelfCheck {
                 try cr031Model.buildReportForExport(),
                 context: Redactor.Context.current()
             )
-            // 整行断言（T=2 / K=1 / J=1 / 其中无法归因=0 / H=2 / a=0 / b=3）
+            // 整行断言（T=31 / K=30 / J=1 / 其中无法归因=0 / H=30 / a=0 / b=61）
             // ——顺带钉住列序，多插一列或少插一列都会红。
             //
             // 来源名取 `Source.uvCache.rawValue`（= `uv_cache`）而不是手写字符串：
             // 手写就多出第二处可能漂移的名字。
-            let expectedRow = "| \(Source.uvCache.rawValue) | \(L.pick("在域", "In domain")) | 2 | 1 | 1 | 0 | 2 | 0 | 3 |"
+            let expectedRow = "| \(Source.uvCache.rawValue) | \(L.pick("在域", "In domain")) | 31 | 30 | 1 | 0 | 30 | 0 | 61 |"
             let actualRow = cr031Report
                 .split(separator: "\n")
                 .first { $0.hasPrefix("| \(Source.uvCache.rawValue) |") } ?? "（报告里没有 \(Source.uvCache.rawValue) 行）"
@@ -284,6 +309,119 @@ enum WiringSelfCheck {
                   "导出报告如实披露「其中无法归因」条数（CR-031 §五③）；实为：\(actualRow)")
         } catch {
             check(false, "CR-031 导出报告渲染失败：\(error)")
+        }
+
+        print("\n--- 4a3. CR-033 未达标自动开下一轮（轮次 +1 / 计时器归零 / 结算值清零 / `a` 保留）---")
+        // **为什么必须有这一段**：
+        // 「结算」与「开轮」是**同一次扫描**里的两件事（写回层 ④ 与 ⑦），
+        // 且「结算未达标 ⇒ 开轮」⇒ 载体上**只剩开轮后的态**（结算值已被清零）。
+        // ⇒ 「结算写进载体」（4a2）与「开轮后载体长什么样」（本段）
+        //    **必须分成两个场景验**，否则其中之一必然假绿：
+        //    4a2 用「达标」场景守结算，4a3 用「未达标」场景守开轮。
+        //
+        // ⚠️ 独立目录 + 独立 `AppModel`（不与 4a2 互相污染）。
+        let cr033Root = dir.appendingPathComponent("cr033")
+        // ⚠️ 路径**必须**含 `/.cache/uv/`（理由同 4a2：否则候选数为 0）。
+        let cr033UV = cr033Root.appendingPathComponent("fakehome/.cache/uv")
+        try? FileManager.default.createDirectory(at: cr033UV, withIntermediateDirectories: true)
+        try? Data(repeating: 0x61, count: 4096).write(to: cr033UV.appendingPathComponent("blob-a"))
+        try? Data(repeating: 0x62, count: 8192).write(to: cr033UV.appendingPathComponent("blob-b"))
+
+        let cr033StateFile = StateFile(directory: cr033Root.appendingPathComponent("state"))
+        let cr033Model = AppModel(
+            stateFile: cr033StateFile,
+            writer: RecordWriter(directory: cr033Root.appendingPathComponent("state/records"))
+        )
+        cr033Model.sourceRootsOverride = [
+            (Source.uvCache.rawValue, cr033UV.path),
+            (Source.npmNpx.rawValue, cr033Root.appendingPathComponent("nonexistent-npm").path),
+        ]
+
+        check(runFullScan(cr033Model), "CR-033：首轮 full 扫描完成")
+
+        // ---- ① 首轮：取快照（`T = 2` / `H = 2`），不结算 ----
+        if let c = cr033StateFile.load().contents {
+            let uv = c.header.sources.first { $0.source == .uvCache }
+            check(uv?.T == 2, "首轮取到快照：T = 2（实为 \(uv?.T ?? -1)）")
+            check(uv?.H == 2, "H = min(30, T) = 2（实为 \(uv?.H ?? -1)）")
+            check(c.header.round == 1, "首轮轮次 = 1（实为 \(c.header.round)）")
+            check(c.payloads[.uvCache]?.snapshotMembers.count == 2,
+                  "首轮快照成员 2 条（实为 \(c.payloads[.uvCache]?.snapshotMembers.count ?? -1)）")
+        } else {
+            check(false, "CR-033：首轮扫描后读不到载体内容")
+        }
+
+        // ---- ② 删掉一条候选 ⇒ 次轮 `K = 1 < H = 2` ⇒ **未达标** ----
+        try? FileManager.default.removeItem(at: cr033UV.appendingPathComponent("blob-b"))
+
+        // ---- ③ 把观察期计数日推到 14，并把 `a` 置成 7 ----
+        //
+        // ⚠️ **为什么要手工置 `a = 7`**：
+        // 契约 PRD v5.6 :71〔CR-010 · R7〕要求「轮次切换**不清零** `a`」。
+        // 真文件系统上**造不出 `a ≠ 0`**（误判要求候选「先判干净、后被进程持有」，
+        // 而本自检的候选全是自己刚写的普通文件 ⇒ `a` 恒 0）。
+        // 若让 `a` 停在 0，「开轮清零 `a`」与「开轮保留 `a`」**观察不到区别**
+        // ⇒ 该契约在这一层形同虚设。故直接改载体（与上面手工推 `countedDays` 同法）。
+        //
+        // 顺带说明：`a` **只活在文件头**（载体 `SourcePayload` 里没有这一项），
+        // 所以「开轮时把 `a` 清零」这个缺陷**只可能发生在文件头这一侧** ——
+        // Core 单测（不经载体编解码）抓不到，**只有本自检能抓到**。
+        if var c = cr033StateFile.load().contents {
+            c.header.countedDays = ObservationProgress.requiredDays
+            for index in c.header.sources.indices where c.header.sources[index].source == .uvCache {
+                c.header.sources[index].a = 7
+            }
+            // 保存失败必须**显式报红**：静默吞掉会让后续断言读到旧状态 ⇒ 假绿。
+            do {
+                _ = try cr033StateFile.save(header: c.header, payloads: c.payloads)
+            } catch {
+                check(false, "CR-033：手工置 `a` 与推进计数日时写回载体失败：\(error)")
+            }
+        }
+        cr033Model.loadAndProject()
+
+        check(runFullScan(cr033Model), "CR-033：次轮 full 扫描完成（未达标 ⇒ 应自动开下一轮）")
+
+        // ---- ④ 开轮后的载体态 ----
+        if let c = cr033StateFile.load().contents {
+            let uv = c.header.sources.first { $0.source == .uvCache }
+            // —— 轮次 +1、计时器归零、起算点清空（PRD v5.6 :68）——
+            check(c.header.round == 2, "未达标 ⇒ 自动开下一轮：轮次 1 → 2（实为 \(c.header.round)）")
+            check(c.header.countedDays == 0, "开轮 ⇒ 本轮计数日归零（实为 \(c.header.countedDays)）")
+            check(c.header.roundStartAnchor == nil, "开轮 ⇒ 起算点清空（新轮由它自己的首次成功扫描锚定）")
+            // —— 本轮派生量清零（下一轮重新取快照、重新结算）——
+            check(uv?.T == nil, "开轮 ⇒ `T` 清零（下一轮重新取快照；实为 \(String(describing: uv?.T))）")
+            check(uv?.H == nil, "开轮 ⇒ `H` 清零（随新 `T` 重算；实为 \(String(describing: uv?.H))）")
+            check(uv?.K == nil, "开轮 ⇒ `K` 清零（结算值改由「上一轮」记录承载；实为 \(String(describing: uv?.K))）")
+            check(uv?.J == nil, "开轮 ⇒ `J` 清零（实为 \(String(describing: uv?.J))）")
+            check(uv?.b == 0, "开轮 ⇒ `b` 清零（下一轮重新累计；实为 \(uv?.b ?? -1)）")
+            check(uv?.snapshotTaken == false, "开轮时**不**取快照（snapshotTaken 仍为 false）")
+            check(uv?.settlementDate == nil, "开轮 ⇒ 结算时刻清空")
+            check(uv?.unattributableCount == nil, "开轮 ⇒ 无法归因条数清空")
+            check(c.header.settlement.producedAt == nil, "开轮 ⇒ 结算凭证清零（producedAt）")
+            check(c.header.settlement.reportId == nil, "开轮 ⇒ 结算凭证清零（reportId）")
+            check(c.payloads[.uvCache]?.snapshotMembers.isEmpty == true,
+                  "开轮 ⇒ 快照成员集合清空（实为 \(c.payloads[.uvCache]?.snapshotMembers.count ?? -1)）")
+            // —— `a` 及其载体**保留**（PRD v5.6 :71〔R7〕）——
+            check(uv?.a == 7, "开轮**不清零** `a`（实为 \(uv?.a ?? -1)）")
+            // 位槽占用表保留：`slotCount` 是**稠密递增、不回收**的
+            // ⇒ 若开轮把它清了，次轮只会给 blob-a 分配 1 个槽（= 1 ≠ 2）⇒ 可区分。
+            check(uv?.slotCount == 2, "`a` 的载体（位槽占用表）保留：slotCount = 2（实为 \(uv?.slotCount ?? -1)）")
+            // `F` 位图保留：若开轮清了它，次轮只会重新置上 blob-a 的那一位（= 1 ≠ 2）⇒ 可区分。
+            check((c.payloads[.uvCache]?.fSetBitCount ?? 0) == 2,
+                  "`a` 的载体（`F` 位图）保留：置位数 = 2（实为 \(c.payloads[.uvCache]?.fSetBitCount ?? -1)）")
+            check(uv?.lastJudgmentAt != nil, "L0 判定时刻保留（实为 \(String(describing: uv?.lastJudgmentAt))）")
+            // —— 「上一轮」记录：承载被结算那一轮的结论（PRD v5.6 :69 ③）——
+            check(c.header.previousRound?.round == 1,
+                  "「上一轮」记录轮次 = 1（实为 \(String(describing: c.header.previousRound?.round))）")
+            check(c.header.previousRound?.source == .uvCache, "「上一轮」记录来源 = uv_cache")
+            check(c.header.previousRound?.sample == 1,
+                  "「上一轮」记录样本 K = 1（结算值落盘的见证；实为 \(String(describing: c.header.previousRound?.sample))）")
+            check(c.header.previousRound?.total == 2,
+                  "「上一轮」记录总量 T = 2（实为 \(String(describing: c.header.previousRound?.total))）")
+            check(c.header.previousRound?.settledAt != nil, "「上一轮」记录冻结时刻非空")
+        } else {
+            check(false, "CR-033：次轮扫描后读不到载体内容")
         }
 
         print("\n--- 4b. 导出脱敏报告（AC-13 G-5）---")

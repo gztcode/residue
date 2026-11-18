@@ -243,6 +243,43 @@ public enum ObservationWriteback {
         }
         header.lastScanAt = input.now
 
+        // ⑦ 未达标自动开下一轮（PRD v5.6 :68 · 〔CR-010 · R6〕）
+        //
+        // **顺序铁律**：必须放在「⑤ 计数日推进」**之后**。
+        // 反过来（先开轮再推进）会把起算点重新锚到**结算当天**，
+        // 于是「结算扫描」被误算成新轮的第 1 计数日 —— 违反 PRD :62〔R4〕
+        // （新一轮的第 1 计数日 = 上一轮结束扫描完成后的**下一次**成功扫描）。
+        //
+        // **开轮时不取快照**（B1 TC-045 ⑤）：新轮的快照由它自己的首次成功扫描取。
+        //
+        // 触发判据只认「存在任一来源 `K < H`」（样本不足）；
+        // `a ≠ 0` **不单独触发**（PRD :68 G-3 / TC-046）。
+        if !settledSources.isEmpty {
+            // 判定域内按 `Source.allCases` 序**首个** `K < H` 的来源
+            // （`header.sources` 的顺序由上面的重排保证 = `Source.allCases` 序）
+            let failing = header.sources.first { row in
+                guard let k = row.K, let t = row.T else { return false }
+                return SampleSufficiency.isInsufficient(k: k, t: t)
+            }
+            if let failing, let k = failing.K, let t = failing.T {
+                let record = PreviousRoundRecord(
+                    round: header.round,          // **开轮前**的轮次 = 被结算的那一轮
+                    source: failing.source,
+                    sample: k,
+                    total: t,
+                    settledAt: failing.settlementDate ?? input.now
+                )
+                header.beginNextRound(previous: record)
+                // 载荷侧：清本轮快照成员集合
+                // （`F` / `C_done` / 位槽占用表**保留** —— 它们是 `a` 的载体）
+                for source in Source.allCases {
+                    guard var payload = payloads[source] else { continue }
+                    payload.clearSnapshotMembers()
+                    payloads[source] = payload
+                }
+            }
+        }
+
         return Outcome(
             header: header,
             payloads: payloads,

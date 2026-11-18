@@ -287,6 +287,88 @@ final class StateFileTests: XCTestCase {
         XCTAssertNotEqual(loaded?.header.sources[0].T, 0)
     }
 
+    // MARK: - 上一轮结算记录（CR-033 · 载体往返）
+
+    /// **旧载体（无 `previousRound` 键）必须仍能读** —— 解出来是 `nil`，**不是解码失败**。
+    ///
+    /// ## 为什么这条必须钉死
+    /// CR-033 之前写出的载体里**根本没有这个键**。往 `StateHeader` 加字段，
+    /// 若解码路径不容忍缺键 ⇒ **升级即判 `E-304`（载体损坏）** = 用户既有观察期被废。
+    ///
+    /// ## 「旧载体」怎么造（不复制生产布局）
+    /// 用**生产编码器**写一个 `previousRound == nil` 的头：合成 `Codable` 对 `nil`
+    /// 可选属性用 `encodeIfPresent` ⇒ **不写该键** ⇒ 与 CR-033 之前写出的载体**同形**。
+    /// 下面另有断言把「载体里确实没这个键」钉死 —— 否则「无键」只是空话。
+    func testOldCarrierWithoutPreviousRoundKeyDecodesToNil() throws {
+        var header = makeHeader()
+        header.previousRound = nil
+
+        let store = StateFile(directory: tmpDir)
+        try store.save(header: header, payloads: makePayloads())
+
+        // 前置：载体里确实没有该键
+        let json = try headerJSONObject(at: store.fileURL)
+        XCTAssertNil(json["previousRound"], "旧载体里不得有这个键")
+
+        let result = store.load()
+        XCTAssertNil(result.error, "旧载体必须照常可读（不得判损坏）")
+        XCTAssertFalse(result.readOnly)
+        XCTAssertNil(
+            result.contents?.header.previousRound,
+            "无键 ⇒ nil（不是 0、不是解码失败）"
+        )
+    }
+
+    /// **新载体往返保真**：上一轮记录逐字段不变。
+    ///
+    /// ⑤ 页「上一轮」行的四要素（轮次 / `K` / `T` / 冻结日）全部来自这里
+    /// ⇒ 任一字段在载体里丢了或变了，界面上那行就会说错话。
+    ///
+    /// ⚠️ 本条只锁**编解码层**；「开轮时真的写进去了」由 `ObservationWritebackTests` 锁。
+    func testPreviousRoundSurvivesCarrierRoundTrip() throws {
+        var header = makeHeader()
+        header.previousRound = PreviousRoundRecord(
+            round: 1,
+            source: .uvCache,
+            sample: 11,
+            total: 12,
+            settledAt: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+
+        let store = StateFile(directory: tmpDir)
+        try store.save(header: header, payloads: makePayloads())
+
+        // 前置：新载体里必须有这个键
+        let json = try headerJSONObject(at: store.fileURL)
+        XCTAssertNotNil(json["previousRound"], "新载体里必须有该键")
+
+        let result = store.load()
+        XCTAssertNil(result.error)
+        let record = result.contents?.header.previousRound
+        XCTAssertEqual(record?.round, 1)
+        XCTAssertEqual(record?.source, Source.uvCache)
+        XCTAssertEqual(record?.sample, 11)
+        XCTAssertEqual(record?.total, 12)
+        XCTAssertEqual(
+            record?.settledAt,
+            header.previousRound?.settledAt,
+            "冻结时刻必须逐秒保真（载体日期策略为 ISO-8601 秒级）"
+        )
+    }
+
+    /// 取载体里的 header JSON 段（**偏移取自 §5.1 布局常量**：magic 4 + ver 4 + hlen 4）。
+    ///
+    /// 只用于**键存在性断言**，**不重建任何解码语义** ——
+    /// 语义仍由生产解码器（`StateFileCodec.decode`）负责。
+    private func headerJSONObject(at fileURL: URL) throws -> [String: Any] {
+        let bytes = [UInt8](try Data(contentsOf: fileURL))
+        var headerLen = 0
+        for i in 0..<4 { headerLen |= Int(bytes[8 + i]) << (8 * UInt32(i)) }
+        let jsonData = Data(bytes[12..<(12 + headerLen)])
+        let object = try JSONSerialization.jsonObject(with: jsonData)
+        return try XCTUnwrap(object as? [String: Any])
+    }
+
     // MARK: - 校验三连：越界 / 重叠 / CRC
 
     /// **CRC 不一致 → `E-304`**。

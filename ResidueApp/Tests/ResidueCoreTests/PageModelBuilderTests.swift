@@ -14,7 +14,8 @@ final class PageModelBuilderTests: XCTestCase {
         countedDays: Int = 14,
         produced: Bool = true,
         autoDelete: Bool = false,
-        entries: [SourceHeaderEntry]? = nil
+        entries: [SourceHeaderEntry]? = nil,
+        previousRound: PreviousRoundRecord? = nil
     ) -> StateHeader {
         var h = StateHeader()
         h.round = round
@@ -32,6 +33,7 @@ final class PageModelBuilderTests: XCTestCase {
                 a: 0, b: 12, slotCount: 100, doneCount: 0
             )
         }
+        h.previousRound = previousRound
         return h
     }
 
@@ -48,6 +50,16 @@ final class PageModelBuilderTests: XCTestCase {
         var c = StateFileContents()
         c.header = header
         return c
+    }
+
+    /// 造一个**本地日历日**的时刻（与 `SemanticSlotTests` 同法）。
+    ///
+    /// 用 `.current` 日历 ⇒ 断言与运行机器的时区无关：
+    /// 「当天零点」在哪个时区都是「当天」。
+    private func localDate(_ year: Int, _ month: Int, _ day: Int) -> Date {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = .current
+        return cal.date(from: DateComponents(year: year, month: month, day: day))!
     }
 
     // MARK: - 只读态：**不渲染任何数值**
@@ -316,8 +328,84 @@ final class PageModelBuilderTests: XCTestCase {
         XCTAssertEqual(row.cells[6][0].displayText, "仅报告")
     }
 
-    /// **「上一轮」行只在轮次 ≥ 2 时出现**（首轮不显示，不是显示「—」）。
+    /// **「上一轮」行只在存在上一轮结算记录时出现**（首轮不显示，不是显示「—」）。
+    ///
+    /// ⚠️ 判据是「**有记录**」而不是「轮次 ≥ 2」：轮次 ≥ 2 但没有结算记录时，
+    /// 那行会变成一个没有数据的壳（比不显示更糟）。
+    ///
+    /// 默认夹具就是 `round: 2` ⇒ **必须显式带上记录**，
+    /// 否则断言 `nil` 通过却测的不是契约说的东西（假绿）。
     func testPreviousRoundOnlyFromRoundTwo() {
+        let r1 = PageModelBuilder.build(
+            PageModelBuilder.Input(contents: makeContents(makeHeader(round: 1)))
+        )
+        XCTAssertNil(r1.previousRoundSlot, "首轮不得有「上一轮」行")
+
+        let record = PreviousRoundRecord(
+            round: 1, source: .uvCache, sample: 11, total: 12,
+            settledAt: localDate(2023, 11, 14)
+        )
+        let r2 = PageModelBuilder.build(
+            PageModelBuilder.Input(
+                contents: makeContents(makeHeader(round: 2, previousRound: record))
+            )
+        )
+        XCTAssertNotNil(r2.previousRoundSlot)
+        XCTAssertTrue(r2.previousRoundSlot?.displayText.hasPrefix("第 1 轮 · ") ?? false,
+                      "必须是前置数字式（三处同构）")
+    }
+
+    // MARK: - CR-033 · 轮次自动推进的三处可见结果（PRD v5.6 :69）
+
+    /// **③ 页未达项带轮次 + 上一轮括注**（PRD :69 ① / B1 TC-045 ①）。
+    ///
+    /// 契约原文：`第 2 轮 · 观察期 0/14 天（上一轮样本 11/12 未达标，已自动重开）`
+    ///
+    /// ⚠️ 括注里的斜杠**无空格**（`11/12`）——与 ⑤ 页「上一轮」行的
+    /// `样本 11 / 总量 12`（**有空格**）是契约原文的两处不同写法，不可统一。
+    func testUnmetNoticeCarriesRoundAndPreviousRoundNote() {
+        let record = PreviousRoundRecord(
+            round: 1, source: .uvCache, sample: 11, total: 12,
+            settledAt: localDate(2023, 11, 14)
+        )
+        let m = PageModelBuilder.build(
+            PageModelBuilder.Input(
+                contents: makeContents(makeHeader(round: 2, countedDays: 0, previousRound: record))
+            )
+        )
+        XCTAssertEqual(
+            m.unmetNotice?.displayText,
+            "第 2 轮 · 观察期 0/14 天（上一轮样本 11/12 未达标，已自动重开）"
+        )
+    }
+
+    /// **⑤ 页「上一轮」行四要素齐全**（PRD :69 ③ / B1 TC-045 ③ / DAC-50（修订））。
+    ///
+    /// 契约原文：`第 1 轮 · 样本 11 / 总量 12 · 未达标 · 冻结于 2023-11-14`
+    /// 四要素缺一即不通过：①轮次 ②样本/总量 ③未达标 ④冻结于日期。
+    func testPreviousRoundSlotCarriesFourElements() {
+        let record = PreviousRoundRecord(
+            round: 1, source: .uvCache, sample: 11, total: 12,
+            settledAt: localDate(2023, 11, 14)
+        )
+        let m = PageModelBuilder.build(
+            PageModelBuilder.Input(
+                contents: makeContents(makeHeader(round: 2, previousRound: record))
+            )
+        )
+        XCTAssertEqual(
+            m.previousRoundSlot?.displayText,
+            "第 1 轮 · 样本 11 / 总量 12 · 未达标 · 冻结于 2023-11-14"
+        )
+    }
+
+    /// **无上一轮结算记录 ⇒ 不显示「上一轮」行**（B1 TC-054 / 视觉基线 §五）。
+    ///
+    /// 首轮不显示（**不是显示「—」，也不是灰行**）；
+    /// 轮次 ≥ 2 但**没有结算记录**时同样不显示——
+    /// 判据是「有记录」，不是「轮次数字 ≥ 2」，
+    /// 否则那行会变成一个没有数据的壳（比不显示更糟）。
+    func testPreviousRoundSlotAbsentWithoutRecord() {
         let r1 = PageModelBuilder.build(
             PageModelBuilder.Input(contents: makeContents(makeHeader(round: 1)))
         )
@@ -326,9 +414,7 @@ final class PageModelBuilderTests: XCTestCase {
         let r2 = PageModelBuilder.build(
             PageModelBuilder.Input(contents: makeContents(makeHeader(round: 2)))
         )
-        XCTAssertNotNil(r2.previousRoundSlot)
-        XCTAssertTrue(r2.previousRoundSlot?.displayText.hasPrefix("第 1 轮 · ") ?? false,
-                      "必须是前置数字式（三处同构）")
+        XCTAssertNil(r2.previousRoundSlot, "轮次 ≥ 2 但无结算记录 ⇒ 同样不显示")
     }
 
     // MARK: - ⑤ 矩阵：`nil` 不得被当成 0（CR-031 §1.1b）

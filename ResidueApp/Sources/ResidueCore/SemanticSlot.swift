@@ -209,10 +209,33 @@ public enum UICopy {
     ///
     /// 形如「第 2 轮 · 观察期 5/14 天」。
     /// **前置数字式**：轮次在最前（视觉基线 §五 跨页规则）。
-    public static func observationInProgress(round: Int, observed: Int) -> String {
-        L.pick(
+    ///
+    /// ## 条件性后缀（PRD v5.6 :69 ①）
+    ///
+    /// 存在上一轮结算记录时追加括注（**只有这一串带**）：
+    /// 「第 2 轮 · 观察期 0/14 天（上一轮样本 27/30 未达标，已自动重开）」。
+    ///
+    /// ## ⚠️ 斜杠的两侧空格：两处不同，是契约原文
+    ///
+    /// | 落点 | 写法 |
+    /// |---|---|
+    /// | ③ 页括注（本串） | `样本 27/30`（**无空格**） |
+    /// | ⑤ 页「上一轮」行 | `样本 27 / 总量 30`（**有空格**） |
+    ///
+    /// 统一成一种写法会与 PRD / B1 的逐字断言对不上。
+    public static func observationInProgress(
+        round: Int,
+        observed: Int,
+        previous: PreviousRoundRecord? = nil
+    ) -> String {
+        let base = L.pick(
             "第 \(round) 轮 · 观察期 \(observed)/14 天",
             "Round \(round) · Observation \(observed)/14 days"
+        )
+        guard let previous else { return base }
+        return base + L.pick(
+            "（上一轮样本 \(previous.sample)/\(previous.total) 未达标，已自动重开）",
+            " (Previous round sample \(previous.sample)/\(previous.total) not met, reopened)"
         )
     }
 
@@ -304,15 +327,41 @@ public enum UICopy {
         L.pick("本来源未结算", "Not settled for this source")
     }
 
-    /// ⑤ 页「上一轮」行的前缀（`轮次 ≥ 2` 时才显示该行）。
+    /// ⑤ 页「上一轮」行 —— **四要素缺一即不通过**（DAC v2.0 :176 DAC-50（修订））。
     ///
-    /// **前置数字式**（视觉基线 §五 跨页规则：三处轮次同构）。
-    /// 显示的轮次是**上一轮**，即 `round - 1`。
-    public static func previousRound(round: Int) -> String {
+    /// 形如「第 1 轮 · 样本 11 / 总量 12 · 未达标 · 冻结于 2023-11-14」。
+    ///
+    /// 四要素：①轮次 `第 <N−1> 轮` ②`样本 <K> / 总量 <T>` ③`未达标` ④`冻结于 <YYYY-MM-DD>`。
+    ///
+    /// ## 为什么不能只写标签
+    ///
+    /// 旧写法「上一轮结算」只有标签、没有轮次与样本量 ⇒ DAC-50（修订）不通过
+    /// （AC-09 现状栏：「上一轮行缺 3 要素」）。
+    ///
+    /// ## 轮次显示的是**被结算的那一轮**
+    ///
+    /// 由记录里的 `round` 给出（不是 `当前轮次 − 1`）——
+    /// 载体里的记录才是事实，推算会与事实分叉。
+    public static func previousRoundSettlement(_ record: PreviousRoundRecord) -> String {
         L.pick(
-            "第 \(round - 1) 轮 · 上一轮结算",
-            "Round \(round - 1) · Previous settlement"
+            "第 \(record.round) 轮 · 样本 \(record.sample) / 总量 \(record.total) · 未达标 · 冻结于 \(dayText(record.settledAt))",
+            "Round \(record.round) · Sample \(record.sample) / Total \(record.total) · Not met · Frozen at \(dayText(record.settledAt))"
         )
+    }
+
+    /// 日期「yyyy-MM-dd」——**Core 侧唯一样式串**。
+    ///
+    /// ## 为什么不用 `DateFormatter`
+    ///
+    /// - `DateFormatter` **非 `Sendable`** ⇒ 不能做成 `static let`（并发访问会崩）；
+    /// - `Date.FormatStyle` 随 locale 漂（`en_US` 会给出 `11/14/2023`）。
+    ///
+    /// 用 `Calendar` 取分量 + 手工拼串：**确定性 + 无共享可变状态**。
+    ///
+    /// - Parameter calendar: 取分量的日历（默认 `.current` = 用户所在地的日历日）。
+    public static func dayText(_ date: Date, calendar: Calendar = .current) -> String {
+        let parts = calendar.dateComponents([.year, .month, .day], from: date)
+        return String(format: "%04d-%02d-%02d", parts.year ?? 0, parts.month ?? 0, parts.day ?? 0)
     }
 
     /// ⑦ 页留存口径两行同址（14 日 + 90 天/200 MB）。

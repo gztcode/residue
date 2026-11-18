@@ -125,6 +125,20 @@ public struct ObservationProgress: Codable, Sendable, Equatable {
         }
     }
 
+    /// 轮次切换（**M1 写入时刻「开轮时归零（并轮次 +1）」的唯一实现处**）。
+    ///
+    /// 契约依据：PRD v5.6 :68（未达标自动开下一轮）/ :107（唯一递增事件）/ :110（开轮时归零并轮次 +1）。
+    ///
+    /// ## 起算点为什么清空
+    /// 新一轮的起算点 = **该轮首次成功扫描完成时刻**（PRD :62 〔R4〕），
+    /// 本方法在开轮当下**不知道**新轮第一次成功扫描是哪一天 —— 所以清空起算点，
+    /// 交给下一次成功扫描重新锚定。
+    /// ⇒ 「开轮当天的结算扫描」不会被误算成新轮的第 1 计数日。
+    public mutating func beginNextRound() {
+        round += 1
+        countedDays = 0
+        startAnchor = nil
+    }
 }
 
 // ---------- M2 · 门槛量 H ----------
@@ -137,6 +151,25 @@ public enum Threshold {
     /// H = min(30, T)；H ≥ 1（因入域来源 T ≥ 1）。
     public static func h(forTotal t: Int) -> Int {
         min(cap, t)
+    }
+}
+
+// ---------- M3 · 样本充分性判据（`K` 与 `H` 的比较） ----------
+
+/// 样本充分性判据（`K` 与 `H` 的比较）——**全文唯一的 `K` 与 `H` 比较处**。
+///
+/// ## 为什么要有这个原语
+/// 「未达标自动开下一轮」的触发条件（PRD v5.6 :68 · G-3）与门槛判定
+/// （`GateEvaluator.isQualified`）判的是**同一件事**：`K` 是否够 `H`。
+/// 若在写回层再写一遍 `k < Threshold.h(forTotal: t)`，就出现了第二套实现，
+/// 两套必然漂移（不变量②：同一判定只有一个实现处）。
+public enum SampleSufficiency {
+    /// 样本是否不足（`K < H`，其中 `H = min(30, T)`）。
+    ///
+    /// - Note: `K` 为 `nil`（该来源本轮尚未结算）**不等于**不足 ——
+    ///   契约口径是「存在任一来源 `K < H`」，`nil` 不参与比较（不变量③：`nil ≠ 0`）。
+    public static func isInsufficient(k: Int, t: Int) -> Bool {
+        k < Threshold.h(forTotal: t)
     }
 }
 
@@ -541,10 +574,19 @@ public enum UnmetGlobalItem: Equatable, Sendable {
     /// 未达项文案（唯一样式串 · M1）。
     /// - 计数日未满 → 「第 N 轮 · 观察期 x/14 天」
     /// - 计数日已满而报告未产出 → 「第 N 轮 · 观察期未满 · 待结算扫描（无需操作）」
-    public static func text(round: Int, countedDays: Int) -> String {
+    ///
+    /// - Parameter previous: 上一轮结算记录（**存在时**在第一串后追加括注 ·
+    ///   PRD v5.6 :69 ①「（上一轮样本 K/T 未达标，已自动重开）」）。
+    public static func text(
+        round: Int,
+        countedDays: Int,
+        previous: PreviousRoundRecord? = nil
+    ) -> String {
         if countedDays < ObservationProgress.requiredDays {
             // **不在这里重新拼一遍**：多语言后两处译文必然分叉。
-            return UICopy.observationInProgress(round: round, observed: countedDays)
+            return UICopy.observationInProgress(
+                round: round, observed: countedDays, previous: previous
+            )
         }
         return UICopy.awaitingSettlementScan(round: round)
     }
@@ -636,7 +678,7 @@ public enum GateEvaluator {
         for input in sources where decisionDomain.contains(input.source) {
             // 样本不足：`K < H` —— **与 FDA 态无关**，必须先判
             // （第 18 轮 ②‴：未取得 FDA 且手删 1 条 → 必须列「样本不足」+「L0 未判定」两项两行）
-            if let k = input.attributable, let t = input.total, k < Threshold.h(forTotal: t) {
+            if let k = input.attributable, let t = input.total, SampleSufficiency.isInsufficient(k: k, t: t) {
                 items.append(UnmetSourceEntry(source: input.source, item: .insufficientSample))
             }
             if input.undetermined {
@@ -675,7 +717,7 @@ public enum GateEvaluator {
         for input in domain {
             if input.undetermined { return false }
             guard let k = input.attributable, let t = input.total else { return false }
-            if k < Threshold.h(forTotal: t) { return false }
+            if SampleSufficiency.isInsufficient(k: k, t: t) { return false }
             guard let a = input.missCount, a == 0 else { return false }
             guard let b = input.checkCount, b >= 1 else { return false }
         }

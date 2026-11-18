@@ -14,6 +14,16 @@ import ResidueCore
 // ============================================================
 
 extension PageModel {
+    /// 设计稿里的「上一轮」冻结日期 —— **本地日历日**。
+    ///
+    /// 用 `.current` 日历构造 ⇒ 任何时区渲染都是同一天
+    /// （设计稿要求「同一份样例出同一张图」；直接用时间戳会随时区漂一天）。
+    private static var designFrozenDate: Date {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = .current
+        return cal.date(from: DateComponents(year: 2023, month: 11, day: 14))!
+    }
+
     static func skeleton() -> PageModel {
         var m = PageModel()
 
@@ -138,8 +148,19 @@ extension PageModel {
         m.pageLevelSlot = .text(
             UICopy.pageLevelVerdict(round: 2, reason: L.pick("uv cache 样本不足", "uv cache: insufficient samples"))
         )
-        // 「上一轮」行同样前置数字式；轮次 = 2 → 显示
-        m.previousRoundSlot = .text(UICopy.previousRound(round: 2))
+        // 「上一轮」行同样前置数字式，且**四要素齐全**（DAC-50（修订））。
+        //
+        // 样例自洽：第 1 轮样本 11/12 未达标 ⇒ 自动重开第 2 轮；
+        // 第 2 轮走满 14 天后结算为 27/30（上方矩阵）⇒ 下一轮将在下次扫描时开启。
+        m.previousRoundSlot = .text(UICopy.previousRoundSettlement(
+            PreviousRoundRecord(
+                round: 1,
+                source: .uvCache,
+                sample: 11,
+                total: 12,
+                settledAt: designFrozenDate
+            )
+        ))
         m.reportProduced = true
 
         // ⑥
