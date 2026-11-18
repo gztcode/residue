@@ -401,7 +401,7 @@ public enum MissCounter {
     /// `a` 的写入 —— **四者一律在同一次扫描的全部 L0 判定完成后一次性完成**。
     ///
     /// - 参数 `judgments`：本次扫描对每条候选的判定结果
-    /// - 未取得 FDA 的来源：调用方不应把该来源的判定传进来（`a` / `b` 均不判定）
+    /// - 未判定（无法枚举本用户进程）的来源：调用方不应把该来源的判定传进来（`a` / `b` 均不判定）
     public static func apply(
         state: inout SourceL0State,
         judgments: [CandidateID: L0Verdict],
@@ -539,31 +539,10 @@ public enum DecisionDomain {
 
 /// AC-08 组 A 的来源项（未达项的类型）。
 public enum UnmetSourceItem: Equatable, Sendable {
-    /// 样本不足（`K < H`）。
-    case insufficientSample
-    /// L0 误判（`a ≠ 0`）· 或 `b = 0`（本期不可达）· 或未取得 FDA（`a`/`b` 未判定）。
+    /// 样本不足（`K < H`）· 载荷 = 四数（`K` / `T` / `H` / `J`）。
+    case insufficientSample(sample: Int, total: Int, threshold: Int, lost: Int?)
+    /// L0 误判（`a ≠ 0`）· 或 `b = 0`（本期不可达）· 或未判定（`a`/`b` 未判定，无法枚举本用户进程）。
     case l0Misjudged(missCount: Int?, checkCount: Int?, undetermined: Bool)
-
-    public var text: String {
-        switch self {
-        case .insufficientSample:
-            return L.pick("样本不足", "Insufficient samples")
-        case .l0Misjudged(let miss, let check, let undetermined):
-            if undetermined {
-                return L.pick("L0 未判定（未取得 Full Disk Access）", "L0 undetermined (Full Disk Access not granted)")
-            }
-            if let miss, let check {
-                return L.pick(
-                    "L0 误判 \(miss) 次（检查 \(check) 次）",
-                    "L0 misjudgment \(miss) times (\(check) checks)"
-                )
-            }
-            if let check {
-                return L.pick("L0 未检查（检查 \(check) 次）", "L0 not checked (\(check) checks)")
-            }
-            return L.pick("L0 误判", "L0 misjudgment")
-        }
-    }
 }
 
 /// AC-08 组 A 的全局项（至多一项，不带来源）。
@@ -624,17 +603,20 @@ public struct SourceGateInput: Sendable {
     public var attributable: Int?
     /// `T`
     public var total: Int?
+    /// `J`（失联数；未判定时为 nil —— `nil ≠ 0`）
+    public var lost: Int?
     /// `a`
     public var missCount: Int?
     /// `b`
     public var checkCount: Int?
-    /// 该来源是否未取得 FDA（→ `a`/`b` 均不判定）
+    /// 该来源是否未判定（→ `a`/`b` 均不判定；原因 = 无法枚举本用户进程）
     public var undetermined: Bool
 
     public init(
         source: Source,
         attributable: Int?,
         total: Int?,
+        lost: Int? = nil,
         missCount: Int?,
         checkCount: Int?,
         undetermined: Bool
@@ -642,6 +624,7 @@ public struct SourceGateInput: Sendable {
         self.source = source
         self.attributable = attributable
         self.total = total
+        self.lost = lost
         self.missCount = missCount
         self.checkCount = checkCount
         self.undetermined = undetermined
@@ -676,10 +659,18 @@ public enum GateEvaluator {
             return UnmetItems(global: global, bySource: items)
         }
         for input in sources where decisionDomain.contains(input.source) {
-            // 样本不足：`K < H` —— **与 FDA 态无关**，必须先判
-            // （第 18 轮 ②‴：未取得 FDA 且手删 1 条 → 必须列「样本不足」+「L0 未判定」两项两行）
+            // 样本不足：`K < H` —— **与 L0 未判定态无关**，必须先判
+            // （第 18 轮 ②‴：未判定且手删 1 条 → 必须列「样本不足」+「L0 未判定」两项两行）
             if let k = input.attributable, let t = input.total, SampleSufficiency.isInsufficient(k: k, t: t) {
-                items.append(UnmetSourceEntry(source: input.source, item: .insufficientSample))
+                items.append(UnmetSourceEntry(
+                    source: input.source,
+                    item: .insufficientSample(
+                        sample: k,
+                        total: t,
+                        threshold: Threshold.h(forTotal: t),
+                        lost: input.lost
+                    )
+                ))
             }
             if input.undetermined {
                 items.append(UnmetSourceEntry(

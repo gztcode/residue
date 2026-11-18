@@ -294,13 +294,19 @@ struct PolicyPage: View {
 
                     // 未达项（带轮次，M1 唯一串）与剩余天数**同址**
                     HStack(alignment: .firstTextBaseline) {
-                        if let unmet = model.unmetNotice {
-                            SemanticSlotView(slot: unmet)
-                        } else {
-                            SemanticSlotView(slot: .text(L.pick("未达项读取中", "Loading unmet items")), muted: true)
+                        // 未达项**多行**：全局项在前、来源项在后，**一项一行**（DAC-74）。
+                        VStack(alignment: .leading, spacing: Tokens.Spacing.xs) {
+                            if model.unmetNotices.isEmpty {
+                                SemanticSlotView(slot: .text(L.pick("未达项读取中", "Loading unmet items")), muted: true)
+                            } else {
+                                ForEach(model.unmetNotices.indices, id: \.self) { index in
+                                    SemanticSlotView(slot: model.unmetNotices[index])
+                                }
+                            }
                         }
                         Spacer(minLength: Tokens.Spacing.s)
                         // 视觉基线 §五：「剩余天数」与未达项同一语义位旁另设一格
+                        // （DAC-77：同址相邻但**独立格**，不得合并进未达项那一句）
                         SemanticSlotView(slot: model.remainingDays, muted: true)
                     }
                 }

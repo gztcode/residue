@@ -207,10 +207,14 @@ final class MetricsTests: XCTestCase {
     private func input(
         _ s: Source,
         k: Int? = nil, t: Int? = nil,
+        lost: Int? = nil,
         a: Int? = nil, b: Int? = nil,
         undetermined: Bool = false
     ) -> SourceGateInput {
-        SourceGateInput(source: s, attributable: k, total: t, missCount: a, checkCount: b, undetermined: undetermined)
+        SourceGateInput(
+            source: s, attributable: k, total: t, lost: lost,
+            missCount: a, checkCount: b, undetermined: undetermined
+        )
     }
 
     func testUnmetDuringObservationIsGlobalOnly() {
@@ -231,11 +235,49 @@ final class MetricsTests: XCTestCase {
             progress: ObservationProgress(round: 1, startAnchor: Date(), countedDays: 14),
             settlementProduced: true,
             decisionDomain: [.uvCache],
-            sources: [input(.uvCache, k: 4, t: 5, a: 0, b: 100)]
+            sources: [input(.uvCache, k: 4, t: 5, lost: 1, a: 0, b: 100)]
         )
         XCTAssertNil(items.global)
         XCTAssertEqual(items.bySource.count, 1)
-        XCTAssertEqual(items.bySource[0].item, .insufficientSample)
+        XCTAssertEqual(
+            items.bySource[0].item,
+            .insufficientSample(sample: 4, total: 5, threshold: 5, lost: 1)
+        )
+    }
+
+    /// **DAC-76 · 四数齐**：`样本不足` 项的载荷必须带齐 `K` / `T` / `H` / `J`。
+    ///
+    /// 契约逐字（TC-038）：「样本 11 / 总量 12（门槛 12，其中失联 1）」——
+    /// 三个基数是 `K` / `T` / `J`，门槛 `H` 另标。
+    func testUnmetSampleInsufficientCarriesFourNumbers() {
+        let items = GateEvaluator.unmetItems(
+            progress: ObservationProgress(round: 1, startAnchor: Date(), countedDays: 14),
+            settlementProduced: true,
+            decisionDomain: [.npmNpx],
+            sources: [input(.npmNpx, k: 11, t: 12, lost: 1, a: 0, b: 128)]
+        )
+        XCTAssertEqual(items.bySource.count, 1)
+        XCTAssertEqual(
+            items.bySource[0].item,
+            .insufficientSample(sample: 11, total: 12, threshold: 12, lost: 1),
+            "四数齐：K=11 / T=12 / H=min(30,12)=12 / J=1"
+        )
+    }
+
+    /// **`J` 缺失时不得填 0**（不变量③：`nil ≠ 0`，0 会被读成「无失联」）。
+    func testUnmetSampleInsufficientKeepsMissingLostAsNil() {
+        let items = GateEvaluator.unmetItems(
+            progress: ObservationProgress(round: 1, startAnchor: Date(), countedDays: 14),
+            settlementProduced: true,
+            decisionDomain: [.uvCache],
+            sources: [input(.uvCache, k: 4, t: 5, a: 0, b: 100)]
+        )
+        XCTAssertEqual(items.bySource.count, 1)
+        XCTAssertEqual(
+            items.bySource[0].item,
+            .insufficientSample(sample: 4, total: 5, threshold: 5, lost: nil),
+            "J 缺失时必须保持 nil，不得谎称 0"
+        )
     }
 
     func testUnmetL0Misjudged() {
@@ -254,8 +296,8 @@ final class MetricsTests: XCTestCase {
         }
     }
 
-    func testUnmetFDAUndetermined() {
-        // 用例②″：未取得 FDA 且不失联（K = T ≥ H）→ 只含「L0 未判定」一项
+    func testUnmetL0Undetermined() {
+        // 用例②″：同 uid 进程枚举失败（L0 未判定）且不失联（K = T ≥ H）→ 只含「L0 未判定」一项
         let items = GateEvaluator.unmetItems(
             progress: ObservationProgress(round: 1, startAnchor: Date(), countedDays: 14),
             settlementProduced: true,
@@ -278,7 +320,10 @@ final class MetricsTests: XCTestCase {
             sources: [input(.uvCache, k: 4, t: 5, a: 1, b: 100)]
         )
         XCTAssertEqual(items.bySource.count, 2, "必须两项两行、不得合并")
-        XCTAssertEqual(items.bySource[0].item, .insufficientSample)
+        XCTAssertEqual(
+            items.bySource[0].item,
+            .insufficientSample(sample: 4, total: 5, threshold: 5, lost: nil)
+        )
         if case .l0Misjudged(let m, _, let und) = items.bySource[1].item {
             XCTAssertEqual(m, 1)
             XCTAssertFalse(und)
@@ -287,11 +332,11 @@ final class MetricsTests: XCTestCase {
         }
     }
 
-    /// 用例②‴：未取得 FDA **且**手删 1 条（K = T−1 < H）→ 必须两项两行
+    /// 用例②‴：同 uid 进程枚举失败（L0 未判定）**且**手删 1 条（K = T−1 < H）→ 必须两项两行
     ///
     /// 这是第 18 轮抓到的实现 bug：原实现 `undetermined` 时提前 `continue`，
     /// 漏掉「样本不足」→ 只报 1 项。此项测试即为该 bug 的回归防护。
-    func testUnmetSampleAndFDAUndeterminedTwoRows() {
+    func testUnmetSampleAndL0UndeterminedTwoRows() {
         let items = GateEvaluator.unmetItems(
             progress: ObservationProgress(round: 1, startAnchor: Date(), countedDays: 14),
             settlementProduced: true,
@@ -299,14 +344,57 @@ final class MetricsTests: XCTestCase {
             sources: [input(.uvCache, k: 4, t: 5, undetermined: true)]
         )
         XCTAssertEqual(items.bySource.count, 2, "样本不足 + L0 未判定 必须两项两行")
-        XCTAssertEqual(items.bySource[0].item, .insufficientSample)
+        XCTAssertEqual(
+            items.bySource[0].item,
+            .insufficientSample(sample: 4, total: 5, threshold: 5, lost: nil)
+        )
         XCTAssertEqual(
             items.bySource[1].item,
             .l0Misjudged(missCount: nil, checkCount: nil, undetermined: true)
         )
     }
 
-    /// F 位图按位槽号索引：容量随位槽增长，字节数 = 位槽数 / 64 * 8
+    /// **DAC-75 / DAC-76 / TC-038 · 未达项文案逐字断言**。
+    ///
+    /// 契约给死的串：TC-038「样本 11 / 总量 12（门槛 12，其中失联 1）」+
+    /// 追加句「失联不补足，下一轮以新快照重算」；
+    /// DAC-75 的三串（`样本不足` / `L0 误判` / `L0 未判定（无法枚举本用户进程）`）。
+    func testUnmetCopyVerbatimStrings() {
+        XCTAssertEqual(
+            UICopy.unmetSampleInsufficient(source: "npm/_npx", sample: 11, total: 12, threshold: 12, lost: 1),
+            "npm/_npx · 样本不足 · 样本 11 / 总量 12（门槛 12，其中失联 1）"
+        )
+        XCTAssertEqual(
+            UICopy.unmetSampleNote(),
+            "失联不补足，下一轮以新快照重算"
+        )
+        XCTAssertEqual(
+            UICopy.unmetL0Misjudged(source: "npm/_npx", missCount: 1, checkCount: 128),
+            "npm/_npx · L0 误判 1 次（检查 128 次）"
+        )
+        XCTAssertEqual(
+            UICopy.unmetL0NeverChecked(source: "uv cache"),
+            "uv cache · L0 未检查（检查 0 次）"
+        )
+        XCTAssertEqual(
+            UICopy.unmetL0Undetermined(source: "npm/_npx"),
+            "npm/_npx · L0 未判定（无法枚举本用户进程）"
+        )
+        XCTAssertEqual(
+            UICopy.unmetL0AttributionNote(),
+            "因存在 L0 误判，本版本不再提示可点亮进度"
+        )
+    }
+
+    /// **`J` 未判定时不得谎称 0**（不变量③：`nil ≠ 0`）。
+    func testUnmetSampleCopyShowsDashWhenLostUnknown() {
+        XCTAssertEqual(
+            UICopy.unmetSampleInsufficient(source: "uv cache", sample: 4, total: 5, threshold: 5, lost: nil),
+            "uv cache · 样本不足 · 样本 4 / 总量 5（门槛 5，其中失联 —）"
+        )
+    }
+
+    /// **F 位图按位槽号索引：容量随位槽增长，字节数 = 位槽数 / 64 * 8**
     func testNegativeBitmapIsSlotIndexedAndCompact() {
         var st = SourceL0State()
         // 10 万个候选，全部判阴性
@@ -371,7 +459,7 @@ final class MetricsTests: XCTestCase {
             decisionDomain: [.uvCache],
             sources: [input(.uvCache, k: 29, t: 30, a: 0, b: 128)]
         ))
-        // 未取得 FDA → 不达标
+        // L0 未判定（同 uid 进程枚举失败）→ 不达标
         XCTAssertFalse(GateEvaluator.isQualified(
             progress: p, settlementProduced: true,
             decisionDomain: [.uvCache],

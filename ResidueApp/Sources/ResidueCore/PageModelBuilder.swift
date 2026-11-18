@@ -137,7 +137,7 @@ var model = PageModel()
             // 显示 0 会让旧版把「错 1 次永久」显示成「一次都没错」——假值比空白更危险。
             model.pageLevelSlot = .unavailable(reason: UICopy.readOnlyNoSettlement)
             model.reportProduced = false
-            model.unmetNotice = .unavailable(reason: UICopy.readOnlyNoSettlement)
+            model.unmetNotices = [.unavailable(reason: UICopy.readOnlyNoSettlement)]
             model.remainingDays = .duration(days: nil)
             model.canLightUp = false
             model.autoDeleteEnabled = false
@@ -217,9 +217,15 @@ var model = PageModel()
                 source: entry.source,
                 attributable: entry.K,
                 total: entry.T,
+                lost: entry.J,
                 missCount: entry.a,
                 checkCount: entry.b,
-                undetermined: entry.a == 0 && entry.b == 0 && entry.T != nil && entry.K == nil
+                // `undetermined` 的**唯一来源** = 同 uid 进程枚举是否失败（CR-012 / R2 §25.1 裁定一）。
+                //
+                // ⚠️ 不得用「`a == 0 && b == 0`」反推未判定：那是**巧合**不是**原因**
+                // （本轮未结算的来源同样是 `a = 0` / `b = 0`，会被误标成「L0 未判定」）。
+                // `degraded` 是全局单值 ⇒ 降级时判定域内**全部**来源的 `a` / `b` 均不判定。
+                undetermined: input.degraded
             )
         }
         // 判定域 = **本轮观察期开始快照内命中的来源**（契约：PRD v5.6 R9 / 架构 A1）。
@@ -234,8 +240,8 @@ var model = PageModel()
             decisionDomain: decisionDomain,
             sources: gateInputs
         )
-        model.unmetNotice = .text(
-            unmetNoticeText(unmet, progress: progress, previous: header.previousRound)
+        model.unmetNotices = unmetNoticeSlots(
+            unmet, progress: progress, previous: header.previousRound
         )
         model.remainingDays = .duration(days: progress.remainingDays)
         model.canLightUp = GateEvaluator.isQualified(
@@ -434,46 +440,76 @@ var model = PageModel()
 
     // MARK: - 未达项文案（**只做格式化，不做判定**）
 
-    /// 未达项 → 一行文案。
+    /// 未达项 → **多行**槽位（AC-08 组 A / DAC-74）。
     ///
-    /// 优先级：全局项（观察期未满）> 来源项（样本不足 / L0 未判定）——
-    /// 与 AC-08 组 A 的「全局项至多一项」一致。
-    private static func unmetNoticeText(
+    /// - **固定顺序**：全局项（至多一项）在前、来源项在后。
+    /// - **一项一行**：来源项逐行展开，**不合并**（TC-027 / TC-028）。
+    /// - **归因说明**并入「样本不足」行末，**不单独成行**（DAC-78）。
+    /// - 判定与文案分开：判定在 `GateEvaluator`（唯一定义处），这里只做**格式化**。
+    private static func unmetNoticeSlots(
         _ unmet: UnmetItems,
         progress: ObservationProgress,
         previous: PreviousRoundRecord? = nil
-    ) -> String {
+    ) -> [SemanticSlot] {
+        var slots: [SemanticSlot] = []
         if unmet.global != nil {
             // **只调 Core 的 M1 唯一实现**：两串的选择只留一处
             // （这里再拼一遍 ⇒ 多语言后两处译文必然分叉）。
             // 判据互补：`isDayQuotaReached` ⇔ `countedDays >= 14`。
-            return UnmetGlobalItem.text(
+            slots.append(.text(UnmetGlobalItem.text(
                 round: progress.round,
                 countedDays: progress.countedDays,
                 previous: previous
-            )
+            )))
         }
-        if let first = unmet.bySource.first {
-            switch first.item {
-            case .insufficientSample:
-                let entry = first
-                return UICopy.unmetSampleInsufficient(
-                    round: progress.round,
-                    sample: 0, threshold: 0
-                ).replacingOccurrences(of: "0 / 0", with: entry.source.displayName)
-            case .l0Misjudged(_, _, let undetermined):
-                return undetermined
-                    ? L.pick(
-                        "\(first.source.displayName) · L0 未判定（无法枚举本用户进程）",
-                        "\(first.source.displayName) · L0 undetermined (can't enumerate this user's processes)"
-                    )
-                    : L.pick(
-                        "\(first.source.displayName) · L0 误判",
-                        "\(first.source.displayName) · L0 misjudgment"
-                    )
+        for entry in unmet.bySource {
+            switch entry.item {
+            case .insufficientSample(let sample, let total, let threshold, let lost):
+                var line = UICopy.unmetSampleInsufficient(
+                    source: entry.source.displayName,
+                    sample: sample,
+                    total: total,
+                    threshold: threshold,
+                    lost: lost
+                )
+                // 追加句紧跟基数形态之后（TC-038）。
+                line += " · " + UICopy.unmetSampleNote()
+                // 归因说明**仅在真误判（`a ≠ 0`）时**追加（判据 8）。
+                if hasRealMiss(unmet.bySource, source: entry.source) {
+                    line += " · " + UICopy.unmetL0AttributionNote()
+                }
+                slots.append(.text(line))
+            case .l0Misjudged(let missCount, let checkCount, let undetermined):
+                if undetermined {
+                    slots.append(.text(UICopy.unmetL0Undetermined(source: entry.source.displayName)))
+                } else if let missCount, missCount > 0 {
+                    slots.append(.text(UICopy.unmetL0Misjudged(
+                        source: entry.source.displayName,
+                        missCount: missCount,
+                        checkCount: checkCount
+                    )))
+                } else {
+                    // `b = 0`（本期不可达）—— 防御性表述（PRD M5）。
+                    slots.append(.text(UICopy.unmetL0NeverChecked(source: entry.source.displayName)))
+                }
             }
         }
-        return L.pick("已达达标条件", "Gate conditions met")
+        return slots
+    }
+
+    /// 该来源是否存在**真误判**（`a ≠ 0`）⇒ 才有资格追加归因说明。
+    ///
+    /// 「未判定」（无法枚举本用户进程）**不是**误判 ⇒ 不追加。
+    private static func hasRealMiss(_ entries: [UnmetSourceEntry], source: Source) -> Bool {
+        for entry in entries where entry.source == source {
+            if case .l0Misjudged(let missCount, _, let undetermined) = entry.item,
+               !undetermined,
+               let missCount,
+               missCount > 0 {
+                return true
+            }
+        }
+        return false
     }
 
     /// 页级「否」的原因（AC-09 的五级优先级里取前两级即可）。

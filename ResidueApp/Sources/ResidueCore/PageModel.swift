@@ -178,8 +178,10 @@ public struct PageModel: Sendable {
     /// 这比「不能点」更糟（AC-08 组 B 的全部意义就是「未达线不得点亮」）。
     public var canLightUp: Bool = false
 
-    /// ③ 页：未达项文案（带轮次）。
-    public var unmetNotice: SemanticSlot?
+    /// ③ 页：未达项（**多行** —— 全局项在前、来源项在后，**一项一行**）。
+    ///
+    /// 空数组 = 无未达项（空判定域 ⇒ 不列任何来源项，DAC-79）。
+    public var unmetNotices: [SemanticSlot] = []
     /// ③ 页：剩余天数（`.duration`，`nil` → 「—」）。
     public var remainingDays: SemanticSlot = .duration(days: nil)
     /// **只读态的成因**（`nil` = 非只读）。

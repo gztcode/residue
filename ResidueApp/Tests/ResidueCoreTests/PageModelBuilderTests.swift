@@ -62,6 +62,30 @@ final class PageModelBuilderTests: XCTestCase {
         return cal.date(from: DateComponents(year: year, month: month, day: day))!
     }
 
+    /// 提取一行展示串里的**全部 ASCII 数字**（按出现顺序）。
+    ///
+    /// 用于「行内数字恰 N 个」这类断言（TC-038）——
+    /// 这是**对成品串的检查**，不是生产逻辑的第二份实现。
+    ///
+    /// ⚠️ **只认 ASCII 数字**：Swift 的 `Character.isNumber` 对中文数字字形
+    /// （如「一」= U+4E00）同样为 `true`，而 `Int("一")` 是 `nil` ——
+    /// 不限定 ASCII 就会在「下一轮」上崩掉。
+    /// 契约说的「数字」= 基数形态里的那四个 ASCII 数（11 / 12 / 12 / 1）。
+    private func digits(in text: String) -> [Int] {
+        var out: [Int] = []
+        var current = ""
+        for ch in text {
+            if ch.isASCII, ch.isNumber {
+                current.append(ch)
+            } else if !current.isEmpty {
+                out.append(Int(current)!)
+                current = ""
+            }
+        }
+        if !current.isEmpty { out.append(Int(current)!) }
+        return out
+    }
+
     // MARK: - 只读态：**不渲染任何数值**
 
     /// 只读态下，所有数值位必须是 `.unavailable`，**绝不能是 `.metric(0)`**。
@@ -205,9 +229,209 @@ final class PageModelBuilderTests: XCTestCase {
         let m = PageModelBuilder.build(input)
 
         XCTAssertFalse(m.canLightUp, "K=27 < H=30 → 不可点亮")
-        XCTAssertTrue(
-            m.unmetNotice?.displayText.contains("样本不足") ?? false,
-            "未达项必须是样本不足，实为「\(m.unmetNotice?.displayText ?? "nil")」"
+        XCTAssertEqual(
+            m.unmetNotices.map(\.displayText),
+            ["uv cache · 样本不足 · 样本 27 / 总量 30（门槛 30，其中失联 3） · 失联不补足，下一轮以新快照重算"],
+            "未达项必须是「样本不足」一行：来源标识 + 类名 + 四数齐 + 追加句"
+        )
+    }
+
+    /// **样本不足 + L0 误判 ⇒ 两行不合并**；归因说明附在第 1 行内、**不单独成行**。
+    ///
+    /// 契约：AC-08 组 A Then（两项同时成立时**两项分行**）/ DAC-78（**2 行，0 容差**）。
+    func testSampleInsufficientAndL0MisjudgedStayTwoRows() {
+        let entries = [
+            SourceHeaderEntry(source: .uvCache, snapshotTaken: true,
+                              T: 30, K: 30, J: 0, H: 30, a: 0, b: 5, slotCount: 30, doneCount: 0),
+            SourceHeaderEntry(source: .npmNpx, snapshotTaken: true,
+                              T: 12, K: 11, J: 1, H: 12, a: 1, b: 128, slotCount: 12, doneCount: 0),
+        ]
+        let input = PageModelBuilder.Input(contents: makeContents(makeHeader(entries: entries)))
+        let m = PageModelBuilder.build(input)
+
+        XCTAssertEqual(m.unmetNotices.count, 2,
+                       "样本不足与 L0 误判必须**分两行**，不得合并成一项（DAC-78，0 容差）")
+        XCTAssertEqual(
+            m.unmetNotices.map(\.displayText),
+            [
+                "npm/_npx · 样本不足 · 样本 11 / 总量 12（门槛 12，其中失联 1） · 失联不补足，下一轮以新快照重算 · 因存在 L0 误判，本版本不再提示可点亮进度",
+                "npm/_npx · L0 误判 1 次（检查 128 次）",
+            ],
+            "归因说明必须**并入样本不足行内**，不得单独成行"
+        )
+    }
+
+    /// **归因说明仅在真误判（`a ≠ 0`）时出现**。
+    ///
+    /// `a = 0` + `b = 0`（本期不可达的防御态）⇒ 有 L0 行、但**不是误判**
+    /// ⇒ 样本不足行内**不得**出现「因存在 L0 误判」。
+    func testNoAttributionNoteWithoutRealL0Miss() {
+        let entries = [
+            SourceHeaderEntry(source: .uvCache, snapshotTaken: true,
+                              T: 30, K: 30, J: 0, H: 30, a: 0, b: 5, slotCount: 30, doneCount: 0),
+            SourceHeaderEntry(source: .npmNpx, snapshotTaken: true,
+                              T: 12, K: 11, J: 1, H: 12, a: 0, b: 0, slotCount: 12, doneCount: 0),
+        ]
+        let input = PageModelBuilder.Input(contents: makeContents(makeHeader(entries: entries)))
+        let m = PageModelBuilder.build(input)
+
+        XCTAssertEqual(m.unmetNotices.count, 2,
+                       "样本不足 + L0 行仍是两行")
+        XCTAssertFalse(
+            m.unmetNotices[0].displayText.contains(UICopy.unmetL0AttributionNote()),
+            "`a = 0` ⇒ 不是真误判 ⇒ 样本不足行内不得出现归因说明（实为「\(m.unmetNotices.map(\.displayText))」）"
+        )
+    }
+
+    /// **固定顺序**：全局项在最前、来源项在后；同来源的行**连续**（DAC-74）。
+    func testUnmetNoticesOrderGlobalFirstThenSources() {
+        let entries = [
+            SourceHeaderEntry(source: .uvCache, snapshotTaken: true,
+                              T: 30, K: 30, J: 0, H: 30, a: 0, b: 5, slotCount: 30, doneCount: 0),
+            SourceHeaderEntry(source: .npmNpx, snapshotTaken: true,
+                              T: 12, K: 11, J: 1, H: 12, a: 1, b: 128, slotCount: 12, doneCount: 0),
+        ]
+        let input = PageModelBuilder.Input(
+            contents: makeContents(makeHeader(round: 1, countedDays: 9, entries: entries))
+        )
+        let m = PageModelBuilder.build(input)
+
+        XCTAssertEqual(
+            m.unmetNotices.map(\.displayText),
+            [
+                "第 1 轮 · 观察期 9/14 天",
+                "npm/_npx · 样本不足 · 样本 11 / 总量 12（门槛 12，其中失联 1） · 失联不补足，下一轮以新快照重算 · 因存在 L0 误判，本版本不再提示可点亮进度",
+                "npm/_npx · L0 误判 1 次（检查 128 次）",
+            ],
+            "未达项固定顺序：全局项在前、来源项在后、同来源的行连续"
+        )
+        XCTAssertFalse(
+            m.unmetNotices[0].displayText.contains(Source.npmNpx.displayName),
+            "全局项不带来源标识"
+        )
+    }
+
+    /// **空判定域 ⇒ 未达项行数 = 0**（TC-034 / DAC-79）。
+    ///
+    /// 观察期已满且报告已产出 ⇒ 既无全局项也无来源项 ⇒ **一行都不列**。
+    func testEmptyDecisionDomainProducesNoUnmetRow() {
+        let input = PageModelBuilder.Input(contents: makeContents(makeHeader(entries: [])))
+        let m = PageModelBuilder.build(input)
+
+        XCTAssertEqual(m.unmetNotices.count, 0,
+                       "空判定域不得产生任何未达项行（DAC-79；实为「\(m.unmetNotices.map(\.displayText))」）")
+    }
+
+    /// **降级态 ⇒ 判定域内来源呈现「L0 未判定」**（CR-012 / R2 §25.1 裁定一）。
+    ///
+    /// `degraded = true` ⇒ 同 uid 进程枚举失败 ⇒ 该来源的 `a` / `b` **均不判定**
+    /// ⇒ 未达项必须是「L0 未判定（无法枚举本用户进程）」，
+    /// **不得**显示成「已达达标条件」（把未知判成安全 ⇒ 违反不变量 ③）。
+    func testDegradedProducesL0UndeterminedRow() {
+        let entries = [
+            SourceHeaderEntry(source: .uvCache, snapshotTaken: true,
+                              T: 30, K: 30, J: 0, H: 30, a: 0, b: 5, slotCount: 30, doneCount: 0),
+        ]
+        let input = PageModelBuilder.Input(
+            contents: makeContents(makeHeader(entries: entries)),
+            degraded: true
+        )
+        let m = PageModelBuilder.build(input)
+
+        XCTAssertEqual(
+            m.unmetNotices.map(\.displayText),
+            ["uv cache · L0 未判定（无法枚举本用户进程）"],
+            "降级态下该来源 `a` / `b` 未判定 ⇒ 必须列「L0 未判定」（实为「\(m.unmetNotices.map(\.displayText))」）"
+        )
+        XCTAssertFalse(m.canLightUp,
+                       "未判定 ≠ 达标：降级态下不得判为可点亮")
+    }
+
+    /// ★ **回归护栏**：本轮**未结算**（`K == nil`）的来源**不得**被误标成「L0 未判定」。
+    ///
+    /// 「L0 未判定」的**唯一**成因是**同 uid 进程枚举失败**（`degraded == true`）。
+    /// 「未结算」是**另一回事**（本轮没走到结算）—— 用 `a == 0 && b == 0` 反推未判定
+    /// 会把两者混为一谈（**两个值相等不等于同义**）。
+    func testUnsettledSourceIsNotLabeledL0Undetermined() {
+        let entries = [
+            SourceHeaderEntry(source: .uvCache, snapshotTaken: true,
+                              T: 30, K: nil, J: nil, H: 30, a: 0, b: 0, slotCount: 30, doneCount: 0),
+        ]
+        let input = PageModelBuilder.Input(contents: makeContents(makeHeader(entries: entries)))
+        let m = PageModelBuilder.build(input)
+
+        XCTAssertFalse(
+            m.unmetNotices.map(\.displayText).contains(UICopy.unmetL0Undetermined(source: Source.uvCache.displayName)),
+            "未结算（`K == nil`）≠ 枚举失败 ⇒ 不得标「L0 未判定」（实为「\(m.unmetNotices.map(\.displayText))」）"
+        )
+    }
+
+    /// **`b = 0` ⇒ 呈现「L0 未检查（检查 0 次）」**（PRD v5.6 M5 的防御性表述）。
+    ///
+    /// `b = 0` 表示**本轮一次 L0 都没做过** ⇒ 不是「误判」，是「没检查」——
+    /// 两者的文案必须区分（误判 = `a ≠ 0`；未检查 = `b = 0`）。
+    /// PRD :157 说这属**本期不可达**（判定域来源入域当轮即被 L0 判定 ⇒ `b ≥ 1` 恒成立），
+    /// 故本例是**防御分支**的护栏：真到了该态，不得显示成「L0 误判 0 次」。
+    func testZeroCheckCountShowsL0NeverChecked() {
+        let entries = [
+            SourceHeaderEntry(source: .uvCache, snapshotTaken: true,
+                              T: 30, K: 30, J: 0, H: 30, a: 0, b: 0, slotCount: 30, doneCount: 0),
+        ]
+        let input = PageModelBuilder.Input(contents: makeContents(makeHeader(entries: entries)))
+        let m = PageModelBuilder.build(input)
+
+        XCTAssertEqual(
+            m.unmetNotices.map(\.displayText),
+            ["uv cache · L0 未检查（检查 0 次）"],
+            "`b = 0` ⇒ 「L0 未检查」，不得显示成「L0 误判」（实为「\(m.unmetNotices.map(\.displayText))」）"
+        )
+        XCTAssertFalse(m.canLightUp,
+                       "`b = 0` ⇒ 未做过检查 ⇒ 不得判为可点亮")
+    }
+
+    /// **追加句紧跟在四数形态之后，且行内数字恰 4 个**（TC-038 / DAC-76）。
+    ///
+    /// 「失联不补足，下一轮以新快照重算」必须**附在基数形态之后**，
+    /// 且**自身不携带任何数字** —— 行内数字只有 `11 / 12 / 12 / 1` 四个。
+    func testSampleNoteFollowsBaseFormAndAddsNoDigits() {
+        let entries = [
+            SourceHeaderEntry(source: .npmNpx, snapshotTaken: true,
+                              T: 12, K: 11, J: 1, H: 12, a: 0, b: 12, slotCount: 12, doneCount: 0),
+        ]
+        let input = PageModelBuilder.Input(contents: makeContents(makeHeader(entries: entries)))
+        let m = PageModelBuilder.build(input)
+
+        XCTAssertEqual(
+            m.unmetNotices.map(\.displayText),
+            ["npm/_npx · 样本不足 · 样本 11 / 总量 12（门槛 12，其中失联 1） · 失联不补足，下一轮以新快照重算"],
+            "追加句须在四数形态之后（实为「\(m.unmetNotices.map(\.displayText))」）"
+        )
+        XCTAssertEqual(
+            digits(in: m.unmetNotices[0].displayText),
+            [11, 12, 12, 1],
+            "追加句不得携带数字：行内数字恰 4 个（TC-038）"
+        )
+    }
+
+    /// **计数日已满而报告未产出 ⇒ 「剩余天数」格 = `—`**（TC-036 / DAC-77）。
+    ///
+    /// 计数日已满（14/14）但报告**还没产出** ⇒ 此时没有「还要等几天」可言
+    /// （等的是结算扫描，不是天数）⇒ 该格显示 `—`，
+    /// **不得显示「0 天」**（0 会被读成「今天到期」）。
+    ///
+    /// 同一场景下全局项逐字为「第 1 轮 · 观察期未满 · 待结算扫描（无需操作）」。
+    func testDayQuotaReachedWithoutReportShowsDashForRemainingDays() {
+        let input = PageModelBuilder.Input(
+            contents: makeContents(makeHeader(round: 1, countedDays: 14, produced: false))
+        )
+        let m = PageModelBuilder.build(input)
+
+        XCTAssertEqual(m.remainingDays.displayText, "—",
+                       "计数日已满而报告未产出 ⇒ 剩余天数格必须是「—」，不得显示「0 天」")
+        XCTAssertEqual(
+            m.unmetNotices.map(\.displayText),
+            ["第 1 轮 · 观察期未满 · 待结算扫描（无需操作）"],
+            "同一场景下全局项逐字为「待结算扫描」（TC-036）"
         )
     }
 
@@ -267,8 +491,8 @@ final class PageModelBuilderTests: XCTestCase {
 
         XCTAssertTrue(m.canLightUp, "域内但本轮无快照的来源不得阻断点亮")
         XCTAssertFalse(
-            m.unmetNotice?.displayText.contains(Source.npmNpx.displayName) ?? false,
-            "无快照的来源从未参与判定，不得出现在未达项里（实为「\(m.unmetNotice?.displayText ?? "nil")」）"
+            m.unmetNotices.contains { $0.displayText.contains(Source.npmNpx.displayName) },
+            "无快照的来源从未参与判定，不得出现在未达项里（实为「\(m.unmetNotices.map(\.displayText))」）"
         )
     }
 
@@ -374,8 +598,8 @@ final class PageModelBuilderTests: XCTestCase {
             )
         )
         XCTAssertEqual(
-            m.unmetNotice?.displayText,
-            "第 2 轮 · 观察期 0/14 天（上一轮样本 11/12 未达标，已自动重开）"
+            m.unmetNotices.map(\.displayText),
+            ["第 2 轮 · 观察期 0/14 天（上一轮样本 11/12 未达标，已自动重开）"]
         )
     }
 

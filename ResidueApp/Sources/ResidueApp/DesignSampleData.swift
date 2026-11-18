@@ -60,9 +60,23 @@ extension PageModel {
         //    报告只在「观察期结束扫描」时产出（M1）→ 报告已产出 ⟹ 观察期已满。
         //    故此处不能写「观察期 5/14 天」（那是未满），未达项应为**样本不足**。
         //    复必现的 M-02 正是靠这两页的矛盾发现「可能被实现成两次动作」。
-        m.unmetNotice = .text(
-            UICopy.unmetSampleInsufficient(round: 2, sample: 27, threshold: 30)
-        )
+        m.unmetNotices = [
+            .text(
+                UICopy.unmetSampleInsufficient(
+                    source: Source.uvCache.displayName, sample: 11, total: 12,
+                    threshold: 12, lost: 1
+                ) + " · " + UICopy.unmetSampleNote()
+            ),
+            // 第 2 行：**另一个来源**的「L0 误判」——
+            // 走查要能看见「一项一行、逐行独立、来源项各带来源标识」（DAC-74），
+            // 且开关区行数由 1 变 2（验收判据 26）。取不同来源 ⇒ 不触发
+            // 「因存在 L0 误判…」的归因说明（归因只附在**同一来源**的样本不足行后）。
+            .text(
+                UICopy.unmetL0Misjudged(
+                    source: Source.npmNpx.displayName, missCount: 1, checkCount: 128
+                )
+            ),
+        ]
         m.remainingDays = .duration(days: 0)   // 观察期已满 → 14 − 14 = 0（此时「0 天」是正确值）
         m.policySlots = [
             (L.pick("首次上限（5 GB 与来源 10% 取小）", "First-run cap (lesser of 5 GB and 10% of source)"), .metric(5_000_000_000, unit: .bytes)),

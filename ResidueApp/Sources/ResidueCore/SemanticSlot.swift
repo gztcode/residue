@@ -257,17 +257,87 @@ public enum UICopy {
         )
     }
 
-    /// ③ 页开关区未达项（**观察期已满但样本不足**）——AC-08 组 A 的来源项。
+    /// ③ 页未达项 · **样本不足**行——AC-08 组 A 的来源项（**四数齐**）。
     ///
-    /// 形如「第 2 轮 · 样本不足（27 / 30）」。
-    /// **为什么需要单独一条**：M1 那两串只覆盖「观察期未满」；
-    /// 而观察期已满、报告已产出、`K < H` 时，未达项是**样本不足**，
-    /// 用「观察期 14/14 天」既不是未达项、也会让 ⑤ 页的「报告已产出」显得矛盾
-    /// （复必现的 M-02 就是靠这个矛盾看出问题的）。
-    public static func unmetSampleInsufficient(round: Int, sample: Int, threshold: Int) -> String {
+    /// 形如「npm/_npx · 样本不足 · 样本 11 / 总量 12（门槛 12，其中失联 1）」。
+    ///
+    /// ## 三个基数 + 一个门槛
+    ///
+    /// | 位置 | 含义 |
+    /// |---|---|
+    /// | 样本 `<K>` | 归因样本数 |
+    /// | 总量 `<T>` | 候选总数 |
+    /// | 门槛 `<H>` | `H = min(30, T)` |
+    /// | 其中失联 `<J>` | 失联数（**未判定时为 `—`，不是 0**） |
+    ///
+    /// **门槛另标、不挂在失联之下**（DAC-76）。
+    public static func unmetSampleInsufficient(
+        source: String,
+        sample: Int,
+        total: Int,
+        threshold: Int,
+        lost: Int?
+    ) -> String {
+        let lostText = lost.map { "\($0)" } ?? "—"
+        return L.pick(
+            "\(source) · 样本不足 · 样本 \(sample) / 总量 \(total)（门槛 \(threshold)，其中失联 \(lostText)）",
+            "\(source) · Insufficient samples · Samples \(sample) / Total \(total) (threshold \(threshold), lost \(lostText))"
+        )
+    }
+
+    /// ③ 页未达项 · **样本不足**行的追加句（TC-038）。
+    ///
+    /// 逐字挂在四数形态**之后**：「失联不补足，下一轮以新快照重算」。
+    /// **不带任何数字** ⇒ 不影响 TC-038「行内数字恰 4 个」。
+    public static func unmetSampleNote() -> String {
         L.pick(
-            "第 \(round) 轮 · 样本不足（\(sample) / \(threshold)）",
-            "Round \(round) · Insufficient samples (\(sample) / \(threshold))"
+            "失联不补足，下一轮以新快照重算",
+            "Lost entries are not backfilled; recalculated from a new snapshot next round"
+        )
+    }
+
+    /// ③ 页未达项 · **L0 误判**行（`a ≠ 0`）。
+    ///
+    /// 形如「npm/_npx · L0 误判 1 次（检查 128 次）」。
+    /// - `checkCount` 未判定时显示「—」（**不是 0** —— 0 会被读成「未检查」）。
+    public static func unmetL0Misjudged(source: String, missCount: Int, checkCount: Int?) -> String {
+        let checkText = checkCount.map { "\($0)" } ?? "—"
+        return L.pick(
+            "\(source) · L0 误判 \(missCount) 次（检查 \(checkText) 次）",
+            "\(source) · L0 misjudgment \(missCount) time(s) (\(checkText) check(s))"
+        )
+    }
+
+    /// ③ 页未达项 · **L0 未检查**行（`b = 0`）。
+    ///
+    /// PRD v5.6 :157：`b = 0` 本期不可达（判定域来源入域当轮即被 L0 判定 ⇒ `b ≥ 1` 恒成立）
+    /// ⇒ 这是**防御性表述**，不需单独立验收用例。
+    public static func unmetL0NeverChecked(source: String) -> String {
+        L.pick(
+            "\(source) · L0 未检查（检查 0 次）",
+            "\(source) · L0 not checked (0 checks)"
+        )
+    }
+
+    /// ③ 页未达项 · **L0 未判定**行（无法枚举本用户进程）。
+    ///
+    /// R2 §25.1 裁定一：`degraded = true` ⇒ 该来源 `a`/`b` 均不判定。
+    public static func unmetL0Undetermined(source: String) -> String {
+        L.pick(
+            "\(source) · L0 未判定（无法枚举本用户进程）",
+            "\(source) · L0 undetermined (can’t enumerate this user’s processes)"
+        )
+    }
+
+    /// ③ 页未达项 · **归因说明**（附在「样本不足」行**之后、同一行内**）。
+    ///
+    /// 逐字：「因存在 L0 误判，本版本不再提示可点亮进度」。
+    /// **不带数字** ⇒ 不影响 TC-038「行内数字恰 4 个」；
+    /// **不单独成行**（DAC-78：两行，0 容差）。
+    public static func unmetL0AttributionNote() -> String {
+        L.pick(
+            "因存在 L0 误判，本版本不再提示可点亮进度",
+            "Because L0 misjudgment exists, this version no longer shows enable progress"
         )
     }
 
