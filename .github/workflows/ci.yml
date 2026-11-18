@@ -2,7 +2,7 @@ name: CI
 
 # 这个 workflow 验什么、不验什么，先说清楚（失败时能分辨该修什么）：
 #
-# ✅ 能验：编译、440 个单测、错误码表一致性、页面结构与空实现检测、
+# ✅ 能验：编译、472 个单测、错误码表一致性、页面结构与空实现检测、
 #         接线自检（首启落盘→扫描→落盘→导出→清除）、PRD/R2 文档校验、打包脚本产物结构
 # ❌ 不能验：公证链（无 Developer ID）、端到端装机（无干净机）、
 #           GUI 交互（无显示会话）、滚动/焦点/键盘可达性
@@ -118,7 +118,7 @@ jobs:
         run: ./scripts/verify_a9.sh
 
       - name: Verify v2.6 wiring (real IO round-trip)
-        # 79 项：**真的走一遍**首启落盘 → 扫描 → 落盘 → 门槛链 → 导出脱敏 → 清除 → 定时任务
+        # 111 项：**真的走一遍**首启落盘 → 扫描 → 落盘 → 门槛链 → 导出脱敏 → 清除 → 定时任务
         # 比单测更重要：它验的是「数据层接上了没有」，而单测只验各模块自身契约。
         working-directory: ResidueApp
         run: swift run --disable-sandbox ResidueApp --verify-wiring /tmp/residue-wiring
@@ -138,11 +138,11 @@ jobs:
 
       # ── 文档基线校验 ────────────────────────────────────────
       - name: Verify PRD baseline
-        # 238 项（191 + 47）：PRD v5.5 的结构 / 落点 / 归零 / 一致性 / 自洽
+        # 238 项（191 + 47）：PRD v5.6 的结构 / 落点 / 归零 / 一致性 / 自洽
         run: ./tests/contract/check_all.sh
 
       - name: Verify R2 baseline
-        # 123 项：R2 v1.8 的结构 30 + 落地 65 + 归零 16 + 一致 10 + 自洽 2
+        # 123 项：R2 v1.10 的结构 30 + 落地 65 + 归零 16 + 一致 10 + 自洽 2
         run: python3 tests/contract/verify_r2.py
 
       - name: Verify declared counts match measured
