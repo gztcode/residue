@@ -120,11 +120,11 @@ final class StateFileTests: XCTestCase {
         XCTAssertEqual(SegmentDescriptor.byteCount, 24)
     }
 
-    /// 段数 = 来源数 × 3。
-    func testSegmentCountIsSourcesTimesThree() throws {
+    /// 段数 = 来源数 × 4（schema 2：每来源四段 F / C_done / Slots / Snapshot）。
+    func testSegmentCountIsSourcesTimesFour() throws {
         let data = try StateFileCodec.encode(header: makeHeader(), payloads: makePayloads())
         let contents = try StateFileCodec.decode(data)
-        XCTAssertEqual(contents.segments.count, Source.allCases.count * 3)
+        XCTAssertEqual(contents.segments.count, Source.allCases.count * 4)
     }
 
     // MARK: - ② 段长恒 = ceil(slotCount/8)
@@ -287,6 +287,88 @@ final class StateFileTests: XCTestCase {
         XCTAssertNotEqual(loaded?.header.sources[0].T, 0)
     }
 
+    // MARK: - 上一轮结算记录（CR-033 · 载体往返）
+
+    /// **旧载体（无 `previousRound` 键）必须仍能读** —— 解出来是 `nil`，**不是解码失败**。
+    ///
+    /// ## 为什么这条必须钉死
+    /// CR-033 之前写出的载体里**根本没有这个键**。往 `StateHeader` 加字段，
+    /// 若解码路径不容忍缺键 ⇒ **升级即判 `E-304`（载体损坏）** = 用户既有观察期被废。
+    ///
+    /// ## 「旧载体」怎么造（不复制生产布局）
+    /// 用**生产编码器**写一个 `previousRound == nil` 的头：合成 `Codable` 对 `nil`
+    /// 可选属性用 `encodeIfPresent` ⇒ **不写该键** ⇒ 与 CR-033 之前写出的载体**同形**。
+    /// 下面另有断言把「载体里确实没这个键」钉死 —— 否则「无键」只是空话。
+    func testOldCarrierWithoutPreviousRoundKeyDecodesToNil() throws {
+        var header = makeHeader()
+        header.previousRound = nil
+
+        let store = StateFile(directory: tmpDir)
+        try store.save(header: header, payloads: makePayloads())
+
+        // 前置：载体里确实没有该键
+        let json = try headerJSONObject(at: store.fileURL)
+        XCTAssertNil(json["previousRound"], "旧载体里不得有这个键")
+
+        let result = store.load()
+        XCTAssertNil(result.error, "旧载体必须照常可读（不得判损坏）")
+        XCTAssertFalse(result.readOnly)
+        XCTAssertNil(
+            result.contents?.header.previousRound,
+            "无键 ⇒ nil（不是 0、不是解码失败）"
+        )
+    }
+
+    /// **新载体往返保真**：上一轮记录逐字段不变。
+    ///
+    /// ⑤ 页「上一轮」行的四要素（轮次 / `K` / `T` / 冻结日）全部来自这里
+    /// ⇒ 任一字段在载体里丢了或变了，界面上那行就会说错话。
+    ///
+    /// ⚠️ 本条只锁**编解码层**；「开轮时真的写进去了」由 `ObservationWritebackTests` 锁。
+    func testPreviousRoundSurvivesCarrierRoundTrip() throws {
+        var header = makeHeader()
+        header.previousRound = PreviousRoundRecord(
+            round: 1,
+            source: .uvCache,
+            sample: 11,
+            total: 12,
+            settledAt: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+
+        let store = StateFile(directory: tmpDir)
+        try store.save(header: header, payloads: makePayloads())
+
+        // 前置：新载体里必须有这个键
+        let json = try headerJSONObject(at: store.fileURL)
+        XCTAssertNotNil(json["previousRound"], "新载体里必须有该键")
+
+        let result = store.load()
+        XCTAssertNil(result.error)
+        let record = result.contents?.header.previousRound
+        XCTAssertEqual(record?.round, 1)
+        XCTAssertEqual(record?.source, Source.uvCache)
+        XCTAssertEqual(record?.sample, 11)
+        XCTAssertEqual(record?.total, 12)
+        XCTAssertEqual(
+            record?.settledAt,
+            header.previousRound?.settledAt,
+            "冻结时刻必须逐秒保真（载体日期策略为 ISO-8601 秒级）"
+        )
+    }
+
+    /// 取载体里的 header JSON 段（**偏移取自 §5.1 布局常量**：magic 4 + ver 4 + hlen 4）。
+    ///
+    /// 只用于**键存在性断言**，**不重建任何解码语义** ——
+    /// 语义仍由生产解码器（`StateFileCodec.decode`）负责。
+    private func headerJSONObject(at fileURL: URL) throws -> [String: Any] {
+        let bytes = [UInt8](try Data(contentsOf: fileURL))
+        var headerLen = 0
+        for i in 0..<4 { headerLen |= Int(bytes[8 + i]) << (8 * UInt32(i)) }
+        let jsonData = Data(bytes[12..<(12 + headerLen)])
+        let object = try JSONSerialization.jsonObject(with: jsonData)
+        return try XCTUnwrap(object as? [String: Any])
+    }
+
     // MARK: - 校验三连：越界 / 重叠 / CRC
 
     /// **CRC 不一致 → `E-304`**。
@@ -320,7 +402,56 @@ final class StateFileTests: XCTestCase {
         XCTAssertNotNil(result.error)
     }
 
-    /// **E-304 时不提供「重置」入口、不自动重置**，且现场被保留为 `.corrupt`。
+    /// **`E-304` 之后再次 `load()` 不得被当成首启**（静默重建）。
+    ///
+    /// 首次 `load()` 把主文件移成 `.corrupt` 并返回只读。第二次 `load()` 时
+    /// 主文件已不存在 —— 若只看「主文件在不在」就会判成首启、返回空载体，
+    /// 上层 `AppModel` 于是写下默认 header：**磁盘上重新出现空载体，
+    /// `a` 被静默清零**，`.corrupt` 之外再无痕迹。
+    ///
+    /// 这条路径不是理论风险：`AppModel.init` 自己就会调 `loadAndProject()`
+    /// 一次，任何「重新加载」都会走第二遍。
+    func testSecondLoadAfterE304IsNotTreatedAsFirstRun() throws {
+        let store = StateFile(directory: tmpDir)
+        try store.save(header: makeHeader(), payloads: makePayloads())
+        var data = try Data(contentsOf: store.fileURL)
+        let mid = data.count / 2
+        data[mid] = data[mid] ^ 0xFF
+        try data.write(to: store.fileURL)
+
+        let first = store.load()
+        XCTAssertTrue(first.readOnly, "前置：首次加载应判损坏")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.fileURL.path),
+                       "前置：主文件已被移成 .corrupt")
+
+        let second = store.load()
+        XCTAssertTrue(second.readOnly, "第二次加载仍须只读 —— 不得当成首启")
+        XCTAssertNil(second.contents, "不得返回空载体（那会让上层写默认 header）")
+        XCTAssertEqual(second.error?.diagnostic, .e302)
+    }
+
+    /// **E-301 不得生成 `.corrupt`** —— 只读降级、保留原文件。
+    ///
+    /// schema 更高意味着用户装过更新版本写的载体。归档它等于毁掉新版本数据。
+    /// 与 E-304 的「留档」是两种相反处置，不可合并。
+    func testSchemaTooNewKeepsFileAndCreatesNoCorrupt() throws {
+        let store = StateFile(directory: tmpDir)
+        var bytes = Array("RSD1".utf8)
+        bytes += [9, 0, 0, 0]
+        bytes += [UInt8](repeating: 0, count: 12)
+        try Data(bytes).write(to: store.fileURL)
+
+        let result = store.load()
+        XCTAssertTrue(result.readOnly)
+        XCTAssertEqual(result.error?.diagnostic, .e301)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: store.fileURL.path),
+                      "E-301 必须保留主文件")
+        XCTAssertFalse(FileManager.default.fileExists(atPath:
+            tmpDir.appendingPathComponent("state.residue.corrupt").path),
+            "E-301 不得生成 .corrupt")
+    }
+
+    /// **`E-304` 时不提供「重置」入口、不自动重置**，且现场被保留为 `.corrupt`。
     func testE304PreservesCorruptFileWithoutAutoReset() throws {
         let store = StateFile(directory: tmpDir)
         try store.save(header: makeHeader(), payloads: makePayloads())
@@ -482,13 +613,14 @@ final class StateFileTests: XCTestCase {
             XCTAssertLessThan(Int(seg.sourceIndex), Source.allCases.count)
             XCTAssertTrue(SegmentKind.allCases.contains(seg.kind))
         }
-        // 每个来源三段齐
+        // 每个来源四段齐（schema 2）
         for (index, _) in Source.allCases.enumerated() {
             let kinds = contents.segments.filter { Int($0.sourceIndex) == index }.map { $0.kind }
-            XCTAssertEqual(kinds.count, 3, "每个来源应有 3 段")
+            XCTAssertEqual(kinds.count, 4, "每个来源应有 4 段")
             XCTAssertTrue(kinds.contains(.fBitmap))
             XCTAssertTrue(kinds.contains(.countedDone))
             XCTAssertTrue(kinds.contains(.slots))
+            XCTAssertTrue(kinds.contains(.snapshot))
         }
     }
 

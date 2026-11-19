@@ -33,7 +33,23 @@ CONTENTS="$APP/Contents"
 
 # 版本号：优先取环境变量；否则从 git describe 或日期生成
 VERSION="${RESIDUE_VERSION:-0.1.0}"
-BUILD_NUMBER="${RESIDUE_BUILD:-$(date +%Y%m%d%H%M)}"
+
+# 构建号：**默认取墙钟时间**（原实现），但它让「同一 commit 两次构建」
+# 产出不同二进制 → 二进制的 SHA-256 对不上。
+#
+# ⚠️ 这不违反 R2 §10.1 第 8 条的 SHA-256 对账 —— 那条要求的是
+# 「**同一份产物重新下载后**再算一次，两值一致（防上传损坏）」，
+# 不是「同一 commit 必须产出同一 SHA」（可复现构建）。
+#
+# 但构建号取墙钟仍然是无谓的不确定性来源：它让「这次构建和上次构建的
+# 二进制到底一样不一样」无法用 SHA 判断。故：
+#   · `RESIDUE_BUILD` 显式指定 → 用它（发布时写死，可对账）
+#   · 否则取 **git commit 短哈希**（同 commit → 同构建号；工作区脏则加 -dirty）
+#   · 都不行才退回墙钟（不在 git 仓库里时）
+BUILD_NUMBER="${RESIDUE_BUILD:-$(git rev-parse --short HEAD 2>/dev/null || date +%Y%m%d%H%M)}"
+if [ -z "${RESIDUE_BUILD:-}" ] && [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+  BUILD_NUMBER="$BUILD_NUMBER-dirty"
+fi
 
 # 签名身份：空 = ad-hoc（仅本地可跑，不可公证）
 IDENTITY="${CODESIGN_IDENTITY:--}"
@@ -271,6 +287,13 @@ echo "  产出: $DMG"
 SHA256="$(shasum -a 256 "$DMG" | awk '{print $1}')"
 echo "  SHA-256: $SHA256"
 echo "  （注：公证 staple 会改写 dmg，届时本脚本会重算并覆盖此值）"
+# **如实标注**：`.app` 内的二进制在固定 `RESIDUE_BUILD` 下是可复现的
+# （实测同一 commit 两次构建，`Contents/MacOS/Residue` 的 SHA 相同），
+# 但 **dmg 不可复现**：`hdiutil create` 会把卷创建时间写进卷头，
+# 同一源目录两次产出不同 SHA（实测）。这是 dmg 格式的固有属性，不是本脚本的缺陷。
+# 故：对账对象应是**发布时公布的那一份 dmg**（R2 §10.1 第 8 条的要求），
+# 而不是「任何人独立重建都能得到同一个 SHA」。
+echo "  （dmg 本身不可复现：卷头含创建时间。对账以发布方公布的这一份为准）"
 
 # ---------------------------------------------------------------------------
 # 7. 公证与钉票（**真身份下自动做，钉票对象是 dmg**）

@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 看清 `uv` / `npm(npx)` / `pipx` 在本机留下的缓存，只读统计 → **14 天影子观察期**证明自己判得准 → 才允许动手，且动手只做**原子 rename 到废纸篓**。
 
-代码在 `ResidueApp/`；`docs/` 下 133 份 `.md` 是**契约文档**，不是笔记 —— 见 §五。根目录只留 `README.md` / `ARCHITECTURE.md` / `CLAUDE.md` 三份导航文件。
+代码在 `ResidueApp/`；`docs/` 下 143 份 `.md` 是**契约文档**，不是笔记 —— 见 §五。根目录只留 `README.md` / `ARCHITECTURE.md` / `CLAUDE.md` 三份导航文件。
 
 ## 二、常用命令
 
@@ -17,23 +17,23 @@ SwiftPM 命令在 `ResidueApp/` 目录下执行（SwiftPM 包根）；文档基�
 ```bash
 swift build                      # 编译
 swift build -c release           # Release 会裁掉 #if DEBUG 的自检入口，必须单独验
-swift test                       # 全部单测（当前 283 个）
+swift test                       # 全部单测（当前 555 个）
 swift test --filter "MetricsTests"                                    # 跑一个测试类
 swift test --filter "ResidueCoreTests.MetricsTests/testThresholdIsMinOf30AndTotal"  # 跑单个用例
 
 python3 scripts/verify_codes.py   # 错误码表 ↔ 文档一致性（11 项）
-./scripts/verify_a9.sh            # 页面结构 + 界面禁算术 + 数据层接线 + 空实现（当前 72 项）
-swift run --disable-sandbox ResidueApp --verify-wiring /tmp/wiring   # 接线自检（真 IO 往返，当前 45 项）
+./scripts/verify_a9.sh            # 页面结构 + 界面禁算术 + 数据层接线 + 空实现（当前 80 项）
+swift run --disable-sandbox ResidueApp --verify-wiring /tmp/wiring   # 接线自检（真 IO 往返，当前 111 项）
 swift run --disable-sandbox ResidueApp --render-pages design-renders # 重渲染 16 张设计稿
-./scripts/make_app.sh             # 产出 build/Residue.app + .zip（无证书时 ad-hoc 签名）
+./scripts/make_app.sh             # 产出 build/Residue.app + Residue.app.dmg（无证书时 ad-hoc 签名）
 ./scripts/verify_a5.sh            # 产物结构校验（需先跑 make_app.sh）
 ```
 
 **文档基线校验**在 `tests/contract/`，脚本从自身位置推导仓库根，任意 cwd 都能跑：
 
 ```bash
-./tests/contract/check_all.sh        # PRD v5.5：4 个脚本（结构落点 191 + CR-022 47 + 声明归零 + 单一定义）
-python3 tests/contract/verify_r2.py  # R2 v1.8：结构 30 + 落地 65 + 归零 16 + 一致 10 + 自洽 2
+./tests/contract/check_all.sh        # PRD v5.6：4 个脚本（结构落点 191 + CR-022 47 + 声明归零 + 单一定义）
+python3 tests/contract/verify_r2.py  # R2 v1.10：结构 30 + 落地 65 + 归零 16 + 一致 10 + 自洽 2
 ```
 
 `check_all.sh`、`verify_r2.py`，以及 `check_all.sh` 调用的四个脚本（`verify18.py` / `verify_claims.py` / `verify_single_def.py` / `verify_cr022.py`）都**自动发现最新版本号**（不写死），新增版本文档后无需改脚本。历史版校验脚本（`verify3.py`…`verify17.py`）同放此处，保留备查。
@@ -124,11 +124,11 @@ AppModel（@MainActor，编排层）
 
 ## 五、文档是验收依据，不是背景介绍
 
-`docs/` 下 133 份 `.md` 分四类，各占一个目录：
+`docs/` 下 143 份 `.md` 分四类，各占一个目录：
 
 | 目录 | 类别 | 例子 | 约束 |
 |---|---|---|---|
-| `docs/contract/` | **契约基线** | `Residue-PRD-v5.5.md`、`Residue-R2-技术方案-v1.8.md`、`Residue-视觉基线-v1.1.md`、`Residue-DAC-v2.0.md`、`Residue-B1-功能用例集-v1.0.md` | 改它需要**变更单** |
+| `docs/contract/` | **契约基线** | `Residue-PRD-v5.6.md`、`Residue-R2-技术方案-v1.10.md`、`Residue-视觉基线-v1.1.md`、`Residue-DAC-v2.0.md`、`Residue-B1-功能用例集-v1.0.md` | 改它需要**变更单** |
 | `docs/changes/` | **变更单** | `Residue-CR-0xx-*.md` | **冻结后的唯一修改入口**。无单号的改动判无效 |
 | `docs/reviews/` | **评审单** | `Residue-CR-009-终审单-{架构,设计,质量}-第N轮.md` | 结论只有「通过 / 不通过」 |
 | `docs/ledger/` | **运行期记录** | `Residue-Phase3-闸门台账.md`（当前真实状态）、`Residue-A10-发布准入执行单-v1.0.md` | |
@@ -137,7 +137,7 @@ AppModel（@MainActor，编排层）
 
 **代码与文档对不上就是缺陷**，不是「文档过时了」。
 
-- 新增来源 → 改 `Source` 封闭枚举 + `SourceRule.defaults`，须出变更单
+- 新增来源 → 改 `Source` 封闭枚举 + `SourceRule.defaults`，须出变更单。**新 case 只能追加到枚举末尾** —— 插入中间会让存量载体（`state.residue`）的段索引整体错位，误判数 `a` 会归到错误的来源上（见 §七 9）
 - 新增错误码 → 改 `DiagnosticCode`，`verify_codes.py` 会核对码表 ↔ R2 §6
 - 新增/修改界面文案 → 改 `UICopy`，`verify_a9.sh` 第四节逐字核对
 
@@ -161,6 +161,7 @@ AppModel（@MainActor，编排层）
 6. **JSONEncoder / JSONDecoder 的 `dateEncodingStrategy` 必须成对。** 不对称 → `save` 成功、`load` 永远失败 → 偏好永远存不住，**完全静默**。
 7. **`b`（L0 检查次数）≠ `pNowCount`（被持有数）。** 混为一谈时「缓存满满但没人用」这种最理想场景会 `b = 0` → 门槛永远不满足。
 8. **`@MainActor` 类上的 `async` 函数不会自动离开主线程。** 扫描是重 I/O（实测两来源合计约 13 s）→ 必须 `Task.detached` + 进度汇报 + 可取消，三件缺一不可，否则都是「卡住」。
+9. **给 `Source` 枚举加新 case 只能追加到末尾，不能插在中间。** 存量 `state.residue` 的段表按**枚举声明序**对齐 → 中间插入会让存量载体的段索引整体错位（`uv` 的数据被读成 `brew` 的）→ 误判数 `a` 归到错误的来源上，**不变量④（删之前先证明自己判得准）静默失效**。同理，`rawValue` 已发布的值不可改。
 
 ## 八、提交与工作流约定
 

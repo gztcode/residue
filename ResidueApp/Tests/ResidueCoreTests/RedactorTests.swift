@@ -13,6 +13,23 @@ final class RedactorTests: XCTestCase {
         hostName: "MacBook-Pro.local"
     )
 
+    /// 造一个**真实位图**并返回它的置位数 —— 夹具里的 `fSetBits` 由它推导。
+    ///
+    /// ## 为什么夹具也必须「真」
+    /// `fSetBits` 的契约语义 = 「`F` 位图的**置位数**」。夹具若写死一个与位图
+    /// 无关的自造值（早先写的是 `30`），则「这个数必须来自位图」这件事
+    /// **永远没人守** —— 生产侧把字段写死成 `0` 时，夹具照样全绿。
+    ///
+    /// 改为从**真实位图**推导 ⇒ 夹具与生产共用同一原语（`NegativeBitmap`），
+    /// 口径一旦漂移，夹具立刻显形（不变量②：同一判定只有一个实现处）。
+    private func realFSetBits(setSlots: Int) -> Int {
+        var bitmap = NegativeBitmap()
+        for slot in 0..<setSlots { bitmap.set(slot) }
+        return NegativeBitmap.setBitCount(
+            ofBytes: bitmap.dataRepresentation(bitCount: setSlots)
+        )
+    }
+
     private func makeReport(
         evidence: [String] = [],
         execution: [String] = [],
@@ -35,7 +52,7 @@ final class RedactorTests: XCTestCase {
             ],
             diagnostics: Redactor.Diagnostics(
                 degraded: false, sameUIDTotal: 624, sameUIDRead: 624, statOtherUID: 173,
-                pNowCount: 3, fSetBits: 30, doneCount: 0, contentReads: 0,
+                pNowCount: 3, fSetBits: realFSetBits(setSlots: 30), doneCount: 0, contentReads: 0,
                 round: 2, countedDays: 14, a: 0, b: 256
             ),
             evidenceLines: evidence,
@@ -191,6 +208,76 @@ final class RedactorTests: XCTestCase {
     }
 
     // ======================================================================
+    // MARK: - ② 量段如实披露「无法归因」条数（CR-031 §五③ 裁决）
+    // ======================================================================
+
+    /// **「无法归因」的条数必须出现在导出报告里，且单列。**
+    ///
+    /// ## 为什么这是必须做的
+    /// PRD v5.6 M3 写着：「失联中的无法归因条数一并披露（快照里未能归因到
+    /// 四类中任一类的条目数，**单列、不并入已归因**）」。
+    ///
+    /// 「单列」在数据层已落地（`SourceHeaderEntry.unattributableCount`），
+    /// 但**呈现层零命中** —— 数据躺在状态文件里没人看得到，等于没披露：
+    /// 维护者看报告只能看到 `J = 3`，无法判断这 3 条里有多少是真说不清。
+    ///
+    /// CR-031 §五③ 的裁决原文点名了落点：「`SourceHeaderEntry.unattributableCount`
+    /// 承载该数，**导出报告如实呈现（不隐藏）**」。
+    func testMetricsSectionHasUnattributableColumn() throws {
+        let text = try Redactor.render(makeReport(), context: context)
+        XCTAssertTrue(
+            text.contains("其中无法归因"),
+            "② 量段必须单列披露「无法归因」条数（PRD v5.6 M3 · CR-031 §五③）"
+        )
+    }
+
+    /// **「无法归因」的真实条数必须落在表里，不能被渲染成「—」或 0。**
+    ///
+    /// 这是一条**护栏**（characterization）测试：它钉住已实现的渲染行为，
+    /// 让后来的重构改坏这一列时立刻变红。
+    ///
+    /// 覆盖两种「看起来差不多」的数字：
+    /// - `unattributable = 2` ⇒ 必须渲染成 `2`（不是「—」，不是 0）
+    /// - `unattributable = nil` ⇒ 必须渲染成「—」（不变量③：`nil ≠ 0`；
+    ///   0 会被读成「一条都无法归因」，而事实是「还没结算」）
+    func testUnattributableValueIsRenderedNotDashed() throws {
+        let report = Redactor.Report(
+            appVersion: "1.0.0 (1)", schemaVersion: 1,
+            osVersion: "macOS 14.6", arch: "arm64",
+            sources: [
+                Redactor.SourceMetrics(
+                    source: "uv.cache", state: "inDomain",
+                    t: 30, k: 27, j: 3, unattributable: 2, h: 30, a: 0, b: 128
+                ),
+                Redactor.SourceMetrics(
+                    source: "npm.npx", state: "inDomain",
+                    t: nil, k: nil, j: nil, unattributable: nil, h: nil, a: 0, b: 0
+                ),
+            ],
+            diagnostics: makeReport().diagnostics,
+            evidenceLines: [], executionLines: [], upstreamCommands: []
+        )
+        let text = try Redactor.render(report, context: context)
+
+        // 整行断言：列序 = 来源 | 状态 | T | K | J | 其中无法归因 | H | a | b
+        XCTAssertTrue(
+            text.contains("| uv.cache | inDomain | 30 | 27 | 3 | 2 | 30 | 0 | 128 |"),
+            "「无法归因 = 2」必须渲染成 2（实为：\(row(in: text, source: "uv.cache"))）"
+        )
+        XCTAssertTrue(
+            text.contains("| npm.npx | inDomain | — | — | — | — | — | 0 | 0 |"),
+            "尚未结算 ⇒「无法归因」必须渲染成「—」而不是 0（实为：\(row(in: text, source: "npm.npx"))）"
+        )
+    }
+
+    /// 取报告里某个来源的量段整行（断言失败时用它显示「实为」）。
+    private func row(in text: String, source: String) -> String {
+        text.split(separator: "\n")
+            .first { $0.hasPrefix("| \(source) |") }
+            .map(String.init) ?? "（报告里没有 \(source) 行）"
+    }
+
+    // ======================================================================
     // MARK: - 参数脱敏的两个真缺陷（2026-11-08 在接线自检里抓到）
     // ======================================================================
 
@@ -261,6 +348,47 @@ final class RedactorTests: XCTestCase {
         XCTAssertFalse(joined.contains("my-app"), "给了项目名却没脱敏：\(joined)")
         XCTAssertTrue(joined.contains("<project>"), "应出现 <project>：\(joined)")
         XCTAssertTrue(joined.contains("<path>"), "home 也应被替换：\(joined)")
+    }
+
+    // MARK: - 双语（段名双写、正文跟随界面语言）
+
+    /// 英文界面下导出的报告：**正文无中文**，但**段标记仍中英双写**。
+    ///
+    /// 为什么段标记不能跟着语言变：它同时是「五段齐全」自检的判据。
+    /// 若标记随语言变，自检在切换语言后就可能对不上 —— 同一份报告换个
+    /// 语言导出就判「缺段」。双写让两种语言都能定位，自检也稳定。
+    func testEnglishReportHasNoChineseBodyButBilingualMarkers() throws {
+        let previous = L.current
+        L.current = .en
+        defer { L.current = previous }
+
+        let text = try Redactor.render(makeReport(), context: context)
+
+        // 正文（表头 / 标题）必须是英文
+        XCTAssertTrue(text.contains("# Residue Redacted Diagnostic Report"))
+        XCTAssertTrue(text.contains("| Item | Value |"))
+        XCTAssertTrue(text.contains("### Evidence chain"))
+
+        // 段标记双写：五段都必须同时含中文名与英文名
+        for (zh, en) in [
+            ("① 环境", "Environment"), ("② 量", "Metrics"),
+            ("③ 取证", "Diagnostics"), ("④ 证据", "Evidence"),
+            ("⑤ 上游", "Upstream"),
+        ] {
+            XCTAssertTrue(text.contains(zh), "段标记应保留中文名：\(zh)")
+            XCTAssertTrue(text.contains(en), "段标记应保留英文名：\(en)")
+        }
+    }
+
+    /// 中文界面下：正文是中文（默认行为不变）。
+    func testChineseReportKeepsChineseBody() throws {
+        let previous = L.current
+        L.current = .zhHans
+        defer { L.current = previous }
+
+        let text = try Redactor.render(makeReport(), context: context)
+        XCTAssertTrue(text.contains("# Residue 脱敏诊断报告"))
+        XCTAssertTrue(text.contains("| 项 | 值 |"))
     }
 
     /// **短串不作替换规则**（`needle.count >= 3` 的保护）。

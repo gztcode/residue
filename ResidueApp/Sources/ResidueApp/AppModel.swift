@@ -93,6 +93,13 @@ final class AppModel {
         var upstream: [UpstreamCommand] = []
         /// L0 快照。
         var snapshot: L0Snapshot?
+        /// 本轮各来源的候选（键 = `source.rawValue`）。
+        var candidatesBySource: [String: [ScanEngine.Candidate]] = [:]
+        /// 本轮各来源的 L0 判定结果（键 = `source.rawValue`）。
+        ///
+        /// **判定在主 actor 之外做完**（每条候选一次 `lstat`，是重 I/O），
+        /// 这里只把**结果**带回来 —— 写回层只吃结果、不做探测。
+        var judgmentsBySource: [String: [CandidateID: L0Verdict]] = [:]
         /// 本轮实际扫描的模式。
         var mode: ScanEngine.Mode = .full
         /// 累计扫描条目数。
@@ -101,6 +108,15 @@ final class AppModel {
         var candidatesFound: Int = 0
         /// 首个中止原因。
         var abortReason: String?
+        /// 本轮使用的来源根（`source.rawValue` → 根路径）。
+        /// 执行期越界判定（AC-19）必须用**扫描时这一份**。
+        var roots: [String: String] = [:]
+        /// **被中断来源的断点**（`source.rawValue` → 断点）。
+        ///
+        /// 只有**中断**的来源才有断点 —— 正常扫完的来源引擎返回 `nil`
+        /// （没有「未扫完的部分」，续扫无从谈起，也不该续）。
+        /// 收尾时整份落 `state/checkpoints.json`，供下次启动续扫。
+        var abortedCheckpoints: [String: ScanEngine.Checkpoint] = [:]
     }
 
     /// **当前扫描的进度**（供界面显示「在动」）。
@@ -114,15 +130,16 @@ final class AppModel {
     /// **当前扫描的取消令牌**（主 actor 写、后台任务读）。
     private var scanCancelBox: CancelBox?
 
-    /// 上次扫描的 L0 是否降级（无法枚举同 uid 进程）。
-    private(set) var lastScanDegraded = false
-
     /// AC-15 的顺延条目数（本次因上限而未执行的条数）。
     private(set) var deferredCount: Int = 0
     /// 上次实际执行时刻（「首次 / 稳定后」的阶段分界依据之一）。
     private(set) var lastExecutionAt: Date?
+    /// 最近一次清理的结果摘要（供首屏显示「删了什么」）。
+    private var lastExecutionNotice: PageModel.ExecutionNotice?
     private let stateFile: StateFile
     private let writer: RecordWriter
+    /// 扫描断点（`state/checkpoints.json` · AC-20 断点续扫）。
+    private let checkpoints: CheckpointStore
     private let engine = ScanEngine()
     private let probe = UpstreamRunner()
 
@@ -140,13 +157,27 @@ final class AppModel {
     /// 本次扫描的上游命令调用记录（AC-19 的界面落点数据源）。
     private var lastUpstreamCommands: [UpstreamCommand] = []
 
+    /// **本轮扫描用的来源根**（`source.rawValue` → 根路径）。
+    ///
+    /// AC-19 / R2:218 的执行期「真实路径在该来源允许根内」判定需要它。
+    /// 不许在执行时重新 `resolveSourceRoots` —— 那要跑上游命令（`uv cache dir`），
+    /// 而且可能返回与扫描时不同的根（用户改了配置）→ 判定用的根与实际扫描的根不一致。
+    /// **判依据必须与扫描时同一份**（同一判定只有一个来源）。
+    private var lastSourceRoots: [String: String] = [:]
+
     init(
         stateFile: StateFile = StateFile(),
         writer: RecordWriter = RecordWriter(),
-        preferencesStore: PreferencesStore? = nil
+        preferencesStore: PreferencesStore? = nil,
+        checkpoints: CheckpointStore? = nil
     ) {
         self.stateFile = stateFile
         self.writer = writer
+        // 断点落 `state/` 子目录（**不计入 N7 计量**，但计入 N7 清除范围），
+        // 与 `state/schedule.json` 同级 —— 见 R2 §5.5 / §10.3。
+        self.checkpoints = checkpoints ?? CheckpointStore(
+            directory: stateFile.directory.appendingPathComponent("state", isDirectory: true)
+        )
         self.preferencesStore = preferencesStore
             ?? PreferencesStore(directory: stateFile.directory)
         loadAndProject()
@@ -154,7 +185,12 @@ final class AppModel {
         // **首启必须落盘**：若载体还不存在，立刻写出初始态。
         // 否则「卸载 → 重装 → 判据为初始态」无法与「从来没有写过」区分
         // —— A-10 第 9 条的首演判据就永远不可达（常在线在发布把关里点出过）。
-        if !FileManager.default.fileExists(atPath: stateFile.fileURL.path) {
+        //
+        // ⚠️ **只读态例外**：载体损坏时 `load()` 已把主文件移成 `.corrupt`，
+        // 此时「主文件不存在」≠「首启」。若照样写默认载体，就是**静默重建**：
+        // 现场被一个空文件覆盖，`a` 被清零，`.corrupt` 之外再无痕迹。
+        // 只读态的恢复出口是用户显式动作，不是自动重置（不变量④）。
+        if !readOnly, !FileManager.default.fileExists(atPath: stateFile.fileURL.path) {
             persist()
         }
 
@@ -173,10 +209,32 @@ final class AppModel {
     private func startScheduler() {
         if scheduler == nil {
             scheduler = ScheduledRunner { [weak self] mode in
-                await self?.runScan(mode: mode)
+                await self?.scheduledWork(mode: mode)
             }
         }
         restartScheduler()
+    }
+
+    /// **定时执行点**（AC-04）：扫描 → 若已点亮自动删除，则执行清理批次。
+    ///
+    /// ## 为什么这是「到达定时执行点」的唯一落点
+    ///
+    /// 原先 `work` 闭包只调 `runScan` —— 定时任务**扫完就停**，
+    /// 从不执行删除。AC-04 写的是「到达定时执行点执行删除」，于是这条
+    /// AC 在代码里没有任何落点：排程在跑、扫描在跑，但**删除永远不会被触发**。
+    ///
+    /// ## 三道闸（与手动「立即执行」同源，不另立第二套）
+    ///
+    /// 1. **`autoDeleteEnabled`** —— 用户没点亮自动删除，定时点就**只扫描不删**
+    ///    （这是「观察期」的意义：影子期内只观测，绝不动手）
+    /// 2. **`executeBatch` 内部兜底 `canLightUp`** —— 即使开关开着，未达线也不执行
+    /// 3. **`executeBatch` 内部兜底 `isScanning`** —— 防重复
+    ///
+    /// 闸 2/3 在 `executeBatch` 里，此处只加闸 1，避免定时点绕过「用户主动点亮」。
+    private func scheduledWork(mode: ScanEngine.Mode) async {
+        await runScan(mode: mode)
+        guard contents.header.autoDeleteEnabled else { return }
+        await executeBatch()
     }
 
     /// 按当前状态重排定时任务（登录项态或自动删除态变化后调用）。
@@ -209,7 +267,7 @@ final class AppModel {
         locationWarning = LoginItemManager.locationWarning()
         if scheduler == nil {
             scheduler = ScheduledRunner { [weak self] mode in
-                await self?.runScan(mode: mode)
+                await self?.scheduledWork(mode: mode)
             }
         }
         restartScheduler()
@@ -245,7 +303,146 @@ final class AppModel {
         if let c = result.contents {
             contents = c
         }
+        applyObservationResetIfNeeded()
+        loadExecutions()
         rebuild()
+    }
+
+    /// 当前应用版本（`CFBundleShortVersionString`）。
+    private static var currentAppVersion: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0"
+    }
+
+    /// **应用版本变更 → 载体清零**（M4「重置边界」）。
+    ///
+    /// ## 为什么这必须在每次启动时判（原先这段是死代码）
+    ///
+    /// `a`（L0 误判累计）是「本应用版本内判错过几次」。**跨版本没有可比性**：
+    /// 新版本改了判定规则，旧版本的「零误判」证明不了新版本判得准。
+    ///
+    /// 不重置 = **旧版本攒下的安全凭证被新版本继承** → 用户升级完立刻就能点亮
+    /// 自动删除，而新规则一次都没被观察过。这是不变量④（删之前先证明判得准）
+    /// 在版本边界上的失效。
+    ///
+    /// ## 四条边界（与 `VersionResetTests` / `ObservationSignatureTests` 一一对应）
+    ///
+    /// | 情形 | 行为 |
+    /// |---|---|
+    /// | `appVersion` 为空（首启） | 只记下版本与指纹，**不清零** |
+    /// | 版本与指纹都没变 | 不动（否则每次启动重置 → 永远点不亮） |
+    /// | 版本变了 | 清零凭证（`a` 一并清零），**保留轮次** |
+    /// | 版本没变但判定域指纹变了 | 清零凭证，**保留 `a`**（M4） |
+    ///
+    /// ## 为什么判定住在 Core
+    ///
+    /// 「要不要重置」是**判定**，不变量②要求它只有一个实现处。
+    /// `AppModel` 在 App 层 ⇒ **不可单测**（本仓库只有一个 test target，
+    /// 只依赖 `ResidueCore`）⇒ 判定必须下沉到 Core 的
+    /// `ObservationResetPolicy.reason`，这里只做分派。
+    private func applyObservationResetIfNeeded() {
+        // ⚠️ **只读 / 损坏态绝不写盘**。
+        //
+        // 载体损坏时 `load()` 把主文件移成 `.corrupt` 并返回只读。
+        // 若此时继续走「首启 → 写默认 header」这条路：
+        //   · 磁盘上立刻出现一个**空的 state.residue**（现场被覆盖）
+        //   · `a` 被静默清零 → 旧版本攒的误判证据消失
+        //   · 下一次启动已经看不到 `.corrupt` 之外的任何痕迹
+        //
+        // 那是「静默重建」，直接违反不变量④：**不知道就不能当成知道**。
+        // 只读态的恢复出口是用户显式动作（重装 / 修载体），不是自动重置。
+        guard !readOnly else { return }
+
+        let current = Self.currentAppVersion
+        let reason = ObservationResetPolicy.reason(
+            storedAppVersion: contents.header.appVersion,
+            currentAppVersion: current,
+            storedDecisionDomainSignature: contents.header.decisionDomainSignature,
+            currentDecisionDomainSignature: Source.decisionDomainSignature
+        )
+
+        switch reason {
+        case .none:
+            // 首启：载体里没有版本 → 只记下版本与指纹，不清零（没有旧凭证可清）。
+            //
+            // ⚠️ 指纹**必须在这里写下** —— 否则每次启动都会判成
+            // 「判定域指纹缺失 ⇒ 变更」⇒ 反复重置 ⇒ 产品永远点不亮。
+            guard contents.header.appVersion.isEmpty else { return }
+            contents.header.appVersion = current
+            contents.header.decisionDomainSignature = Source.decisionDomainSignature
+            persist()
+        case .appVersionChanged:
+            performObservationReset(preservingMissCount: false)
+        case .decisionDomainChanged:
+            performObservationReset(preservingMissCount: true)
+        }
+    }
+
+    /// 执行一次观察期重置（**版本变更清 `a` / 判定域变更保留 `a`**）。
+    private func performObservationReset(preservingMissCount: Bool) {
+        do {
+            try stateFile.clearCarrierForObservationReset(
+                newAppVersion: Self.currentAppVersion,
+                newDecisionDomainSignature: Source.decisionDomainSignature,
+                preservingMissCount: preservingMissCount,
+                preservedRound: contents.header.round
+            )
+            // 内存态同步成重置后的载体，避免界面继续显示旧凭证。
+            //
+            // ⚠️ 回读失败时**不覆盖内存态** —— 覆盖等于「清空成什么都没有」，
+            // 那会把 `a` 在界面上显示成 0（= 放行），违反不变量④。
+            let reloaded = stateFile.load()
+            if let error = reloaded.error {
+                errorMessage = describeWriteError(error)
+                return
+            }
+            contents = reloaded.contents ?? StateFileContents()
+            if contents.header.appVersion.isEmpty {
+                contents.header.appVersion = Self.currentAppVersion
+            }
+        } catch {
+            errorMessage = describeWriteError(error)
+        }
+    }
+
+    /// **回读 `execution.jsonl`**（AC-18 / AC-13）。
+    ///
+    /// ## 为什么必须回读（原先只写不读）
+    ///
+    /// `execution.jsonl` 是执行记录的**唯一持久载体**。原实现只 append、从不读 → 后果：
+    ///
+    /// | 症状 | 根因 |
+    /// |---|---|
+    /// | 重启后 ⑦ 页「举证链与日志」清空 | `executions` 每次启动都是 `[]` |
+    /// | 所有「可恢复」按钮消失（恢复无从发起） | 同上 —— 内存里没有记录 |
+    /// | `isFirstRun` 永远为真 | 它判 `executions.isEmpty` |
+    ///
+    /// 第三条最阴：AC-15 的「首次档」与「稳定后档」因此**永远停在首次档**，
+    /// 容量上限（5 GB / 10%）用了一次又一次，从不进入稳定档（20%）。
+    ///
+    /// ## 解码方式
+    ///
+    /// `readLines` 返回 `[String: Any]`（已解析的字典，丢了原始行文本）。
+    /// 这里重新序列化成 JSON 再交给 `iso8601` 解码器 —— 与 `RecordWriter.append`
+    /// 的编码策略必须**成对**（`dateEncodingStrategy = .iso8601`），
+    /// 否则解码静默失败、记录全丢（本仓库 Preferences 踩过同一个坑）。
+    private func loadExecutions() {
+        guard let dicts = try? writer.readLines(kind: .execution), !dicts.isEmpty else {
+            executions = []
+            return
+        }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        var loaded: [ExecutionRecord] = []
+        loaded.reserveCapacity(dicts.count)
+        for dict in dicts {
+            guard let data = try? JSONSerialization.data(withJSONObject: dict),
+                  let rec = try? decoder.decode(ExecutionRecord.self, from: data)
+            else { continue }
+            loaded.append(rec)
+        }
+        // **按执行时刻排序**：文件顺序是 append 顺序，但恢复动作会再追加一条
+        // 同一 candidate 的 `restored_by_user`。排序后界面按时间线读才对。
+        executions = loaded.sorted { $0.executedAt < $1.executedAt }
     }
 
     private func rebuild() {
@@ -254,7 +451,9 @@ final class AppModel {
             candidates: candidates,
             executions: executions,
             readOnly: readOnly,
-            loading: isScanning,
+            // ★ 加载态只有一个事实源：`scanProgress`（§3.4/§3.9）。
+            //   `nil` = 不在扫描 ⇒ 界面不画进度横条。
+            scanProgress: isScanning ? scanProgress : nil,
             degraded: lastScanDiagnostics.degraded,
             coverage: L0Coverage(
                 sameUIDTotal: lastScanDiagnostics.coverage.sameUIDTotal,
@@ -274,6 +473,8 @@ final class AppModel {
             whitelist: preferences.whitelist
         )
         pageModel = PageModelBuilder.build(input)
+        // **运行期反馈必须跨 rebuild 存活**（它不是载体投影，但用户在等这个答复）
+        pageModel.lastExecutionNotice = lastExecutionNotice
     }
 
     // MARK: - 扫描
@@ -317,7 +518,9 @@ final class AppModel {
         }
         guard !isScanning else { return }   // **防重复点击**（后台化后更容易被点到）
         isScanning = true
-        scanProgress = ScanProgress()
+        // ★ 起手就标「在跑」⇒ 页头按钮进「扫描中…」态、界面不空白（§3.8）。
+        //   此时分母未知（`totalSources == 0`）⇒ 圆环只画轨道不画弧。
+        scanProgress = ScanProgress(isRunning: true)
         rebuild()
 
         let started = Date()
@@ -329,6 +532,33 @@ final class AppModel {
         // ---- 取消令牌（**主 actor 持有**，后台任务读它）----
         let cancelBox = CancelBox()
         scanCancelBox = cancelBox
+
+        // ---- 断点续扫（AC-20 / R2 §5.5）----
+        //
+        // ⚠️ **断点此前从未落过盘**：引擎一直能生产它，但 `runScan` 把
+        // `result.checkpoint` 直接丢弃、日志里 `breakpointSaved` 写死 `false`。
+        // 于是进程一重启断点就没了 —— 用户取消/超时中断一次，13 秒要从头再来。
+        //
+        // `E-106`（断点不可信）→ **全量重扫**，不拿坏断点续。
+        let resumeCheckpoints: [String: ScanEngine.Checkpoint]
+        switch checkpoints.load() {
+        case .none:
+            resumeCheckpoints = [:]
+        case .usable(let cps):
+            resumeCheckpoints = cps
+        case .corrupt(let reason):
+            // 坏断点必须**如实告诉用户**并丢弃：拿它续扫会静默少算候选
+            // → `T` 偏小 → 门槛判据建立在错数上。
+            checkpoints.clear()
+            errorMessage = describe(.e106, detail: reason)
+            resumeCheckpoints = [:]
+        }
+        // 断点只在 `full` 模式下有意义：增量扫描本就只查已知候选，
+        // 拿全量断点去续会让「增量」静默变成「不扫」。
+        let usableCheckpoints = (mode == .full) ? resumeCheckpoints : [:]
+        // **非全量扫描不得沿用旧断点** —— 那份断点描述的是上次被中断的全量扫描，
+        // 与本次模式不符，续上去就是错。
+        if mode != .full { checkpoints.clear() }
 
         // ---- 进度轮询（**主 actor 上的定时器**）----
         //
@@ -343,7 +573,10 @@ final class AppModel {
             while !Task.isCancelled {
                 let p = cancelBox.takeProgress()
                 if p != scanProgress {
-                    scanProgress = p
+                    scanProgress = p        // 权威活值
+                    // ★ 同 tick 回填页面模型：`rebuild()` 会整体替换 `pageModel`，
+                    //   只写 `scanProgress` 的话，横条会停在上一拍（§3.9）。
+                    pageModel.scanProgress = p
                 }
                 try? await Task.sleep(for: .milliseconds(100))
             }
@@ -361,44 +594,109 @@ final class AppModel {
                 upstream: &job.upstream
             )
 
+            // ★ 累加器：**分母先到**（进循环之前）⇒ 第一拍的圆环就画得出弧（§3.6 (a)）
+            var acc = ScanProgressAccumulator(totalSources: roots.count)
+            cancelBox.report(acc.starting(elapsed: Date().timeIntervalSince(started)))
+
             // ---- 逐来源扫描 ----
             for (sourceName, root) in roots {
+                // **留存来源根**：执行期越界判定（AC-19）用它，
+                // 不用执行时重新解析的那份（可能已变）。
+                job.roots[sourceName] = root
                 // **取消检查**：每条来源一次（来源只有 3 个，开销可忽略）
                 if cancelBox.isCancelled { break }
-                guard FileManager.default.fileExists(atPath: root) else { continue }
+                guard FileManager.default.fileExists(atPath: root) else {
+                    // ★ 根不存在 = 这个来源已经扫完了（结果是「没有」）⇒ 分子照样推进（§3.6 (c)）
+                    cancelBox.report(acc.completing(
+                        source: sourceName, files: 0, candidates: 0,
+                        elapsed: Date().timeIntervalSince(started)
+                    ))
+                    continue
+                }
                 do {
+                    // ★ 不可变快照：`progress:` 闭包是 `@Sendable`，捕获 `var` 编译期报错（§3.7）
+                    let base = acc
                     let result = try engine.scan(
                         root: root,
                         mode: mode,
+                        // 续扫：该来源上次中断时的断点（没有则全量新扫）
+                        checkpoint: usableCheckpoints[sourceName],
+                        // ---- 中止检查（AC-20：取消 5 s 内停 I/O）----
+                        //
+                        // ⚠️ **必须在引擎内部逐目录检查**，不能只在外层
+                        // `for (sourceName, root)` 循环里查一次：一个来源 11 万条目
+                        // 的遍历中途不回头，取消要等它**整条扫完**才生效
+                        // （实测单来源 ~6.7 s）→ 用户点了取消，界面还在扫。
+                        // 契约要的是「取消动作后 5 秒内无新增扫描 I/O」。
+                        abortCheck: ScanEngine.AbortCheck {
+                            cancelBox.isCancelled ? .userCancelled : nil
+                        },
+                        // ---- 超时（N1：全量扫描 600 s → `E-105`）----
+                        deadline: started.addingTimeInterval(ScanEngine.fullScanTimeout),
                         now: started,
                         // **进度回流**：每 2000 条一次 → 11 万条约 56 次
                         progress: { p in
-                            cancelBox.report(
-                                ScanProgress(
-                                    source: p.source,
-                                    filesScanned: p.filesScanned,
-                                    candidatesFound: p.candidatesFound,
-                                    elapsed: p.elapsed,
-                                    isRunning: true
-                                )
-                            )
+                            // ★ (b) 点：本来源进行中（分子不动，条目数临时叠加显示）
+                            cancelBox.report(base.progressing(
+                                source: p.source,
+                                deltaFiles: p.filesScanned,
+                                deltaCandidates: p.candidatesFound,
+                                elapsed: Date().timeIntervalSince(started)
+                            ))
                         }
                     )
                     job.results.append((sourceName, result))
-                    job.filesScanned += result.filesScanned
-                    job.candidatesFound += result.candidates.count
+                    // ★ (c) 点：**分子推进**（圆环走一格）+ 该来源的最终数落进合计
+                    //   ⇒ 小来源（< progressEvery = 2000 条）也会推进（修缺陷 #8）
+                    cancelBox.report(acc.completing(
+                        source: sourceName,
+                        files: result.filesScanned,
+                        candidates: result.candidates.count,
+                        elapsed: Date().timeIntervalSince(started)
+                    ))
+                    // 中断的来源 → 带走它的断点，收尾时落盘（AC-20 可续扫）
+                    if let cp = result.checkpoint {
+                        job.abortedCheckpoints[sourceName] = cp
+                    }
                     if let ab = result.aborted, job.abortReason == nil {
                         job.abortReason = ab.rawValue
                     }
                 } catch {
                     // 单个来源不可读不阻断整体（AC-14 第一类：来源不可读 → 降级只读该来源）
                     job.failures.append((sourceName, error.localizedDescription))
+                    // ★ 失败**也算这个来源处理完了** ⇒ 分子照样推进
+                    //   （否则圆环会卡在失败来源那一格，直到整轮结束才跳走）
+                    cancelBox.report(acc.completing(
+                        source: sourceName, files: 0, candidates: 0,
+                        elapsed: Date().timeIntervalSince(started)
+                    ))
                 }
             }
+
+            // ★ 合计回填 `ScanJob`（执行记录用）⇒ **单一计数器**：
+            //   累加只发生在 `acc` 里（不变量②）。
+            job.filesScanned = acc.filesScanned
+            job.candidatesFound = acc.candidatesFound
 
             // ---- L0 探测（排除自身，防自污染）----
             // **也在主 actor 之外**：它要枚举同 uid 进程的 fd，同样是重 I/O。
             job.snapshot = L0Probe.snapshot(excludePIDs: excludePIDs)
+
+            // ---- 逐候选 L0 判定（**也在主 actor 之外**）----
+            //
+            // 每条候选一次 `lstat`（十万级）⇒ 同样是重 I/O，
+            // 放主 actor 会让界面卡住（§七坑 8）。
+            //
+            // 判定结果**按来源分组**带回主 actor：探测在 `L0Judge`、
+            // 归因在 `ObservationWriteback`，两层分开，写回层可纯函数单测。
+            let judgeSnapshot = job.snapshot ?? L0Snapshot()
+            for (sourceName, result) in job.results {
+                job.candidatesBySource[sourceName] = result.candidates
+                job.judgmentsBySource[sourceName] = L0Judge.judge(
+                    candidates: result.candidates,
+                    snapshot: judgeSnapshot
+                )
+            }
             return job
         }.value
 
@@ -420,6 +718,8 @@ final class AppModel {
         candidates = allCandidates
         lastUpstreamCommands = job.upstream
         lastScanMode = job.mode
+        // **执行期越界判定的依据**（AC-19）：与本次扫描同一份根
+        lastSourceRoots = job.roots
 
         // **来源级错误**（此时已在主 actor，可用 `describeScanError` 取码表文案）
         if let first = job.failures.first {
@@ -427,7 +727,42 @@ final class AppModel {
         }
 
         let snapshot = job.snapshot ?? L0Snapshot()
-        lastScanDegraded = snapshot.degraded
+
+        // ---- 写回层（Core · 「一次扫描 → 载体」的**唯一**转换处）----
+        //
+        // 取快照 / 结算 / `a` 写入 / `b` 累计 / 计数日推进 **全在这里发生**。
+        // 编排层只负责把扫描结果**收集齐**再交给它 ——
+        // 编排层一旦自己算这些量，就出现了第二套实现，两处必然分叉
+        // （这正是 CR-031 要修的断链：`K` / `J` / `producedAt` 从未被写过非空值）。
+        var scannedSources: Set<Source> = []
+        var writebackCandidates: [Source: [CandidateID]] = [:]
+        var writebackJudgments: [Source: [CandidateID: L0Verdict]] = [:]
+        for (sourceName, _) in job.results {
+            guard let source = Source(rawValue: sourceName) else { continue }
+            scannedSources.insert(source)
+            writebackCandidates[source] = (job.candidatesBySource[sourceName] ?? []).map {
+                CandidateID(path: $0.path, birthtime: $0.birthtime)
+            }
+            writebackJudgments[source] = job.judgmentsBySource[sourceName] ?? [:]
+        }
+
+        let outcome = ObservationWriteback.apply(
+            input: ObservationWriteback.Input(
+                now: started,
+                // **中止 ≠ 失败，但中止的那次扫描不算「完成」**：
+                // 中止不取快照、不结算、不推进计数日（仍累计 `a` / `b`）。
+                succeeded: job.abortReason == nil,
+                mode: job.mode,
+                degraded: snapshot.degraded,
+                scannedSources: scannedSources,
+                candidates: writebackCandidates,
+                judgments: writebackJudgments
+            ),
+            header: contents.header,
+            payloads: contents.payloads
+        )
+        contents.header = outcome.header
+        contents.payloads = outcome.payloads
 
         // **`pNowCount` 与 `b` 是两个不同的量，曾经被混成一个变量**
         //
@@ -440,10 +775,14 @@ final class AppModel {
         // **「缓存满满但没有任何进程在用」是最理想的可清理场景，
         // 而它恰好 `countHeld = 0` → `b = 0` → 门槛永远不满足 → 永远点不亮。**
         //
-        // 正确口径（M5）：「计数对象 = 对某候选执行 L0 判定的一次」。
-        // 每条候选都会被判一次，所以 `b` = 参与判定的候选数。
-        let pNowCount = countHeld(in: snapshot)
-        let checkedCount = countL0Checks()
+        // 现在两者都从**判定结果**导出（判定是唯一来源）：
+        // `pNowCount` = 判为「有活引用」的条数；`b` = 本轮真正执行了判定的条数。
+        let pNowCount = writebackJudgments.values.reduce(0) { total, verdicts in
+            total + verdicts.values.filter { $0 == .hasLiveReference }.count
+        }
+        // 降级（无法枚举同 uid 进程）⇒ 本轮**没有真正执行检查** ⇒ 如实记 0，
+        // 让门槛自然不满足（不假装检查过）。
+        let checkedCount = snapshot.degraded ? 0 : writebackJudgments.values.reduce(0) { $0 + $1.count }
 
         // ---- 更新诊断 ----
         lastScanDiagnostics = ScanLogRecord.Diagnostics(
@@ -454,10 +793,16 @@ final class AppModel {
                 statOtherUID: snapshot.coverage.statOtherUID
             ),
             pNowCount: pNowCount,
-            fSetBits: 0,
-            doneCount: 0,
-            // `a`（累计误判数）**本轮尚无判定结果**，如实取载体里的累计值。
-            // 不写死 0：`a` 只增不减（CR-022 偏差 3），清采集物也不清它。
+            // `fSetBits` = `F` 位图的**置位数** —— 从**载体**读（写回层刚更新过），
+            // 不另算一份（与 `doneCount` 同一口径；不变量②：同一判定只有一个实现处）。
+            //
+            // ⚠️ 曾被**写死为 `0`**：CR-031 之前 `F` 位图恒空，`0` 碰巧是对的；
+            // CR-031 之后位图首次真实承载数据 ⇒ `0` 从「碰巧对」变成「稳定的错」。
+            fSetBits: contents.payloads.values.reduce(0) { $0 + $1.fSetBitCount },
+            // `doneCount` = 已计误判的候选数（`C_done` 规模）——
+            // 从**载体**读（写回层刚更新过），不另算一份。
+            doneCount: contents.header.sources.reduce(0) { $0 + $1.doneCount },
+            // `a`（累计误判数）**只增不减**（CR-022 偏差 3），清采集物也不清它。
             a: accumulatedMisjudgment(for: nil),
             b: checkedCount,
             round: contents.header.round,
@@ -466,11 +811,33 @@ final class AppModel {
             contentReads: 0
         )
 
-        // ---- 观测进度推进（成功扫描 +1 计数日）----
-        advanceCountedDayIfNeeded(now: started)
-
         // ---- 落盘（**必须真写**，否则 A-10 第 9 步不可达）----
         persist()
+
+        // ---- 断点落盘 / 清除（AC-20 可续扫）----
+        //
+        // 两条路互斥，且都**必须真落盘**：
+        //   · 有来源被中断 → 写 `state/checkpoints.json`（下次启动续扫）
+        //   · 全部正常完成 → 清除断点（没有「未扫完的部分」了）
+        //
+        // ⚠️ 此前这里恒为 `false`（断点被直接丢弃），所以「用户取消一次 →
+        // 重启后从头再来」：13 秒的扫描白跑。
+        var breakpointSaved = false
+        do {
+            if job.abortedCheckpoints.isEmpty {
+                checkpoints.clear()
+            } else {
+                try checkpoints.save(job.abortedCheckpoints)
+                breakpointSaved = true
+            }
+        } catch {
+            // 断点写不进去**不影响本次扫描结果**（候选已拿到），
+            // 但要让用户知道「这次中断的进度没保住」—— 不静默。
+            errorMessage = L.pick(
+                "断点未能保存，下次扫描将从全量开始：\(error.localizedDescription)",
+                "Couldn't save the checkpoint; the next scan will start from a full scan: \(error.localizedDescription)"
+            )
+        }
 
         // ---- 扫描日志（AC-19 唯一可判载体）----
         let record = ScanLogRecord(
@@ -481,7 +848,7 @@ final class AppModel {
             bytesScanned: bytesScanned,
             durationMs: Int(Date().timeIntervalSince(started) * 1000),
             aborted: job.abortReason,
-            breakpointSaved: false,
+            breakpointSaved: breakpointSaved,
             unknownCount: unknownCount,
             upstreamCommands: job.upstream,
             diagnostics: lastScanDiagnostics
@@ -590,6 +957,11 @@ final class AppModel {
             errorMessage = L.pick("未达达标条件，本次不执行（逐来源复核未通过）", "Gate not met; nothing executed this time (per-source re-check failed)")
             return
         }
+        // **执行方式闸（AC-03）**：默认「仅报告」= 永不删。
+        // 原先这里不读 executionMode → 用户在 ③ 页选「仅报告」形同虚设。
+        guard preferences.executionMode == .autoDelete else {
+            return
+        }
         guard !isScanning else { return }
 
         let now = Date()
@@ -597,14 +969,149 @@ final class AppModel {
         let isFirstRun = executions.isEmpty
         var newRecords: [ExecutionRecord] = []
         var totalSkipped = 0
+        var totalFailures = 0
+
+        // ---- **执行时刻的 L0 快照**（AC-17 二次检查的输入）----
+        //
+        // ## 为什么必须现取、不能用扫描期那份
+        //
+        // 扫描可能发生在几分钟前、甚至（定时点）昨天。那份快照记录的是
+        // 「扫描那一刻谁持有文件」。而 AC-17 判的是「**删除前这一刻**还有没有
+        // 活引用」—— 用过期快照等于拿旧证据判当下，TOCTOU（time-of-check-to-time-of-use）
+        // 窗口内的活引用会漏掉 → 误删正在被使用的文件。
+        //
+        // `L0Probe.snapshot` 要枚举全部同 uid 进程的 fd，是重 I/O（同扫描），
+        // 故同样**离开主 actor**（不变量：重 I/O 不在 `@MainActor`）。
+        // 排除自身 pid（IF-03 自污染防护，与扫描期同一纪律）。
+        let excludePIDs: Set<pid_t> = [getpid()]
+        let secondCheckSnapshot = await Task.detached(priority: .userInitiated) {
+            L0Probe.snapshot(excludePIDs: excludePIDs, now: now)
+        }.value
 
         for source in Source.allCases {
-            // **pipx 恒为仅报告**：不在判定域 → 永不参与自动删除（AC-04 ②）
+            // **域外只报告三类恒为仅报告**（`pipx` run / pnpm store / bun cache）：不在判定域 → 永不参与自动删除（AC-04 ②）
             guard source.isInDecisionDomain else { continue }
 
-            let sourceCandidates = candidates.filter { $0.source == source.rawValue }
-            let ids: [CandidateID] = sourceCandidates
-                .map { CandidateID(path: $0.path, birthtime: $0.birthtime) }
+            // **白名单闸（AC-03）**：被保护的条目在执行路径上**真的被排除**。
+            //
+            // 原先 `candidates` 全量直接进 `executeBatch` → 白名单只过滤了显示，
+            // 执行照样删被保护目录下的文件。那是「用户以为保护生效了，
+            // 而它在执行路径上不存在」——本产品最不能犯的谎之一。
+            //
+            // 走 `WhitelistGuard`（Core 唯一原语），与展示层同一份匹配逻辑。
+            let sourceCandidates = WhitelistGuard.filter(
+                candidates: candidates.filter { $0.source == source.rawValue },
+                whitelist: preferences.whitelist,
+                path: { $0.path }
+            )
+
+            // ---- **AC-17 删除前二次检查**（身份复核 + L0 复核）----
+            //
+            // 候选是「扫描时刻」的快照，删除发生在「之后的执行点」。这中间文件系统
+            // 可能已经变了：路径被同名重建、文件被删、文件被活引用持有。
+            // **不复核就删 = 误删**（你以为删的是观察期证明没用的那个缓存，
+            // 实际删的是用户刚重新装好的同名目录）。
+            //
+            // 两道复核（判定都在 Core，本层只编排）：
+            //   ① 身份复核（`SecondCheck.checkIdentity`）：重读 birthtime，
+            //      不一致 = 同名重建 = **不是当初判定的那个文件** → 放弃。
+            //   ② L0 复核（`SecondCheck.isLiveHeld`）：用**执行时刻**的新快照
+            //      再探一次活引用 → 被持有 → 放弃。
+            //
+            // 被阻断的条目**仍写 `execution.jsonl`**（`.blockedSecondCheck`）——
+            // 举证链不缺这一行，AC-18 的完整率才真实。
+            var ids: [CandidateID] = []
+            for cand in sourceCandidates {
+                let id = CandidateID(path: cand.path, birthtime: cand.birthtime)
+
+                // ⓪ **执行范围守卫（AC-19 / R2:218）** —— 最高优先，先于其它复核。
+                //
+                // 扫描端用 `fileExists(atPath:isDirectory:)` 判目录，而该 API
+                // **跟随符号链接**（真文件系统实测确认）：来源根里一个指向
+                // `~/Documents` 的 symlink 会被当目录下探 → 根外文件成为候选。
+                // 执行端若不复核，就把根外的文件移进废纸篓了。
+                //
+                // 四道判定（存在 / 非 symlink / 真实路径在根内 / 同卷）全在
+                // `ScopeGuard`（Core，可单测）。这里只编排与留痕。
+                //
+                // 拿不到来源根时 → **拒绝执行**（不把未知判为安全）。
+                if let root = lastSourceRoots[source.rawValue] {
+                    if let rejection = ScopeGuard.check(path: cand.path, allowedRoot: root) {
+                        newRecords.append(
+                            ExecutionRecord(
+                                id: id, source: source, action: .blockedOutOfScope,
+                                originalPath: cand.path, restorePath: nil, executedAt: now,
+                                bytes: cand.bytes, bytesKind: cand.isDirectory ? .dirRecursive : .file,
+                                blockedReason: rejection.diagnostic.summary,
+                                bytesPreview: cand.bytes, bytesMeasuredAt: now
+                            )
+                        )
+                        continue
+                    }
+                } else {
+                    // 没有该来源的根 → 无法证明在范围内 → 不删（不把未知判为安全）
+                    newRecords.append(
+                        ExecutionRecord(
+                            id: id, source: source, action: .blockedOutOfScope,
+                            originalPath: cand.path, restorePath: nil, executedAt: now,
+                            bytes: cand.bytes, bytesKind: cand.isDirectory ? .dirRecursive : .file,
+                            blockedReason: L.pick("无法确认该来源的允许根，已跳过", "Allowed root for this source unknown; skipped"),
+                            bytesPreview: cand.bytes, bytesMeasuredAt: now
+                        )
+                    )
+                    continue
+                }
+
+                // ① 身份复核
+                switch SecondCheck.checkIdentity(path: cand.path, recordedBirthtime: cand.birthtime) {
+                case .vanished:
+                    // 文件已不存在 → 没东西可删，记一行如实留痕（不是失败）
+                    newRecords.append(
+                        ExecutionRecord(
+                            id: id, source: source, action: .blockedSecondCheck,
+                            originalPath: cand.path, restorePath: nil, executedAt: now,
+                            bytes: cand.bytes, bytesKind: cand.isDirectory ? .dirRecursive : .file,
+                            blockedReason: "二次检查：文件已不存在（已自行删除）",
+                            bytesPreview: cand.bytes, bytesMeasuredAt: now
+                        )
+                    )
+                    continue
+                case .rebuilt:
+                    // **同名重建** → 现在那个文件不是当初判定的那个 → 放弃（误删防线）
+                    newRecords.append(
+                        ExecutionRecord(
+                            id: id, source: source, action: .blockedSecondCheck,
+                            originalPath: cand.path, restorePath: nil, executedAt: now,
+                            bytes: cand.bytes, bytesKind: cand.isDirectory ? .dirRecursive : .file,
+                            blockedReason: "二次检查：路径已被同名重建（birthtime 不一致），不是当初判定的文件",
+                            bytesPreview: cand.bytes, bytesMeasuredAt: now
+                        )
+                    )
+                    continue
+                case .unchanged:
+                    break
+                }
+
+                // ② L0 复核（用执行时刻新取的快照）
+                if let identity = L0Probe.identity(atPath: cand.path),
+                   SecondCheck.isLiveHeld(
+                       identity: identity, isDirectory: cand.isDirectory,
+                       path: cand.path, by: secondCheckSnapshot
+                   ) {
+                    newRecords.append(
+                        ExecutionRecord(
+                            id: id, source: source, action: .blockedSecondCheck,
+                            originalPath: cand.path, restorePath: nil, executedAt: now,
+                            bytes: cand.bytes, bytesKind: cand.isDirectory ? .dirRecursive : .file,
+                            blockedReason: "二次检查：删除前发现活引用（进程正在使用）",
+                            bytesPreview: cand.bytes, bytesMeasuredAt: now
+                        )
+                    )
+                    continue
+                }
+
+                ids.append(id)
+            }
             guard !ids.isEmpty else { continue }
 
             // ---- **`t1` 预检值**：取扫描时算好的逻辑字节（IF-08 的唯一来源）----
@@ -651,6 +1158,9 @@ final class AppModel {
             )
             newRecords.append(contentsOf: outcome.records)
             totalSkipped += outcome.skippedByCap
+            // **失败不再丢弃**：原先 `outcome.failures` 被直接扔掉，
+            // 执行期错误因此不留任何痕迹（用户和日志都看不到）。
+            totalFailures += outcome.failures.count
         }
 
         // 写 `execution.jsonl`（AC-18 举证链的数据源）
@@ -662,7 +1172,21 @@ final class AppModel {
         // AC-15：顺延条目数 = 候选总数 − 实际删除条目数
         let deleted = newRecords.filter { $0.action == .renameToTrash }.count
         deferredCount = Swift.max(0, totalSkipped)
-        _ = deleted
+
+        // ---- **结果反馈**：用户点了「执行」，必须得到答复 ----
+        //
+        // 原先执行完只写 `lastExecutionAt` 然后 rebuild —— 界面上什么都不变。
+        // 用户不知道删了几条、有没有失败、要不要处理。`outcome.failures`
+        // 更是**完全丢弃**（连日志都没有），失败没有任何痕迹。
+        let deletedRecords = newRecords.filter { $0.action == .renameToTrash }
+        lastExecutionNotice = PageModel.ExecutionNotice(
+            deletedCount: deletedRecords.count,
+            deletedBytes: deletedRecords.reduce(Int64(0)) { $0 + $1.bytes },
+            deferredCount: deferredCount,
+            failedCount: newRecords.filter { $0.action == .failed }.count + totalFailures,
+            blockedCount: newRecords.filter { $0.action == .blockedSecondCheck }.count
+                + newRecords.filter { $0.action == .blockedOutOfScope }.count
+        )
 
         lastExecutionAt = now
         persist()
@@ -699,13 +1223,29 @@ final class AppModel {
         }
     }
 
-    /// 某来源的**总量**（`T`；未取快照时退回候选合计）。
+    /// 某来源的**逻辑字节总量**（AC-15 容量上限的分母）。
+    ///
+    /// ## 这里曾经把「候选条数」当字节用 —— 一个静默的灾难
+    ///
+    /// 原实现：`if let t = entry.T { return Int64(t) }`。
+    /// 而 `entry.T` 是 **M3 的候选条目数**（`slotCount`），**不是字节**。
+    ///
+    /// 后果（本机实测）：uv cache 有 115,875 条候选 →
+    /// 首次档上限 = `min(5 GB, 115875 × 10%)` = **11,587 字节 ≈ 11.6 KB**。
+    /// 于是**几乎每一次执行的所有候选都因「预检超限」被顺延** ——
+    /// 用户点了清理，实际删掉的永远是个位数（甚至 0），而且**不报错**。
+    ///
+    /// ## 正确口径（AC-15 / CR-022 偏差 2）
+    ///
+    /// 分母 = 该来源候选的**逻辑字节**合计（目录 = 递归普通文件 `st_size` 之和）。
+    /// `Candidate.bytes` 正是扫描期按该定义算好的那份 —— 直接求和即得，
+    /// 且与执行期 `t1` 预检、`t2` 实测**同一口径**（不变量②：同一判定只有一处实现）。
+    ///
+    /// **不再看 `entry.T`**：它是条目数，与字节无关。这也是为什么原实现
+    /// 在「候选数很少但体积很大」和「候选数很多但体积很小」两种情形下
+    /// 都会给出荒谬的上限。
     private func sourceTotalBytes(for source: Source) -> Int64 {
-        if let entry = contents.header.sources.first(where: { $0.source == source }),
-           let t = entry.T, t > 0 {
-            return Int64(t)
-        }
-        return candidates
+        candidates
             .filter { $0.source == source.rawValue }
             .reduce(Int64(0)) { $0 + $1.bytes }
     }
@@ -774,22 +1314,6 @@ final class AppModel {
 
     // MARK: - 私有
 
-    /// 定位各来源根。优先用上游只读命令（AC-19 白名单内），失败回退标准路径。
-    /// 本轮 **L0 检查次数** `b`（M5：门槛项）。
-    ///
-    /// 计数对象 = 「对某候选执行 L0 判定的一次」。本实现对**每条候选都判一次**
-    /// （`countHeld` 会遍历全部），所以 `b` = 参与判定的候选数。
-    ///
-    /// **不由 `countHeld` 的结果充当** —— 那是「被判为被持有的条数」，
-    /// 是 `pNowCount` 的定义。两者混用会让「缓存满满但无人使用」
-    /// 这个最理想的可清理场景永远点不亮（`b` 会是 0）。
-    private func countL0Checks() -> Int {
-        // 若 L0 降级（无法枚举），本轮**没有真正执行检查** → 如实记 0，
-        // 让门槛自然不满足（不假装检查过）
-        guard !lastScanDegraded else { return 0 }
-        return candidates.count
-    }
-
     /// 累计误判数 `a`（M4：**只增不减**，清采集物也不清它）。
     ///
     /// 从载体读；`source` 为 `nil` 时返回全部来源之和（⑤ 页的矩阵行会各自取）。
@@ -801,96 +1325,20 @@ final class AppModel {
         return contents.header.sources.reduce(0) { $0 + $1.a }
     }
 
-    /// 数「被持有」的候选数（`P_now` 规模，仅用于诊断）。
-    private func countHeld(in snapshot: L0Snapshot) -> Int {
-        var n = 0
-        for c in candidates {
-            var st = stat()
-            guard stat(c.path, &st) == 0 else { continue }
-            let id = FileIdentity(dev: UInt32(truncatingIfNeeded: st.st_dev), ino: UInt64(st.st_ino))
-            if L0Probe.isHeld(identity: id, isDirectory: c.isDirectory, path: c.path, by: snapshot) {
-                n += 1
-            }
-        }
-        return n
-    }
-
-    /// 计数日推进 —— **调 Core 的 M1 唯一实现，本层不自行加一**。
+    /// 落盘（**只落盘，不算数**）。
     ///
-    /// 原先这里写了 `countedDays + 1`，那是把 M1 的判定口径复制到编排层，
-    /// 正是「同一判定两处实现必然分叉」的起点（`verify_a9` 的域内算术检查抓到的）。
-    private func advanceCountedDayIfNeeded(now: Date) {
-        var progress = ObservationProgress(
-            round: contents.header.round,
-            countedDays: contents.header.countedDays
-        )
-        progress.startAnchor = contents.header.roundStartAnchor
-        progress.advanceCountedDay(on: now)
-        contents.header.countedDays = progress.countedDays
-        contents.header.roundStartAnchor = progress.startAnchor
-        contents.header.lastScanAt = now
-    }
-
+    /// `T` / `H` / `K` / `J` / `a` / `b` / 计数日 **全部由写回层**
+    /// （`ObservationWriteback`）算好并写进 `contents`。
+    /// 编排层在这里**只做一件事：把载体存下去** ——
+    /// 一旦在这里自己算这些量，就会出现第二套实现，两处必然分叉
+    /// （CR-031 修的正是这种断链：`T` 恒 nil → 门槛链断在起点）。
     private func persist() {
-        // ---- 保证每个来源都有一行（**字段值必须真实，不能留 nil 冒充「还没算」**）----
+        // **纵深防御**：只读态一律不落盘。
         //
-        // ## 这里曾经有个会锁死产品的缺口
-        //
-        // 原实现给每个来源写 `T: nil, K: nil, J: nil, H: nil` 且 `slotCount: 0`，
-        // 然后**再也不更新**（`if idx < count { continue }`）。
-        //
-        // 后果是整条门槛链断在起点：
-        // - `T` 恒 null → `H = min(30, T)` 永远取不到值
-        // - 门槛永远不满足 → **自动删除永远点不亮**
-        // - 产品退化成一个只读扫描器
-        //
-        // 这正是复必现 M-02 怀疑的形态（他当时只从两页矛盾推断，
-        // 没有看到代码；现在确认它在实现层是**结构性**的）。
-        //
-        // 修法：按 M3 的规则真取快照 ——
-        // **`T` 的唯一来源 = 本轮首次成功 `full` 扫描**，取到后**冻结不再覆盖**。
-        let now = Date()
-        for source in Source.allCases {
-            // 该来源本轮扫描到的候选数（`slotCount` 的载体）
-            let slotCount = candidates.filter { $0.source == source.rawValue }.count
-            // 该来源本轮参与 L0 判定的次数（`b` 是门槛项）
-            let bCount = lastScanDegraded ? 0 : slotCount
-
-            if let idx = contents.header.sources.firstIndex(where: { $0.source == source }) {
-                var entry = contents.header.sources[idx]
-                // **只增不减、只冻结不覆盖**：
-                // 已取过快照的来源，`T` / `H` 一律不动（M3：冻结时刻唯一）
-                if !entry.snapshotTaken, lastScanMode == .full, slotCount > 0 {
-                    entry.snapshotTaken = true
-                    entry.T = slotCount
-                    // `H = min(30, T)`（AC-08 组 A 的门槛式）
-                    entry.H = Swift.min(30, slotCount)
-                }
-                // 每次成功扫描都更新观测面（`b` / `slotCount` / 判定时刻）
-                entry.b = bCount
-                entry.slotCount = slotCount
-                entry.lastJudgmentAt = now
-                // `a` 不动：只增不减，且只在真实判定出错时由 GateEvaluator 写
-                contents.header.sources[idx] = entry
-            } else {
-                contents.header.sources.append(
-                    SourceHeaderEntry(
-                        source: source,
-                        // **快照只在 full 扫描且有候选时取**（M3）
-                        snapshotTaken: (lastScanMode == .full && slotCount > 0),
-                        T: (lastScanMode == .full && slotCount > 0) ? slotCount : nil,
-                        K: nil, J: nil,
-                        H: (lastScanMode == .full && slotCount > 0)
-                            ? Swift.min(30, slotCount) : nil,
-                        a: 0,
-                        b: bCount,
-                        slotCount: slotCount,
-                        doneCount: 0,
-                        lastJudgmentAt: now
-                    )
-                )
-            }
-        }
+        // 调用方比对「主文件是否存在」更可靠 —— 损坏态下主文件已被移走，
+        // 任何基于「文件不存在 = 首启」的判断都会误判。只读是一条硬闸：
+        // 载体读不出来的时候，我们**没有资格**用内存里的空壳去覆盖它。
+        guard !readOnly else { return }
         do {
             _ = try stateFile.save(header: contents.header, payloads: contents.payloads)
         } catch {
@@ -958,6 +1406,10 @@ final class AppModel {
                 t: entry.T,
                 k: entry.K,
                 j: entry.J,
+                // **失联条目中「无法归因」的条数**（PRD v5.6 M3 · CR-031 §五③）：
+                // 单列披露，**不并入已归因、也不静默丢弃**。
+                // `nil`（尚未结算）原样保留 ⇒ 渲染为「—」，不得写成 0。
+                unattributable: entry.unattributableCount,
                 h: entry.H,
                 a: entry.a,
                 b: entry.b

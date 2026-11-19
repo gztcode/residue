@@ -266,9 +266,17 @@ else
   ok "产品路径不读渲染样例数据"
 fi
 
+# M1 计数日推进：实现与调用点**都**必须在 Core，编排层一行都不许碰。
+#
+# 〔v4 · CR-031〕调用点从 `AppModel.swift` 搬进了 Core 的写回层
+# （`ObservationWriteback.swift`）——「中止扫描不得推进计数日」要求
+# **推进与否由 Core 判定**（编排层无从判断扫描是否被中止）。
+# 检查从「AppModel 里能 grep 到调用」改成「AppModel 里 grep 不到调用」：
+# 不是放宽，是**更强**（编排层连调用口都不留）。
 if grep -q "advanceCountedDay" "$CORE_DIR/Metrics.swift" 2>/dev/null \
-   && grep -q "advanceCountedDay" "$UI_DIR/AppModel.swift" 2>/dev/null; then
-  ok "M1 计数日推进在 Core（编排层只调用，不自行加一）"
+   && grep -rq "advanceCountedDay" "$CORE_DIR" 2>/dev/null \
+   && ! grep -qE "advanceCountedDay|countedDays[[:space:]]*(\+=|[[:space:]]=[[:space:]]*countedDays[[:space:]]*\+)" "$UI_DIR/AppModel.swift" 2>/dev/null; then
+  ok "M1 计数日推进在 Core（编排层不调用、不自行加一）"
 else
   bad "M1 计数日推进未归位到 Core（存在第二套算法风险）"
 fi
@@ -416,6 +424,73 @@ if grep -qF 'app.clearLogs()' "$UI_DIR/RootView.swift" 2>/dev/null; then
   ok "清除回调已从 AppModel 传入（不是 UI 层自己造）"
 else
   bad "清除回调未接"
+fi
+
+# 自动删除开关必须真接上 setAutoDelete（原先：TokenSwitch 是纯绘图，无 onTapGesture）
+if grep -qF 'onTapGesture' "$UI_DIR/Components.swift" 2>/dev/null \
+   && grep -qF 'app.setAutoDelete(' "$UI_DIR/RootView.swift" 2>/dev/null; then
+  ok "③ 页自动删除开关已接 setAutoDelete（AC-08 组 B 有落点）"
+else
+  bad "自动删除开关未接 setAutoDelete（开关点不动 → 产品永不点亮）"
+fi
+
+# 登录项必须真接上 registerLoginItem（原先：.notRegistered 态无任何注册入口）
+if grep -qF 'app.registerLoginItem()' "$UI_DIR/RootView.swift" 2>/dev/null; then
+  ok "③ 页登录项注册已接 registerLoginItem（.notRegistered 态有出路）"
+else
+  bad "登录项注册无调用点 → 定时任务永不排程（ADR-02 链路断）"
+fi
+
+# 定时执行点必须真的会执行清理批次（AC-04「到达定时执行点」）
+# 原先：ScheduledRunner 的 work 闭包只调 runScan —— 扫完就停，从不删，
+# AC-04 在代码里没有落点。现在 work → scheduledWork（扫描 + 已点亮则 executeBatch）。
+if grep -qF 'scheduledWork' "$UI_DIR/AppModel.swift" 2>/dev/null \
+   && grep -qF 'await executeBatch()' "$UI_DIR/AppModel.swift" 2>/dev/null; then
+  ok "定时执行点已接 executeBatch（AC-04 有落点，扫描后已点亮则执行）"
+else
+  bad "定时执行点只扫描不执行（AC-04 无落点 → 自动删除永不被定时触发）"
+fi
+
+# ---- 执行路径的三道安全闸（2026-11-12 · 审计确认会误删）----
+
+# ⑤ 白名单必须在**执行路径**生效（原先只过滤展示 → 用户以为保护了，照样删）
+if grep -qF 'WhitelistGuard' "$UI_DIR/AppModel.swift" 2>/dev/null \
+   && grep -qF 'WhitelistGuard' "$CORE_DIR/PageModelBuilder.swift" 2>/dev/null; then
+  ok "白名单在执行路径生效，且与展示层共用同一原语（AC-03）"
+else
+  bad "白名单未接执行路径（只过滤显示 → 保护形同虚设）"
+fi
+
+# ⑤ 执行方式必须在执行路径生效（默认「仅报告」= 永不删）
+if grep -qF 'executionMode == .autoDelete' "$UI_DIR/AppModel.swift" 2>/dev/null; then
+  ok "执行方式闸生效（.reportOnly 时不执行删除，AC-03）"
+else
+  bad "执行方式未接执行路径（选「仅报告」仍会删）"
+fi
+
+# ⑥ 删除前二次检查（身份复核 + L0 复核，AC-17）
+if grep -qF 'SecondCheck.checkIdentity' "$UI_DIR/AppModel.swift" 2>/dev/null \
+   && grep -qF 'SecondCheck.isLiveHeld' "$UI_DIR/AppModel.swift" 2>/dev/null; then
+  ok "删除前二次检查已接（身份 + L0，AC-17）"
+else
+  bad "删除前无二次检查（扫描到执行之间文件被重建/被占用会误删）"
+fi
+
+# ⑦ 执行范围守卫（存在 / 非 symlink / 真实路径在根内 / 同卷，AC-19）
+if grep -qF 'ScopeGuard.check' "$UI_DIR/AppModel.swift" 2>/dev/null \
+   && grep -qF 'lstat' "$CORE_DIR/ScopeGuard.swift" 2>/dev/null \
+   && grep -qF 'S_IFLNK' "$CORE_DIR/ScopeGuard.swift" 2>/dev/null; then
+  ok "执行范围守卫已接（符号链接/越界/跨卷拒绝，AC-19）"
+else
+  bad "执行路径无范围守卫（来源根之外的 symlink 目标会被删）"
+fi
+
+# ⑧ 容量上限的分母必须是字节（原先把候选条数当字节 → 11.6 万条 = 11.6 KB 上限）
+if grep -qF 'entry.T' "$UI_DIR/AppModel.swift" 2>/dev/null \
+   && grep -n 'sourceTotalBytes' "$UI_DIR/AppModel.swift" 2>/dev/null | grep -qF 'Int64(t)'; then
+  bad "容量上限仍把候选条数（entry.T）当字节用 → 几乎所有候选被顺延"
+else
+  ok "容量上限分母为逻辑字节（AC-15）"
 fi
 
 # ---------------------------------------------------------------------------
@@ -604,7 +679,22 @@ else
 fi
 
 # ⑤ 界面必须显示进度 + 提供取消
-if grep -qF 'scanProgress.displayText' "$UI_DIR/RootView.swift" 2>/dev/null; then
+#
+# ⚠️ 锚点已随 CR-037 迁移：进度横条从**页头**搬到了**① 页内容区顶部**
+#    （`ScanProgressStrip`）⇒ 判据跟着改成「① 页用这个组件 + 组件里显示文案」。
+# ⚠️ 必须用 `progress.displayText`（带限定符）——裸 `displayText` 会撞上
+#    `Components.swift` 里既有的 `Text(slot.displayText)`。
+#
+# ⚠️ **锚点已收紧**（CR-037 步骤 6 实测发现，见变更单 §10.5）：
+#    ① `ScanProgressStrip(` —— **带调用括号**。裸 `ScanProgressStrip` 是
+#       子串匹配 ⇒ 把它改名成 `ScanProgressStripMutated` 也能蒙混过关
+#       （实测 a9 仍绿）。
+#    ③ `trim(from: 0, to:` —— **确定弧**的证据。缺这一条时，
+#       把自绘圆环换回系统的 `ProgressView(.circular)`（**不定** spinner，
+#       正是缺陷 #5）判据**不会红**。
+if grep -qF 'ScanProgressStrip(' "$UI_DIR/Pages.swift" 2>/dev/null \
+   && grep -qF 'progress.displayText' "$UI_DIR/Components.swift" 2>/dev/null \
+   && grep -qF 'trim(from: 0, to:' "$UI_DIR/Components.swift" 2>/dev/null; then
   ok "界面显示扫描进度（用户看得到它在动）"
 else
   bad "界面不显示扫描进度 → 「按了没反应」与卡死无异"

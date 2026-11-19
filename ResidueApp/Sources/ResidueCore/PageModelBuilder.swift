@@ -29,8 +29,8 @@ public enum PageModelBuilder {
         public var executions: [ExecutionRecord]
         /// 是否只读态（数据由更高版本创建）。
         public var readOnly: Bool
-        /// 是否正在加载。
-        public var loading: Bool
+        /// 扫描进度（`nil` = 不在扫描）。CR-037 §3.5。
+        public var scanProgress: ScanProgress?
         /// L0 是否降级（同 uid 枚举失败）。
         public var degraded: Bool
         /// L0 覆盖诊断（不上界面，仅用于 ① 页状态条判断）。
@@ -73,7 +73,7 @@ public enum PageModelBuilder {
             candidates: [ScanEngine.Candidate] = [],
             executions: [ExecutionRecord] = [],
             readOnly: Bool = false,
-            loading: Bool = false,
+            scanProgress: ScanProgress? = nil,
             degraded: Bool = false,
             coverage: L0Coverage = L0Coverage(),
             contentReads: Int = 0,
@@ -92,7 +92,7 @@ public enum PageModelBuilder {
             self.candidates = candidates
             self.executions = executions
             self.readOnly = readOnly
-            self.loading = loading
+            self.scanProgress = scanProgress
             self.degraded = degraded
             self.coverage = coverage
             self.contentReads = contentReads
@@ -119,23 +119,25 @@ public enum PageModelBuilder {
         // ① ② 页候选行 ② 分页总数 ③ 可删除量 / L1 计数。
         // 若只在渲染时隐藏，`deletableAmount` 仍会算进被保护的条目 ——
         // 用户看到的总量与实际可删量不符，那是账对不上。
-        let visibleCandidates = input.candidates.filter { c in
-            !input.whitelist.contains(where: { protectedPath in
-                // 命中的判定：路径相等，或候选在受保护目录之下
-                c.path == protectedPath || c.path.hasPrefix(protectedPath + "/")
-            })
-        }
+        //
+        // **匹配逻辑 = `WhitelistGuard`（Core 唯一原语）**，与执行路径共用 ——
+        // 原先这里内联一份、`executeBatch` 又不读白名单，导致「白名单只过滤显示」。
+        let visibleCandidates = WhitelistGuard.filter(
+            candidates: input.candidates,
+            whitelist: input.whitelist,
+            path: { $0.path }
+        )
 
 var model = PageModel()
         model.readOnly = input.readOnly
-        model.loading = input.loading
+        model.scanProgress = input.scanProgress
 
         if input.readOnly {
             // **只读态**：不渲染任何数值（R2 §10.2）。
             // 显示 0 会让旧版把「错 1 次永久」显示成「一次都没错」——假值比空白更危险。
             model.pageLevelSlot = .unavailable(reason: UICopy.readOnlyNoSettlement)
             model.reportProduced = false
-            model.unmetNotice = .unavailable(reason: UICopy.readOnlyNoSettlement)
+            model.unmetSection = .rows([.unavailable(reason: UICopy.readOnlyNoSettlement)])
             model.remainingDays = .duration(days: nil)
             model.canLightUp = false
             model.autoDeleteEnabled = false
@@ -151,6 +153,7 @@ var model = PageModel()
 
         model.scheduledTaskSlot = .text(input.loginItem.label)
             model.needsLoginItemApproval = input.loginItem.needsUserApproval
+            model.canRegisterLoginItem = input.loginItem.canRegister
             model.locationWarning = input.locationWarning
             return model
         }
@@ -162,12 +165,15 @@ var model = PageModel()
         )
         let settlementProduced = header.settlement.producedAt != nil
 
-        // ---------- ① 三区块（按来源聚合字节） ----------
+        // ---------- ① 来源区块（按来源聚合字节；每来源一块） ----------
         // 聚合发生在 Core（此处），界面拿到的只有 `.metric`
         var bytesBySource: [Source: Int64] = [:]
+        // **每来源条目数**（不是字节数）—— ⑤ 页行集合的判据是「条目数 ≥ 1」。
+        var countBySource: [Source: Int] = [:]
         for c in input.candidates {
             if let s = Source(rawValue: c.source) {
                 bytesBySource[s, default: 0] += c.bytes
+                countBySource[s, default: 0] += 1
             }
         }
         model.overviewBlocks = Source.allCases.map { source in
@@ -176,6 +182,14 @@ var model = PageModel()
                 slot: .metric(Int(bytesBySource[source] ?? 0), unit: .bytes)
             )
         }
+
+        // **总量**：全部来源占用之和（算术在 Core，界面不参与）。
+        let totalBytes = bytesBySource.values.reduce(Int64(0), +)
+        model.totalFootprintBytes = .metric(Int(totalBytes), unit: .bytes)
+
+        // **空态判定**：没扫过（无候选）→ 首屏必须回答「现在该做什么」，
+        // 而不是摆七张 0 B 的卡。`hasScanned` 取自载体（有 `lastScanAt` 即扫过）。
+        model.isFirstRunEmpty = input.candidates.isEmpty && header.lastScanAt == nil
 
         // ① 状态条：只承载「并发冲突」（A1 裁定：全局页级状态条）
         if input.degraded {
@@ -190,7 +204,7 @@ var model = PageModel()
             let source = Source(rawValue: c.source)
             return CandidateRow(
                 name: c.path,
-                // **判定域内的来源才可参与自动删除**（`pipx` run 恒为仅报告）
+                // **判定域内的来源才可参与自动删除**（域外只报告三类 `pipx` run / pnpm store / bun cache 恒为仅报告）
                 // **值域保持 2 值**（AC-04 判定冻结），阻断原因走 blockReason 副行
                 participation: (source?.isInDecisionDomain ?? false) ? .autoDeletable : .reportOnly,
                 bytes: .metric(Int(c.bytes), unit: .bytes),
@@ -206,21 +220,66 @@ var model = PageModel()
                 source: entry.source,
                 attributable: entry.K,
                 total: entry.T,
+                lost: entry.J,
                 missCount: entry.a,
                 checkCount: entry.b,
-                undetermined: entry.a == 0 && entry.b == 0 && entry.T != nil && entry.K == nil
+                // `undetermined` 的**唯一来源** = 同 uid 进程枚举是否失败（CR-012 / R2 §25.1 裁定一）。
+                //
+                // ⚠️ 不得用「`a == 0 && b == 0`」反推未判定：那是**巧合**不是**原因**
+                // （本轮未结算的来源同样是 `a = 0` / `b = 0`，会被误标成「L0 未判定」）。
+                // `degraded` 是全局单值 ⇒ 降级时判定域内**全部**来源的 `a` / `b` 均不判定。
+                undetermined: input.degraded
             )
         }
+        // 判定域 = **本轮观察期开始快照内命中的来源**（契约：PRD v5.6 R9 / 架构 A1）。
+        // 载体判据：`snapshotTaken == true` ⇔ 本观察期已取快照 ⇔ `T != nil`
+        // （取快照时两者同写、结算不改、迁移同清 ⇒ 恒同步）。
+        let decisionDomain = DecisionDomain.members(
+            snapshotSources: Set(header.sources.filter { $0.snapshotTaken }.map { $0.source })
+        )
         let unmet = GateEvaluator.unmetItems(
             progress: progress,
             settlementProduced: settlementProduced,
+            decisionDomain: decisionDomain,
             sources: gateInputs
         )
-        model.unmetNotice = .text(unmetNoticeText(unmet, progress: progress))
+        // ---------- ③ 未达项区（**四态**，CR-036） ----------
+        //
+        // ⚠️ **判据顺序不可调换**（CR-036 §3.3）：
+        //   1. **判定域空** ⇒ 从未扫描（`lastScanAt == nil`）是「尚未知」⇒ 态④ 保留全局项；
+        //      扫过 ⇒ 态③「没有可判定的东西」，成因二选一；
+        //   2. 判定域非空 ∧ 未达项为空 ⇒ 态②「无未达项」（**≠「已达标」**）；
+        //   3. 其余 ⇒ 态①逐行列出（全局项在前、来源项在后）。
+        //
+        // **成因判据取 `input.candidates`（全部候选），不是 `visibleCandidates`** ——
+        // 白名单过滤后的可见集会把「被白名单挡掉」误报成「无来源」。
+        if decisionDomain.isEmpty {
+            if header.lastScanAt == nil {
+                // 态④：从未扫描过 —— 判定域是「尚未知」而不是「已确定为空」
+                //       ⇒ 保留全局项，不显示空类成因（不变量 ③）。
+                model.unmetSection = .rows(
+                    unmetNoticeSlots(unmet, progress: progress, previous: header.previousRound)
+                )
+            } else {
+                // 态③：扫过、判定域为空 ⇒ 空类成因，**不列出任何未达项**（DAC-79）。
+                model.unmetSection = .emptyDomain(
+                    input.candidates.isEmpty ? .noScannableSource : .noCleanupCandidate
+                )
+            }
+        } else if unmet.isEmpty {
+            // 态②：判定域非空、报告已产出、观察期已满，但无任何未达项行。
+            model.unmetSection = .none
+        } else {
+            // 态①：有未达项（全局项在前、来源项在后）。
+            model.unmetSection = .rows(
+                unmetNoticeSlots(unmet, progress: progress, previous: header.previousRound)
+            )
+        }
         model.remainingDays = .duration(days: progress.remainingDays)
         model.canLightUp = GateEvaluator.isQualified(
             progress: progress,
             settlementProduced: settlementProduced,
+            decisionDomain: decisionDomain,
             sources: gateInputs
         )
         model.autoDeleteEnabled = header.autoDeleteEnabled
@@ -234,6 +293,7 @@ var model = PageModel()
 
         model.scheduledTaskSlot = .text(input.loginItem.label)
         model.needsLoginItemApproval = input.loginItem.needsUserApproval
+        model.canRegisterLoginItem = input.loginItem.canRegister
         model.locationWarning = input.locationWarning
 
         model.policySlots = [
@@ -326,8 +386,24 @@ var model = PageModel()
 
         // ---------- ⑤ 矩阵 ----------
         model.reportProduced = settlementProduced
-        model.reportRows = header.sources.map { entry in
-            reportRow(for: entry, round: header.round, produced: settlementProduced)
+        // **行集合是条件式**（PRD v5.6 :1094）：总量为 0 的来源不占行。
+        //
+        // - 判定域来源：本轮有快照（`T ≥ 1`）**或** 本窗扫到候选 ⇒ 占行；
+        // - 域外只报告来源：**只看本窗候选数** —— 它从不取快照，`T` 对它无意义，
+        //   判定域语义不得外溢到它身上。
+        //
+        // ⚠️ **不能用 `header.sources` 当行集合**：`ensureSourceRows()` 会把
+        // 7 个来源全补齐 ⇒ 头部行数恒为 7 ⇒ 无论本机有没有这些来源都会占行。
+        let entryBySource = Dictionary(
+            header.sources.map { ($0.source, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        model.reportRows = Source.allCases.compactMap { source in
+            let entry = entryBySource[source] ?? SourceHeaderEntry(source: source)
+            let hasSnapshot = source.isInDecisionDomain && (entry.T ?? 0) >= 1
+            let hasCandidates = (countBySource[source] ?? 0) >= 1
+            guard hasSnapshot || hasCandidates else { return nil }
+            return reportRow(for: entry, round: header.round, produced: settlementProduced)
         }
         let qualified = model.canLightUp
         model.pageLevelSlot = .text(
@@ -338,10 +414,13 @@ var model = PageModel()
                     : (unmetReason(unmet) ?? L.pick("未达标", "Gate not met"))
             )
         )
-        // 「上一轮」行**仅轮次 ≥ 2 时显示**（首轮不显示，不是显示「—」）
-        model.previousRoundSlot = header.round >= 2
-            ? .text(UICopy.previousRound(round: header.round))
-            : nil
+        // 「上一轮」行**在存在上一轮结算记录时显示**（首轮不显示，不是显示「—」）。
+        //
+        // 判据是「有记录」而不是「轮次 ≥ 2」：轮次 ≥ 2 但无记录时，
+        // 那行会变成一个没有数据的壳（比不显示更糟）。
+        model.previousRoundSlot = header.previousRound.map { record in
+            .text(UICopy.previousRoundSettlement(record))
+        }
 
         // ---------- ⑦ 举证链八字段（AC-18） ----------
         // V4 的 8 个顶层字段；**没有值时显示「不适用 + 原因」，不显示空白**
@@ -409,43 +488,76 @@ var model = PageModel()
 
     // MARK: - 未达项文案（**只做格式化，不做判定**）
 
-    /// 未达项 → 一行文案。
+    /// 未达项 → **多行**槽位（AC-08 组 A / DAC-74）。
     ///
-    /// 优先级：全局项（观察期未满）> 来源项（样本不足 / L0 未判定）——
-    /// 与 AC-08 组 A 的「全局项至多一项」一致。
-    private static func unmetNoticeText(_ unmet: UnmetItems, progress: ObservationProgress) -> String {
+    /// - **固定顺序**：全局项（至多一项）在前、来源项在后。
+    /// - **一项一行**：来源项逐行展开，**不合并**（TC-027 / TC-028）。
+    /// - **归因说明**并入「样本不足」行末，**不单独成行**（DAC-78）。
+    /// - 判定与文案分开：判定在 `GateEvaluator`（唯一定义处），这里只做**格式化**。
+    private static func unmetNoticeSlots(
+        _ unmet: UnmetItems,
+        progress: ObservationProgress,
+        previous: PreviousRoundRecord? = nil
+    ) -> [SemanticSlot] {
+        var slots: [SemanticSlot] = []
         if unmet.global != nil {
-            if progress.isDayQuotaReached {
-                // 计数日已满但报告未产出 —— M1 第二串
-                return UICopy.awaitingSettlementScan(round: progress.round)
-            }
-            // 计数日未满 —— M1 第一串
-            return UICopy.observationInProgress(
+            // **只调 Core 的 M1 唯一实现**：两串的选择只留一处
+            // （这里再拼一遍 ⇒ 多语言后两处译文必然分叉）。
+            // 判据互补：`isDayQuotaReached` ⇔ `countedDays >= 14`。
+            slots.append(.text(UnmetGlobalItem.text(
                 round: progress.round,
-                observed: progress.countedDays
-            )
+                countedDays: progress.countedDays,
+                previous: previous
+            )))
         }
-        if let first = unmet.bySource.first {
-            switch first.item {
-            case .insufficientSample:
-                let entry = first
-                return UICopy.unmetSampleInsufficient(
-                    round: progress.round,
-                    sample: 0, threshold: 0
-                ).replacingOccurrences(of: "0 / 0", with: entry.source.displayName)
-            case .l0Misjudged(_, _, let undetermined):
-                return undetermined
-                    ? L.pick(
-                        "\(first.source.displayName) · L0 未判定（无法枚举本用户进程）",
-                        "\(first.source.displayName) · L0 undetermined (can't enumerate this user's processes)"
-                    )
-                    : L.pick(
-                        "\(first.source.displayName) · L0 误判",
-                        "\(first.source.displayName) · L0 misjudgment"
-                    )
+        for entry in unmet.bySource {
+            switch entry.item {
+            case .insufficientSample(let sample, let total, let threshold, let lost):
+                var line = UICopy.unmetSampleInsufficient(
+                    source: entry.source.displayName,
+                    sample: sample,
+                    total: total,
+                    threshold: threshold,
+                    lost: lost
+                )
+                // 追加句紧跟基数形态之后（TC-038）。
+                line += " · " + UICopy.unmetSampleNote()
+                // 归因说明**仅在真误判（`a ≠ 0`）时**追加（判据 8）。
+                if hasRealMiss(unmet.bySource, source: entry.source) {
+                    line += " · " + UICopy.unmetL0AttributionNote()
+                }
+                slots.append(.text(line))
+            case .l0Misjudged(let missCount, let checkCount, let undetermined):
+                if undetermined {
+                    slots.append(.text(UICopy.unmetL0Undetermined(source: entry.source.displayName)))
+                } else if let missCount, missCount > 0 {
+                    slots.append(.text(UICopy.unmetL0Misjudged(
+                        source: entry.source.displayName,
+                        missCount: missCount,
+                        checkCount: checkCount
+                    )))
+                } else {
+                    // `b = 0`（本期不可达）—— 防御性表述（PRD M5）。
+                    slots.append(.text(UICopy.unmetL0NeverChecked(source: entry.source.displayName)))
+                }
             }
         }
-        return L.pick("已达达标条件", "Gate conditions met")
+        return slots
+    }
+
+    /// 该来源是否存在**真误判**（`a ≠ 0`）⇒ 才有资格追加归因说明。
+    ///
+    /// 「未判定」（无法枚举本用户进程）**不是**误判 ⇒ 不追加。
+    private static func hasRealMiss(_ entries: [UnmetSourceEntry], source: Source) -> Bool {
+        for entry in entries where entry.source == source {
+            if case .l0Misjudged(let missCount, _, let undetermined) = entry.item,
+               !undetermined,
+               let missCount,
+               missCount > 0 {
+                return true
+            }
+        }
+        return false
     }
 
     /// 页级「否」的原因（AC-09 的五级优先级里取前两级即可）。
@@ -477,9 +589,17 @@ var model = PageModel()
         let inDomain = entry.source.isInDecisionDomain
 
         // ③ 样本 / 总量：报告产出前为「本轮未结算」
-        let sampleSlot: SemanticSlot = produced
-            ? .ratio(entry.K ?? 0, entry.T ?? 0)
-            : .unavailable(reason: UICopy.notSettledThisRound)
+        //
+        // 报告**已产出**但该来源仍未结算时（`K` 或 `T` 为 `nil`），
+        // 不得填 `0` —— `0` 会被读成「一条都没归因成功」（不变量③：`nil ≠ 0`）。
+        let sampleSlot: SemanticSlot
+        if !produced {
+            sampleSlot = .unavailable(reason: UICopy.notSettledThisRound)
+        } else if let k = entry.K, let t = entry.T {
+            sampleSlot = .ratio(k, t)
+        } else {
+            sampleSlot = .unavailable(reason: UICopy.sourceNotSettled)
+        }
 
         // ④ 门槛：`H` 为 null（未取快照）或非判定域 → 不适用
         let thresholdSlot: SemanticSlot
@@ -503,15 +623,20 @@ var model = PageModel()
         bSlot = .metric(entry.b, unit: .times)
 
         // ⑦ 结论（值域封闭三值）
+        //
+        // `K` / `T` 任一为 `nil` ⇒ 该来源尚未结算 ⇒ **不得判「达标」也不得判「未达标」**。
+        // 旧写法 `k = K ?? 0, t = T ?? 0` 在 `T` 也为 `nil` 时会算出
+        // `h(0) = min(30, 0) = 0` ⇒ `0 >= 0` 成立 ⇒ 判成「**达标**」（假达标）。
         let conclusionSlot: SemanticSlot
         if !inDomain {
             conclusionSlot = .text(L.pick("仅报告", "Report only"))
         } else if !produced {
             conclusionSlot = .unavailable(reason: UICopy.notSettledThisRound)
-        } else {
-            let k = entry.K ?? 0, t = entry.T ?? 0
-            let qualified = k >= Threshold.h(forTotal: t) && entry.a == 0 && entry.b >= 1
+        } else if let k = entry.K, let t = entry.T {
+            let qualified = !SampleSufficiency.isInsufficient(k: k, t: t) && entry.a == 0 && entry.b >= 1
             conclusionSlot = .text(qualified ? L.pick("达标", "Qualified") : L.pick("未达标", "Not qualified"))
+        } else {
+            conclusionSlot = .unavailable(reason: UICopy.sourceNotSettled)
         }
 
         return ReportRow(

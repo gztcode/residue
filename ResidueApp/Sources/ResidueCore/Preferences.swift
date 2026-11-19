@@ -98,6 +98,41 @@ public enum ExecutionMode: String, Codable, Sendable, CaseIterable {
     }
 }
 
+/// **白名单保护判定**（AC-03 的唯一实现处）。
+///
+/// ## 为什么单独一个类型、且必须被展示层与执行层共用
+///
+/// 白名单是**用户唯一的主动保护动作**。原先匹配逻辑只在
+/// `PageModelBuilder.build` 里做（展示层）—— 于是白名单**只过滤了显示**：
+/// 用户把某个目录加进白名单，界面看不见它了，但 `executeBatch` 拿的是
+/// 未过滤的候选全量，**照样会删**。那是最阴的一类缺陷：
+/// **用户以为保护生效了，而它在执行路径上不存在。**
+///
+/// 把匹配提成 Core 公开原语，展示层与执行层调同一个函数
+/// ——「同一判定只有一个实现处」（本仓库不变量②），且执行路径不可能绕过。
+///
+/// ## 命中口径（与原实现逐字一致）
+///
+/// 候选被保护 ⟺ 候选路径 == 受保护路径，**或**候选在受保护路径**之下**
+/// （`hasPrefix(protectedPath + "/")`）。用 `protectedPath + "/"` 而不是裸前缀，
+/// 是避免 `/a/b` 误伤 `/a/bc`。
+public enum WhitelistGuard {
+    /// 候选是否被白名单保护（**被保护 = 不得删除**）。
+    public static func isProtected(path: String, whitelist: [String]) -> Bool {
+        whitelist.contains { protectedPath in
+            // 根路径 `/` 保护一切：用户填 `/` 是「什么都别删」的合法表达，
+            // 但裸前缀逻辑 `hasPrefix("/" + "/")` = `hasPrefix("//")` 永不命中。
+            if protectedPath == "/" { return true }
+            return path == protectedPath || path.hasPrefix(protectedPath + "/")
+        }
+    }
+
+    /// 从候选集合里滤掉被保护的条目（**执行路径用这一份**）。
+    public static func filter<T>(candidates: [T], whitelist: [String], path: (T) -> String) -> [T] {
+        candidates.filter { !isProtected(path: path($0), whitelist: whitelist) }
+    }
+}
+
 /// 偏好文件的读写。
 public struct PreferencesStore: Sendable {
 

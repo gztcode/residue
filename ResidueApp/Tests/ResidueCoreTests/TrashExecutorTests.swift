@@ -497,6 +497,38 @@ final class TrashExecutorTests: XCTestCase {
         }
     }
 
+    /// **分母必须是字节、不是条数**（2026-11-12 · 静默灾难的回归测试）。
+    ///
+    /// 原 AppModel 把 `entry.T`（候选**条数**）当 `sourceTotalBytes` 传进来。
+    /// 本机实测：115,875 条 → 首次档上限 = 11,587 **字节** ≈ 11.6 KB
+    /// → 几乎每次执行所有候选都被「预检超限」顺延，且不报错。
+    ///
+    /// 这条测试钉的是**量纲**：同一个来源，按「真实字节」算出的上限
+    /// 必须显著大于按「条数」算出的上限。若哪天有人又把条数传进来，
+    /// 这个断言会失败。
+    func testCapacityCapDenominatorMustBeBytesNotCount() {
+        let realBytes: Int64 = 2_400_000_000   // 2.4 GB 的真实体积
+        let candidateCount: Int64 = 115_875    // 同来源的候选条数
+
+        let byBytes = TrashExecutor.capacityCap(
+            userCapBytes: 5_000_000_000,
+            absoluteCapBytes: 5_000_000_000,
+            sourceTotalBytes: realBytes,
+            tier: .firstRun
+        )
+        let byCount = TrashExecutor.capacityCap(
+            userCapBytes: 5_000_000_000,
+            absoluteCapBytes: 5_000_000_000,
+            sourceTotalBytes: candidateCount,
+            tier: .firstRun
+        )
+
+        XCTAssertEqual(byBytes, 240_000_000, "真实字节 10% = 240 MB")
+        XCTAssertEqual(byCount, 11_587, "把条数当字节只得到 11.6 KB —— 这就是那个 bug")
+        XCTAssertGreaterThan(byBytes, byCount * 1000,
+                             "两者差三个数量级；若相等说明量纲又混了")
+    }
+
     /// **稳定后的比例档比首次档宽**（20% vs 10%）——两档不能反。
     func testSteadyRatioIsWiderThanFirstRun() {
         let total: Int64 = 10_000_000_000

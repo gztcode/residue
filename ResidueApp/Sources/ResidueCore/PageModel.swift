@@ -73,15 +73,102 @@ public enum Page: Int, CaseIterable, Identifiable, Sendable {
 public struct PageModel: Sendable {
     /// 是否处于只读态（数据由更高版本创建）。
     public var readOnly: Bool = false
-    /// 是否正在加载。
-    public var loading: Bool = false
-    /// 加载进度文案。
-    public var loadingMessage: String = L.pick("正在扫描…", "Scanning…")
+    /// **扫描进度**（`nil` = 不在扫描）。
+    ///
+    /// ## 为什么取代 `loading` + `loadingMessage`（CR-037 §3.4）
+    ///
+    /// 旧的两个字段是**并列的事实源**（一个说「在加载」、一个说「加载到哪儿了」）
+    /// ⇒ 必然出现「`loading` 为真但 `loadingMessage` 是旧的」这类自相矛盾状态。
+    ///
+    /// 现在**只有这一个载体**：`nil` 表示不在扫描；
+    /// 在扫描时它同时携带**弧长**（`fraction`）与**文案**（`displayText`）。
+    public var scanProgress: ScanProgress? = nil
 
-    /// ① 页三区块。
+    /// ① 页来源区块（每来源一块）。
     public var overviewBlocks: [OverviewBlock] = []
+    /// ① 页：**全部来源占用总量**（字节）。
+    ///
+    /// 原首屏只有各来源各自数额的卡，**没有「一共占了多少」** —— 用户要自己心算。
+    /// 而「我到底能被腾出多少空间」正是这个产品最该先回答的问题。
+    public var totalFootprintBytes: SemanticSlot = .metric(0, unit: .bytes)
+    /// ① 页：**是否还没有任何扫描数据**（决定显示空态还是数据）。
+    ///
+    /// 原先 `overviewBlocks` 恒为全部来源块数（`Source.allCases.map`）→ 空态分支
+    /// **在真实产品里不可达**，首启看到的是七张 `0 B` 卡 + 一串 0 ——
+    /// 既不告诉用户「你还没扫过」，也不给「开始扫描」的入口。
+    public var isFirstRunEmpty: Bool = true
     /// ① 页状态条。
     public var statusSlot: SemanticSlot?
+
+    /// **最近一次清理的结果反馈**（`nil` = 本次会话还没执行过）。
+    ///
+    /// 原实现执行完只更新 `lastExecutionAt`，界面上**什么都不变** ——
+    /// 用户点了确认，回到原样，不知道删了几条、有没有失败、要不要处理。
+    /// 那是「点了没反应」的一类，比报错更让人困惑。
+    public var lastExecutionNotice: ExecutionNotice?
+
+    /// 一次清理的结果摘要（纯数据，文案在 Core 拼好 —— 界面不做算术）。
+    public struct ExecutionNotice: Equatable, Sendable {
+        /// 实际移入废纸篓的条目数。
+        public let deletedCount: Int
+        /// 实际腾出的字节数。
+        public let deletedBytes: Int64
+        /// 因上限顺延的条目数。
+        public let deferredCount: Int
+        /// 失败条目数（执行期错误）。
+        public let failedCount: Int
+        /// 被二次检查 / 范围守卫拦下的条目数。
+        public let blockedCount: Int
+
+        public init(
+            deletedCount: Int,
+            deletedBytes: Int64,
+            deferredCount: Int,
+            failedCount: Int,
+            blockedCount: Int
+        ) {
+            self.deletedCount = deletedCount
+            self.deletedBytes = deletedBytes
+            self.deferredCount = deferredCount
+            self.failedCount = failedCount
+            self.blockedCount = blockedCount
+        }
+
+        /// 是否什么都没做（用户最需要知道的那种「没反应」）。
+        public var didNothing: Bool { deletedCount == 0 }
+
+        /// 摘要文案（**唯一实现处**）。
+        public var summary: String {
+            if didNothing {
+                if blockedCount > 0 {
+                    return L.pick(
+                        "本次没有删除任何条目：\(blockedCount) 条被执行前检查拦下（文件已变化或正在被使用）。",
+                        "Nothing was deleted: \(blockedCount) item(s) were stopped by the pre-execution check (changed or in use)."
+                    )
+                }
+                return L.pick(
+                    "本次没有条目可删（可能都被上限顺延，或候选已不存在）。",
+                    "Nothing to delete this time (deferred by limits, or candidates no longer exist)."
+                )
+            }
+            var parts = [
+                L.pick(
+                    "已移入废纸篓 \(deletedCount) 条，共 \(MetricUnit.formatBytes(Int(deletedBytes)))",
+                    "Moved \(deletedCount) item(s) to Trash, \(MetricUnit.formatBytes(Int(deletedBytes))) total"
+                )
+            ]
+            if deferredCount > 0 {
+                parts.append(L.pick("顺延 \(deferredCount) 条", "\(deferredCount) deferred"))
+            }
+            if blockedCount > 0 {
+                parts.append(L.pick("拦下 \(blockedCount) 条", "\(blockedCount) blocked"))
+            }
+            if failedCount > 0 {
+                parts.append(L.pick("失败 \(failedCount) 条", "\(failedCount) failed"))
+            }
+            return parts.joined(separator: " · ")
+        }
+    }
 
     /// ② 页候选行。
     public var candidateRows: [CandidateRow] = []
@@ -97,8 +184,21 @@ public struct PageModel: Sendable {
     /// 这比「不能点」更糟（AC-08 组 B 的全部意义就是「未达线不得点亮」）。
     public var canLightUp: Bool = false
 
-    /// ③ 页：未达项文案（带轮次）。
-    public var unmetNotice: SemanticSlot?
+    /// ③ 页：未达项区的**态**（CR-036）。
+    ///
+    /// 四态：`.rows`（有未达项，**一项一行**）/ `.none`（确无未达项）/
+    /// `.emptyDomain`（**没有可判定的东西**）/ `.rows`（从未扫描 ⇒ 保留全局项）。
+    ///
+    /// ⚠️ **四态里的 `.rows` 有两种来源**，靠 `.none` / `.emptyDomain` 区分「空」的两种含义。
+    public var unmetSection: UnmetSection = .rows([])
+    /// ③ 页：未达项（**派生** —— 真值在 `unmetSection`）。
+    ///
+    /// 保留为派生属性 ⇒ 既有断言与调用点一行不动。
+    /// 空数组 = 无未达项行可列（`.none` / `.emptyDomain`）。
+    public var unmetNotices: [SemanticSlot] {
+        if case .rows(let slots) = unmetSection { return slots }
+        return []
+    }
     /// ③ 页：剩余天数（`.duration`，`nil` → 「—」）。
     public var remainingDays: SemanticSlot = .duration(days: nil)
     /// **只读态的成因**（`nil` = 非只读）。
@@ -148,6 +248,11 @@ public struct PageModel: Sendable {
     public var scheduledTaskSlot: SemanticSlot?
     /// ③ 页：登录项是否需要用户去系统设置允许（决定是否给按钮）。
     public var needsLoginItemApproval: Bool = false
+    /// ③ 页：登录项是否处于「未注册」态（决定是否给「设为登录项」按钮）。
+    ///
+    /// 与 `needsLoginItemApproval` 平行：一个是 `.requiresApproval` 的动作，
+    /// 一个是 `.notRegistered` 的动作。两者互斥，都不会同时为真。
+    public var canRegisterLoginItem: Bool = false
 
     /// 页面顶部位置告警（Translocation：从 .dmg 直接运行 → 登录项会失效）。
     public var locationWarning: String?
@@ -172,7 +277,7 @@ public struct PageModel: Sendable {
     public var reportRows: [ReportRow] = []
     /// ⑤ 页页级状态。
     public var pageLevelSlot: SemanticSlot?
-    /// ⑤ 页「上一轮」行（**仅轮次 ≥ 2 时非 nil**）。
+    /// ⑤ 页「上一轮」行（**存在上一轮结算记录时非 nil**）。
     public var previousRoundSlot: SemanticSlot?
     /// ⑤ 页：报告是否已产出（未产出 → 结论列取「本轮未结算」）。
     public var reportProduced: Bool = false

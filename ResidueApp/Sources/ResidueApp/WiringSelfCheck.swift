@@ -57,7 +57,8 @@ enum WiringSelfCheck {
         check(FileManager.default.fileExists(atPath: stateFile.fileURL.path),
               "首启即写出 state.residue（A-10 第 9 步判据可达的前提）")
         check((((try? Data(contentsOf: stateFile.fileURL))?.count) ?? 0) > 0, "state.residue 非空")
-        check(model.pageModel.overviewBlocks.count == 3, "① 页三区块由真实状态投影（Source.allCases 三个）")
+        check(model.pageModel.overviewBlocks.count == Source.allCases.count,
+              "① 页来源卡由真实状态投影（Source.allCases 全集）")
 
         print("\n--- 2. 扫描与落盘（runScan）---")
         // ⚠️ **不能**在主 actor 上 `sem.wait()` 等一个需要主 actor 的 Task —— 那是自己等自己，
@@ -119,12 +120,309 @@ enum WiringSelfCheck {
             // 这曾是静默 bug：`b` 写成 `countHeld(...)` 的结果 →
             // 「缓存满满但无人使用」（最理想的可清理场景）恰好 `b = 0`
             // → AC-08 组 B 的 `b ≥ 1` 门槛永远不满足 → 永远点不亮。
+            //
+            // CR-031 后 `b` 是**累计判定次数**（M5），`slotCount` 是**去重后的位槽数**
+            // ⇒ 恒有 `b ≥ slotCount`（每个被判定过的候选至少占一个位槽）。
+            // 「被持有数」`pNowCount` 是第三个量，与 `b` 无关。
             check(
-                (uvEntry?.b ?? -1) == (uvEntry?.slotCount ?? -2),
-                "b == slotCount（每条候选判一次）；pNowCount 是另一个量，实为 \(model.lastScanDiagnostics.pNowCount)"
+                (uvEntry?.b ?? -1) >= (uvEntry?.slotCount ?? -2),
+                "b（累计判定次数）≥ slotCount（去重位槽数）；pNowCount 是另一个量，实为 \(model.lastScanDiagnostics.pNowCount)"
             )
         } else {
             check(false, "扫描后仍读不到载体内容")
+        }
+
+        print("\n--- 4a2. CR-031 结算写入链（K / J / producedAt 同一次原子写入）---")
+        // **这是 CR-031 的核心闭环**：
+        // `K` / `J` / `settlement.producedAt` 三个门槛量在运行路径上**从未被写过非空值**
+        // → `GateEvaluator.isQualified` 恒 `false` → 自动删除永远点不亮。
+        //
+        // 走**真文件系统**的完整链路（不注入假判定）：
+        //   ① 首轮 full 扫描 → 取快照（写 `T` / `H` / 快照成员集合 / `F` 位图）
+        //   ② 删掉一条候选（模拟缓存被清理）
+        //   ③ 把观察期计数日推到 14（真实路径要 14 天，这里直接推进载体）
+        //   ④ 次轮 full 扫描 → 结算（写 `K` / `J` / `producedAt` / `reportId`）
+        //
+        // ⚠️ 独立目录 + 独立 `AppModel`：不污染 §1–§4a 的载体与断点。
+        let cr031Root = dir.appendingPathComponent("cr031")
+        // ⚠️ 路径**必须**含 `/.cache/uv/`：`ScanEngine.SourceRule.match` 按路径片段
+        //    判来源（`/.cache/uv/` / `/.npm/_npx/` / `/.local/pipx/venv/`）——
+        //    路径不命中 ⇒ 候选数为 0 ⇒ 自检测的其实是「空目录」，不是结算链。
+        let cr031UV = cr031Root.appendingPathComponent("fakehome/.cache/uv")
+        try? FileManager.default.createDirectory(at: cr031UV, withIntermediateDirectories: true)
+        // ⚠️ **候选数取 31 而不是 2**（CR-033 引入的新约束）：
+        //    结算后若「未达标」（`K < H`）⇒ **自动开下一轮** ⇒ 本轮 `T` / `K` / `J` / `b`
+        //    **在同一次扫描里被清零** ⇒ 结算结果**永远看不到**（载体上没有中间态）。
+        //    而 `H = min(30, T)` ⇒ 「达标（`K ≥ H`）且 `J > 0`（有失联）」的**最小**构造是
+        //    `T = 31`（⇒ `H = 30`）、`K = 30`、`J = 1` —— 故取 31 条候选、次轮删 1 条。
+        //    这样本段既覆盖「结算写进载体」，又覆盖「失联 `J > 0`」，
+        //    还顺带覆盖 `H` 的封顶分支（`T ≥ 30 ⇒ H = 30`）。
+        for index in 0..<31 {
+            try? Data(repeating: 0x51, count: 4096).write(
+                to: cr031UV.appendingPathComponent(String(format: "blob-%02d", index))
+            )
+        }
+
+        let cr031StateFile = StateFile(directory: cr031Root.appendingPathComponent("state"))
+        let cr031Model = AppModel(
+            stateFile: cr031StateFile,
+            writer: RecordWriter(directory: cr031Root.appendingPathComponent("state/records"))
+        )
+        cr031Model.sourceRootsOverride = [
+            (Source.uvCache.rawValue, cr031UV.path),
+            (Source.npmNpx.rawValue, cr031Root.appendingPathComponent("nonexistent-npm").path),
+        ]
+
+        /// 跑一次 `full` 扫描并等它结束（RunLoop 泵，见 §2 的坑）。
+        func runFullScan(_ target: AppModel) -> Bool {
+            var done = false
+            Task { @MainActor in
+                await target.runScan(mode: .full)
+                done = true
+            }
+            let limit = Date().addingTimeInterval(120)
+            while !done && Date() < limit {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+            }
+            return done
+        }
+
+        check(runFullScan(cr031Model), "CR-031：首轮 full 扫描完成")
+
+        // ---- ① 首轮：只取快照，不结算 ----
+        if let c = cr031StateFile.load().contents {
+            let uv = c.header.sources.first { $0.source == .uvCache }
+            check(uv?.T == 31, "首轮 full 扫描取到快照：T = 31（实为 \(uv?.T ?? -1)）")
+            check(uv?.H == 30, "H = min(30, T) = 30（阈值封顶分支；实为 \(uv?.H ?? -1)）")
+            check(uv?.K == nil, "首轮**不结算**：K 仍为 null（取快照与结算互斥）")
+            check(uv?.J == nil, "首轮**不结算**：J 仍为 null")
+            check(c.header.settlement.producedAt == nil, "首轮无结算凭证：settlement.producedAt 仍为 null")
+            check(c.header.settlement.reportId == nil, "首轮无结算凭证：reportId 仍为 null")
+            check(c.payloads[.uvCache]?.snapshotMembers.count == 31,
+                  "快照成员集合已落盘（31 条，实为 \(c.payloads[.uvCache]?.snapshotMembers.count ?? -1)）")
+            check((c.payloads[.uvCache]?.bitmap.count ?? 0) > 0,
+                  "F 位图已落盘（\(c.payloads[.uvCache]?.bitmap.count ?? 0) B）—— `a` 的写入路径真的走了")
+            check(c.header.countedDays == 1, "计数日推进到 1（实为 \(c.header.countedDays)）")
+        } else {
+            check(false, "CR-031：首轮扫描后读不到载体内容")
+        }
+
+        // ---- ①.5 取证字段 `fSetBits` 必须来自载体的真实位图 ----
+        //
+        // `fSetBits` 曾被**写死为 `0`**：CR-031 之前 `F` 位图恒空，`0` 碰巧是对的；
+        // CR-031 之后位图**首次真实承载数据** ⇒ `0` 从「碰巧对」变成「稳定的错」，
+        // 而当时**没有任何测试守得住它**。
+        //
+        // ⚠️ `AppModel` 侧**没有单测**（单测只覆盖 `ResidueCore`）
+        // ⇒ 接线自检是这条唯一能守住的地方。
+        if let c = cr031StateFile.load().contents {
+            // 载体里的真实置位数（**数的是那串字节本身**，不是重新推算）
+            let carrierCount = c.payloads.values.reduce(0) { $0 + $1.fSetBitCount }
+            // ⚠️ **不能只断言「两边相等」** —— 载体为 0 位时 `0 == 0` **假绿**
+            //    （这正是缺陷本身的样子：诊断 0 / 载体 0）。
+            //    所以必须钉住**绝对值**：首轮 31 条候选全判「无活引用」⇒ `F` 有 31 位。
+            //
+            //    「判不出」不会走到这里：本段已有的 `b == 61` 断言要求
+            //    `!degraded`（降级时 `b` 不累计），且这些假候选是刚写的真实文件
+            //    ⇒ `lstat` 必然成功 ⇒ 判定必然落到 `noLiveReference`。
+            check(
+                cr031Model.lastScanDiagnostics.fSetBits == carrierCount && carrierCount == 31,
+                "取证字段 `fSetBits` 来自载体真实位图（诊断 \(cr031Model.lastScanDiagnostics.fSetBits) / 载体 \(carrierCount)）"
+            )
+        } else {
+            check(false, "CR-031：首轮扫描后读不到载体内容（`fSetBits` 对账）")
+        }
+
+        // ---- ② 删掉一条候选（`T = 31` ⇒ 次轮 `K = 30` / `J = 1`）----
+        try? FileManager.default.removeItem(at: cr031UV.appendingPathComponent("blob-30"))
+
+        // ---- ③ 把观察期计数日推到 14（真实路径要 14 天）----
+        if var c = cr031StateFile.load().contents {
+            c.header.countedDays = ObservationProgress.requiredDays
+            // 保存失败必须**显式报红**：静默吞掉会让后续断言读到旧状态 ⇒ 假绿。
+            do {
+                _ = try cr031StateFile.save(header: c.header, payloads: c.payloads)
+            } catch {
+                check(false, "CR-031：手工推进计数日时写回载体失败：\(error)")
+            }
+        }
+        cr031Model.loadAndProject()
+
+        check(runFullScan(cr031Model), "CR-031：次轮 full 扫描完成")
+
+        // ---- ④ 次轮：结算 ----
+        if let c = cr031StateFile.load().contents {
+            let uv = c.header.sources.first { $0.source == .uvCache }
+            check(uv?.T == 31, "结算不改动 T（快照冻结，实为 \(uv?.T ?? -1)）")
+            check(uv?.K == 30, "K = 30（归因到 30 条，实为 \(uv?.K ?? -1)）")
+            check(uv?.J == 1, "J = T − K = 1（失联 1 条；实为 \(uv?.J ?? -1)）")
+            check((uv?.K ?? 0) + (uv?.J ?? 0) == (uv?.T ?? -1), "K + J == T（恒等式）")
+            check(c.header.settlement.producedAt != nil, "结算凭证已写入：settlement.producedAt 非 null")
+            check(c.header.settlement.reportId != nil, "结算凭证已写入：reportId 非 null")
+            check(uv?.settlementDate != nil, "结算时刻已落盘（settlementDate 非 null）")
+            check(uv?.unattributableCount == 0,
+                  "「有 N 条无法归因」如实落盘（实为 \(String(describing: uv?.unattributableCount))）")
+            // `b`（M5）是**累计**判定次数：首轮 31 条 + 次轮 30 条 = 61。
+            // 覆盖写（每轮都写本轮数）⇒ 恒为 30 ⇒ 门槛项 `b ≥ 1` 仍过，
+            // 但「M5 累计」这条契约就没了 ⇒ 这里必须钉住 61。
+            check(uv?.b == 61, "b 是**累计**（31 + 30 = 61），不是覆盖（实为 \(uv?.b ?? -1)）")
+            check(uv?.a == 0, "a = 0（无人持有 ⇒ 无误判，实为 \(uv?.a ?? -1)）")
+            // —— CR-033：**达标 ⇒ 不开轮**（`K = 30 ≥ H = 30`）⇒ 结算值留在载体上 ——
+            //
+            // 这三条不是多余的断言，而是**本段能看见结算值的前提**：
+            // 未达标 ⇒ 自动开下一轮 ⇒ `T` / `K` / `J` / `b` 在同一次扫描里被清零
+            // ⇒ 上面几条结算断言全部读到 `nil`（此时「读到 nil」既可能是
+            // 「结算没写」也可能是「写完又被开轮清掉」⇒ **无法区分** = 假绿）。
+            check(c.header.round == 1, "达标（K ≥ H）⇒ **不开轮**：轮次仍为 1（实为 \(c.header.round)）")
+            check(c.header.previousRound == nil, "首轮无「上一轮」记录（previousRound 仍为 null）")
+            check(c.header.countedDays == ObservationProgress.requiredDays,
+                  "不开轮 ⇒ 计数日停在 14（实为 \(c.header.countedDays)）")
+        } else {
+            check(false, "CR-031：次轮扫描后读不到载体内容")
+        }
+
+        // ---- ⑤ 结算结果必须出现在**导出报告**里（CR-031 §五③ 裁决）----
+        //
+        // 数据层已落盘（`unattributableCount == 0`），但**呈现层零命中**时
+        // 等于没披露：维护者看报告只看到 `J = 1`，看不到「其中 0 条无法归因」。
+        //
+        // ⚠️ 必须用 **`cr031Model`**（已结算）而不是主 `model`（未结算）：
+        // 未结算时 `unattributableCount == nil` → 渲染为「—」，
+        // 与「已结算但确实 0 条无法归因」的「0」**不可区分** ⇒ 用主 model 断言会假绿。
+        //
+        // ⚠️ 状态列文案**不得写死中文**：`L.applyEnvironment()` 在 App 启动时
+        // 已把 `L.current` 改成系统语言（CI runner 可能是 en）⇒ 断言必须跟着语言走。
+        do {
+            let cr031Report = try Redactor.render(
+                try cr031Model.buildReportForExport(),
+                context: Redactor.Context.current()
+            )
+            // 整行断言（T=31 / K=30 / J=1 / 其中无法归因=0 / H=30 / a=0 / b=61）
+            // ——顺带钉住列序，多插一列或少插一列都会红。
+            //
+            // 来源名取 `Source.uvCache.rawValue`（= `uv_cache`）而不是手写字符串：
+            // 手写就多出第二处可能漂移的名字。
+            let expectedRow = "| \(Source.uvCache.rawValue) | \(L.pick("在域", "In domain")) | 31 | 30 | 1 | 0 | 30 | 0 | 61 |"
+            let actualRow = cr031Report
+                .split(separator: "\n")
+                .first { $0.hasPrefix("| \(Source.uvCache.rawValue) |") } ?? "（报告里没有 \(Source.uvCache.rawValue) 行）"
+            check(cr031Report.contains(expectedRow),
+                  "导出报告如实披露「其中无法归因」条数（CR-031 §五③）；实为：\(actualRow)")
+        } catch {
+            check(false, "CR-031 导出报告渲染失败：\(error)")
+        }
+
+        print("\n--- 4a3. CR-033 未达标自动开下一轮（轮次 +1 / 计时器归零 / 结算值清零 / `a` 保留）---")
+        // **为什么必须有这一段**：
+        // 「结算」与「开轮」是**同一次扫描**里的两件事（写回层 ④ 与 ⑦），
+        // 且「结算未达标 ⇒ 开轮」⇒ 载体上**只剩开轮后的态**（结算值已被清零）。
+        // ⇒ 「结算写进载体」（4a2）与「开轮后载体长什么样」（本段）
+        //    **必须分成两个场景验**，否则其中之一必然假绿：
+        //    4a2 用「达标」场景守结算，4a3 用「未达标」场景守开轮。
+        //
+        // ⚠️ 独立目录 + 独立 `AppModel`（不与 4a2 互相污染）。
+        let cr033Root = dir.appendingPathComponent("cr033")
+        // ⚠️ 路径**必须**含 `/.cache/uv/`（理由同 4a2：否则候选数为 0）。
+        let cr033UV = cr033Root.appendingPathComponent("fakehome/.cache/uv")
+        try? FileManager.default.createDirectory(at: cr033UV, withIntermediateDirectories: true)
+        try? Data(repeating: 0x61, count: 4096).write(to: cr033UV.appendingPathComponent("blob-a"))
+        try? Data(repeating: 0x62, count: 8192).write(to: cr033UV.appendingPathComponent("blob-b"))
+
+        let cr033StateFile = StateFile(directory: cr033Root.appendingPathComponent("state"))
+        let cr033Model = AppModel(
+            stateFile: cr033StateFile,
+            writer: RecordWriter(directory: cr033Root.appendingPathComponent("state/records"))
+        )
+        cr033Model.sourceRootsOverride = [
+            (Source.uvCache.rawValue, cr033UV.path),
+            (Source.npmNpx.rawValue, cr033Root.appendingPathComponent("nonexistent-npm").path),
+        ]
+
+        check(runFullScan(cr033Model), "CR-033：首轮 full 扫描完成")
+
+        // ---- ① 首轮：取快照（`T = 2` / `H = 2`），不结算 ----
+        if let c = cr033StateFile.load().contents {
+            let uv = c.header.sources.first { $0.source == .uvCache }
+            check(uv?.T == 2, "首轮取到快照：T = 2（实为 \(uv?.T ?? -1)）")
+            check(uv?.H == 2, "H = min(30, T) = 2（实为 \(uv?.H ?? -1)）")
+            check(c.header.round == 1, "首轮轮次 = 1（实为 \(c.header.round)）")
+            check(c.payloads[.uvCache]?.snapshotMembers.count == 2,
+                  "首轮快照成员 2 条（实为 \(c.payloads[.uvCache]?.snapshotMembers.count ?? -1)）")
+        } else {
+            check(false, "CR-033：首轮扫描后读不到载体内容")
+        }
+
+        // ---- ② 删掉一条候选 ⇒ 次轮 `K = 1 < H = 2` ⇒ **未达标** ----
+        try? FileManager.default.removeItem(at: cr033UV.appendingPathComponent("blob-b"))
+
+        // ---- ③ 把观察期计数日推到 14，并把 `a` 置成 7 ----
+        //
+        // ⚠️ **为什么要手工置 `a = 7`**：
+        // 契约 PRD v5.6 :71〔CR-010 · R7〕要求「轮次切换**不清零** `a`」。
+        // 真文件系统上**造不出 `a ≠ 0`**（误判要求候选「先判干净、后被进程持有」，
+        // 而本自检的候选全是自己刚写的普通文件 ⇒ `a` 恒 0）。
+        // 若让 `a` 停在 0，「开轮清零 `a`」与「开轮保留 `a`」**观察不到区别**
+        // ⇒ 该契约在这一层形同虚设。故直接改载体（与上面手工推 `countedDays` 同法）。
+        //
+        // 顺带说明：`a` **只活在文件头**（载体 `SourcePayload` 里没有这一项），
+        // 所以「开轮时把 `a` 清零」这个缺陷**只可能发生在文件头这一侧** ——
+        // Core 单测（不经载体编解码）抓不到，**只有本自检能抓到**。
+        if var c = cr033StateFile.load().contents {
+            c.header.countedDays = ObservationProgress.requiredDays
+            for index in c.header.sources.indices where c.header.sources[index].source == .uvCache {
+                c.header.sources[index].a = 7
+            }
+            // 保存失败必须**显式报红**：静默吞掉会让后续断言读到旧状态 ⇒ 假绿。
+            do {
+                _ = try cr033StateFile.save(header: c.header, payloads: c.payloads)
+            } catch {
+                check(false, "CR-033：手工置 `a` 与推进计数日时写回载体失败：\(error)")
+            }
+        }
+        cr033Model.loadAndProject()
+
+        check(runFullScan(cr033Model), "CR-033：次轮 full 扫描完成（未达标 ⇒ 应自动开下一轮）")
+
+        // ---- ④ 开轮后的载体态 ----
+        if let c = cr033StateFile.load().contents {
+            let uv = c.header.sources.first { $0.source == .uvCache }
+            // —— 轮次 +1、计时器归零、起算点清空（PRD v5.6 :68）——
+            check(c.header.round == 2, "未达标 ⇒ 自动开下一轮：轮次 1 → 2（实为 \(c.header.round)）")
+            check(c.header.countedDays == 0, "开轮 ⇒ 本轮计数日归零（实为 \(c.header.countedDays)）")
+            check(c.header.roundStartAnchor == nil, "开轮 ⇒ 起算点清空（新轮由它自己的首次成功扫描锚定）")
+            // —— 本轮派生量清零（下一轮重新取快照、重新结算）——
+            check(uv?.T == nil, "开轮 ⇒ `T` 清零（下一轮重新取快照；实为 \(String(describing: uv?.T))）")
+            check(uv?.H == nil, "开轮 ⇒ `H` 清零（随新 `T` 重算；实为 \(String(describing: uv?.H))）")
+            check(uv?.K == nil, "开轮 ⇒ `K` 清零（结算值改由「上一轮」记录承载；实为 \(String(describing: uv?.K))）")
+            check(uv?.J == nil, "开轮 ⇒ `J` 清零（实为 \(String(describing: uv?.J))）")
+            check(uv?.b == 0, "开轮 ⇒ `b` 清零（下一轮重新累计；实为 \(uv?.b ?? -1)）")
+            check(uv?.snapshotTaken == false, "开轮时**不**取快照（snapshotTaken 仍为 false）")
+            check(uv?.settlementDate == nil, "开轮 ⇒ 结算时刻清空")
+            check(uv?.unattributableCount == nil, "开轮 ⇒ 无法归因条数清空")
+            check(c.header.settlement.producedAt == nil, "开轮 ⇒ 结算凭证清零（producedAt）")
+            check(c.header.settlement.reportId == nil, "开轮 ⇒ 结算凭证清零（reportId）")
+            check(c.payloads[.uvCache]?.snapshotMembers.isEmpty == true,
+                  "开轮 ⇒ 快照成员集合清空（实为 \(c.payloads[.uvCache]?.snapshotMembers.count ?? -1)）")
+            // —— `a` 及其载体**保留**（PRD v5.6 :71〔R7〕）——
+            check(uv?.a == 7, "开轮**不清零** `a`（实为 \(uv?.a ?? -1)）")
+            // 位槽占用表保留：`slotCount` 是**稠密递增、不回收**的
+            // ⇒ 若开轮把它清了，次轮只会给 blob-a 分配 1 个槽（= 1 ≠ 2）⇒ 可区分。
+            check(uv?.slotCount == 2, "`a` 的载体（位槽占用表）保留：slotCount = 2（实为 \(uv?.slotCount ?? -1)）")
+            // `F` 位图保留：若开轮清了它，次轮只会重新置上 blob-a 的那一位（= 1 ≠ 2）⇒ 可区分。
+            check((c.payloads[.uvCache]?.fSetBitCount ?? 0) == 2,
+                  "`a` 的载体（`F` 位图）保留：置位数 = 2（实为 \(c.payloads[.uvCache]?.fSetBitCount ?? -1)）")
+            check(uv?.lastJudgmentAt != nil, "L0 判定时刻保留（实为 \(String(describing: uv?.lastJudgmentAt))）")
+            // —— 「上一轮」记录：承载被结算那一轮的结论（PRD v5.6 :69 ③）——
+            check(c.header.previousRound?.round == 1,
+                  "「上一轮」记录轮次 = 1（实为 \(String(describing: c.header.previousRound?.round))）")
+            check(c.header.previousRound?.source == .uvCache, "「上一轮」记录来源 = uv_cache")
+            check(c.header.previousRound?.sample == 1,
+                  "「上一轮」记录样本 K = 1（结算值落盘的见证；实为 \(String(describing: c.header.previousRound?.sample))）")
+            check(c.header.previousRound?.total == 2,
+                  "「上一轮」记录总量 T = 2（实为 \(String(describing: c.header.previousRound?.total))）")
+            check(c.header.previousRound?.settledAt != nil, "「上一轮」记录冻结时刻非空")
+        } else {
+            check(false, "CR-033：次轮扫描后读不到载体内容")
         }
 
         print("\n--- 4b. 导出脱敏报告（AC-13 G-5）---")
@@ -287,10 +585,145 @@ enum WiringSelfCheck {
         )
 
         // ---- ③ 取消真的能取消 ----
+        //
+        // ⚠️ 原来的断言只验了盒子本身（`cancel()` 后 `isCancelled == true`）
+        // ——那是**恒真**的，与「扫描会不会停下来」毫无关系。
+        // 而真实缺陷正是「盒子被取消了，引擎却不知道」：`runScan` 原先
+        // **没把 `cancelBox` 接进 `abortCheck`**，取消只在**每条来源之间**
+        // 生效一次 → 单来源 11 万条目要整条扫完才停（实测 ~6.7 s）。
+        //
+        // 这里验行为不验结构：扫一个大树，跑到一半下取消信号，
+        // 断言**扫描提前停了**（扫过的条目远少于总量）+ 落了断点。
+        let cancelRoot = dir.appendingPathComponent("cancelstate")
+        for d in 0..<120 {
+            let sub = cancelRoot.appendingPathComponent("d\(d)")
+            try? FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
+            for f in 0..<8 {
+                try? Data(repeating: 0x55, count: 32)
+                    .write(to: sub.appendingPathComponent("f\(f)"))
+            }
+        }
+        let totalEntries = 120 * 8        // 960 个叶子
         let cancelBox = CancelBox()
-        check(!cancelBox.isCancelled, "取消令牌初始为未取消")
-        cancelBox.cancel()
-        check(cancelBox.isCancelled, "取消信号被记录（后台任务读得到）")
+        let cancelEngine = ScanEngine()
+        let cancelDone = DispatchSemaphore(value: 0)
+        let cancelBoxOut = ResultBox()
+        Task.detached(priority: .userInitiated) {
+            let r = try? cancelEngine.scan(
+                root: cancelRoot.path,
+                mode: .full,
+                // **与 `AppModel.runScan` 同源**：引擎内部逐目录读同一个盒子
+                abortCheck: ScanEngine.AbortCheck {
+                    cancelBox.isCancelled ? .userCancelled : nil
+                },
+                progress: { p in
+                    // 扫到 48 条就下取消信号（远早于 960）
+                    if p.filesScanned >= 48 { cancelBox.cancel() }
+                },
+                progressEvery: 8
+            )
+            cancelBoxOut.store(r)
+            cancelDone.signal()
+        }
+        _ = cancelDone.wait(timeout: .now() + 30)
+        let cancelResult = cancelBoxOut.load()
+
+        check(cancelResult?.aborted == .userCancelled, "取消后引擎如实报「用户取消」（E-104）")
+        check(
+            (cancelResult?.filesScanned ?? totalEntries) < totalEntries / 2,
+            "取消在**扫描途中**生效（实扫 \(cancelResult?.filesScanned ?? -1) / 共 \(totalEntries) 条）—— 只在外层循环查一次会让单来源整条扫完"
+        )
+        check(cancelResult?.checkpoint != nil, "取消落断点（AC-20：重启后可续扫）")
+
+        print("\n--- 4c3. 断点落盘 → 重启 → 续扫（AC-20 · 进程重启后仍可续）---")
+        // §4c2 只验了「引擎会返回断点」；这一节验另一半：**断点真的落盘了**。
+        // 此前 `runScan` 把 `result.checkpoint` 直接丢弃、日志里
+        // `breakpointSaved` 写死 `false` → 进程一重启断点就没了。
+        //
+        // 走**完整 `AppModel` 路径**（不是直接调引擎）—— 落盘发生在
+        // `runScan` 收尾，那才是要验的接线点。
+        let resumeRoot = dir.appendingPathComponent("resumestate")
+        let resumeScan = resumeRoot.appendingPathComponent("scan")
+        let store = CheckpointStore(directory: resumeRoot.appendingPathComponent("state"))
+        // ⚠️ 树必须**大** —— 取消要在扫描途中打中，而主 actor 的轮询有开销。
+        // 实测：8000 条只要 **257 ms**，取消打不中（`aborted` 恒为 nil）；
+        // 200 × 300 = 60000 条约 2 s，留得出取消窗口。
+        try? FileManager.default.createDirectory(at: resumeScan, withIntermediateDirectories: true)
+        for d in 0..<200 {
+            let sub = resumeScan.appendingPathComponent("d\(d)")
+            try? FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
+            for f in 0..<300 {
+                try? Data(repeating: 0x33, count: 16)
+                    .write(to: sub.appendingPathComponent("f\(f)"))
+            }
+        }
+
+        /// 在**主 actor** 上跑一次扫描；`cancel: true` 时在扫描启动后取消它。
+        ///
+        /// ⚠️ 两个不能踩的坑：
+        /// 1. **不能用 `semaphore.wait()`** —— 那占住主线程，而 `runScan` 要在
+        ///    主 actor 上继续跑 → 自己等自己（实测 exit 137）。用 RunLoop 泵。
+        /// 2. **不能用 `scanProgress.filesScanned` 判「扫到多少了」** ——
+        ///    进度经「后台 → `cancelBox` → 主 actor 的 100 ms 定时器」回流，
+        ///    而本地树的扫描只要几十毫秒 → 定时器一次都没触发 → 进度永远不涨
+        ///    （实测：等 `filesScanned >= 2000` 永远等不到，取消一次都没打中）。
+        ///    `cancelScan()` 本身**不依赖进度**（直接写 `cancelBox`），
+        ///    所以判据用「`isScanning` 已置位」+ 让扫描跑一小段。
+        func runScanAndCancel(_ model: AppModel, cancel: Bool) {
+            var finished = false
+            Task { @MainActor in
+                await model.runScan(mode: .full)
+                finished = true
+            }
+            let deadline = Date().addingTimeInterval(120)
+            var sawScanning = false
+            var cancelled = false
+            var scanElapsed: TimeInterval = 0
+            while !finished, Date() < deadline {
+                if model.isScanning { sawScanning = true }
+                // 扫描启动后让它推进 50 ms（真扫到东西 → 断点里有内容），再取消。
+                if cancel, sawScanning, !cancelled, scanElapsed >= 0.05 {
+                    model.cancelScan()
+                    cancelled = true
+                }
+                RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+                scanElapsed += 0.01
+            }
+        }
+
+        // ---- ① 取消 → 断点必须落盘 ----
+        let cancelModel = AppModel(
+            stateFile: StateFile(directory: resumeRoot.appendingPathComponent("s1")),
+            writer: writer, checkpoints: store
+        )
+        cancelModel.sourceRootsOverride = [(Source.uvCache.rawValue, resumeScan.path)]
+        runScanAndCancel(cancelModel, cancel: true)
+
+        if case .usable(let savedCPs) = store.load() {
+            check(true, "取消后断点落在 state/checkpoints.json（此前从没落过盘）")
+            check(savedCPs[Source.uvCache.rawValue] != nil, "断点按来源分开存（uv_cache 一份）")
+
+            // ---- ② 「重启」：全新 AppModel + 同一 store → 正常扫完 ----
+            //
+            // 这次不取消。扫完后断点必须被**清除**（没有「未扫完的部分」了）。
+            let resumeModel = AppModel(
+                stateFile: StateFile(directory: resumeRoot.appendingPathComponent("s2")),
+                writer: RecordWriter(directory: resumeRoot.appendingPathComponent("s2/records")),
+                checkpoints: store
+            )
+            resumeModel.sourceRootsOverride = [(Source.uvCache.rawValue, resumeScan.path)]
+            runScanAndCancel(resumeModel, cancel: false)   // 不取消：这次要跑完
+
+            check(!resumeModel.isScanning, "续扫跑完了（未再被取消）")
+            if case .none = store.load() {
+                check(true, "正常扫完后断点被清除（没有未扫完的部分）")
+            } else {
+                check(false, "正常扫完后断点应被清除，否则下次会拿旧断点续扫")
+            }
+        } else {
+            check(false, "取消后断点应落在 state/checkpoints.json（此前从没落过盘）")
+            check(false, "断点按来源分开存（uv_cache 一份）")
+        }
 
         print("\n--- 4d. 执行路径的容量上限（AC-15 · 唯一真动用户文件的模块）---")
         // 这一节的存在理由：`executeBatch` 此前**一次都没被自检走过**，
@@ -353,6 +786,59 @@ enum WiringSelfCheck {
             ) == 1_000_000_000,
             "稳定后档仍受用户配置的上限约束（AC-15：用户设置不得静默失效）"
         )
+
+        print("\n--- 4b. 损坏载体不得被静默重建（不变量④）---")
+        // 载体损坏时 `load()` 把它移成 `.corrupt` 并返回只读。若加载流程
+        // 继续走「首启 → 写默认 header」，磁盘上会立刻出现一个空载体：
+        // 现场被覆盖、`a` 被静默清零。这里用真文件复现那条路径。
+        let corruptDir = dir.appendingPathComponent("corrupt")
+        try? FileManager.default.createDirectory(at: corruptDir, withIntermediateDirectories: true)
+        let corruptFile = corruptDir.appendingPathComponent("state.residue")
+        // 造**段校验失败**（E-304）：魔数与 schema 都合法，只有 headerLen 越界。
+        //
+        // ⚠️ 样本必须避开 E-301。「合法魔数 + 乱码」看着像损坏，实际是
+        // `u32(at:4)` 把 `"garb"` 读成 `schemaVersion = 1,734,438,498 > 1`
+        // → 抛 `.schemaTooNew`。E-301 的契约行为是**保留文件、只读降级**
+        // （用户可能装过更新版本，归档它等于毁掉新版本数据），
+        // 与 E-304 的「留档 .corrupt」正好相反。用错样本会测出一个假失败。
+        var badCarrier = Array("RSD1".utf8)
+        badCarrier += [1, 0, 0, 0]                  // schemaVersion = 1（合法）
+        badCarrier += [0xFF, 0xFF, 0xFF, 0xFF]      // headerLen 巨大 → 越界
+        badCarrier += [UInt8](repeating: 0, count: 12)  // 补到 24 B ≥ 20 B 前置
+        try? Data(badCarrier).write(to: corruptFile)
+
+        let corruptStateFile = StateFile(directory: corruptDir)
+        let corruptModel = AppModel(stateFile: corruptStateFile, writer: writer)
+        corruptModel.loadAndProject()
+
+        let mainFileExists = FileManager.default.fileExists(atPath: corruptFile.path)
+        let corruptCopyExists = FileManager.default.fileExists(
+            atPath: corruptDir.appendingPathComponent("state.residue.corrupt").path
+        )
+        // **两条都要成立**：现场被留档（.corrupt 存在）**且**主文件没被重建。
+        // 只判前者会被「留档 + 立刻重建空壳」骗过 —— 那正是静默重建的形态。
+        check(corruptCopyExists, "损坏载体现场已留档（.corrupt）")
+        check(!mainFileExists, "损坏载体未被静默重建（主文件不应重新出现）")
+        check(corruptModel.readOnly, "损坏载体进入只读态")
+
+        // **反向边界**：`E-301`（schema 更高）必须**保留**主文件 —— 只读降级，
+        // 不归档、不重置。那是用户装过更新版本写下的载体，归档等于毁数据。
+        // 与 E-304 的「留档」相反，两者不可合并处理。
+        let newerDir = dir.appendingPathComponent("newer")
+        try? FileManager.default.createDirectory(at: newerDir, withIntermediateDirectories: true)
+        let newerFile = newerDir.appendingPathComponent("state.residue")
+        var newerCarrier = Array("RSD1".utf8)
+        newerCarrier += [9, 0, 0, 0]                    // schemaVersion = 9 > 1
+        newerCarrier += [UInt8](repeating: 0, count: 12)
+        try? Data(newerCarrier).write(to: newerFile)
+        let newerModel = AppModel(stateFile: StateFile(directory: newerDir), writer: writer)
+        newerModel.loadAndProject()
+        check(FileManager.default.fileExists(atPath: newerFile.path),
+              "E-301（schema 更高）保留主文件，不归档")
+        check(!FileManager.default.fileExists(
+                atPath: newerDir.appendingPathComponent("state.residue.corrupt").path),
+              "E-301 不得生成 .corrupt（那是 E-304 的处置）")
+        check(newerModel.readOnly, "E-301 进入只读降级")
 
         print("\n--- 5. 定时任务的 ADR-02 硬约束（登录项非 enabled 不排）---")
         let schedDir = dir.appendingPathComponent("schedstate")

@@ -209,10 +209,33 @@ public enum UICopy {
     ///
     /// 形如「第 2 轮 · 观察期 5/14 天」。
     /// **前置数字式**：轮次在最前（视觉基线 §五 跨页规则）。
-    public static func observationInProgress(round: Int, observed: Int) -> String {
-        L.pick(
+    ///
+    /// ## 条件性后缀（PRD v5.6 :69 ①）
+    ///
+    /// 存在上一轮结算记录时追加括注（**只有这一串带**）：
+    /// 「第 2 轮 · 观察期 0/14 天（上一轮样本 27/30 未达标，已自动重开）」。
+    ///
+    /// ## ⚠️ 斜杠的两侧空格：两处不同，是契约原文
+    ///
+    /// | 落点 | 写法 |
+    /// |---|---|
+    /// | ③ 页括注（本串） | `样本 27/30`（**无空格**） |
+    /// | ⑤ 页「上一轮」行 | `样本 27 / 总量 30`（**有空格**） |
+    ///
+    /// 统一成一种写法会与 PRD / B1 的逐字断言对不上。
+    public static func observationInProgress(
+        round: Int,
+        observed: Int,
+        previous: PreviousRoundRecord? = nil
+    ) -> String {
+        let base = L.pick(
             "第 \(round) 轮 · 观察期 \(observed)/14 天",
             "Round \(round) · Observation \(observed)/14 days"
+        )
+        guard let previous else { return base }
+        return base + L.pick(
+            "（上一轮样本 \(previous.sample)/\(previous.total) 未达标，已自动重开）",
+            " (Previous round sample \(previous.sample)/\(previous.total) not met, reopened)"
         )
     }
 
@@ -234,18 +257,137 @@ public enum UICopy {
         )
     }
 
-    /// ③ 页开关区未达项（**观察期已满但样本不足**）——AC-08 组 A 的来源项。
+    /// ③ 页未达项 · **样本不足**行——AC-08 组 A 的来源项（**四数齐**）。
     ///
-    /// 形如「第 2 轮 · 样本不足（27 / 30）」。
-    /// **为什么需要单独一条**：M1 那两串只覆盖「观察期未满」；
-    /// 而观察期已满、报告已产出、`K < H` 时，未达项是**样本不足**，
-    /// 用「观察期 14/14 天」既不是未达项、也会让 ⑤ 页的「报告已产出」显得矛盾
-    /// （复必现的 M-02 就是靠这个矛盾看出问题的）。
-    public static func unmetSampleInsufficient(round: Int, sample: Int, threshold: Int) -> String {
-        L.pick(
-            "第 \(round) 轮 · 样本不足（\(sample) / \(threshold)）",
-            "Round \(round) · Insufficient samples (\(sample) / \(threshold))"
+    /// 形如「npm/_npx · 样本不足 · 样本 11 / 总量 12（门槛 12，其中失联 1）」。
+    ///
+    /// ## 三个基数 + 一个门槛
+    ///
+    /// | 位置 | 含义 |
+    /// |---|---|
+    /// | 样本 `<K>` | 归因样本数 |
+    /// | 总量 `<T>` | 候选总数 |
+    /// | 门槛 `<H>` | `H = min(30, T)` |
+    /// | 其中失联 `<J>` | 失联数（**未判定时为 `—`，不是 0**） |
+    ///
+    /// **门槛另标、不挂在失联之下**（DAC-76）。
+    public static func unmetSampleInsufficient(
+        source: String,
+        sample: Int,
+        total: Int,
+        threshold: Int,
+        lost: Int?
+    ) -> String {
+        let lostText = lost.map { "\($0)" } ?? "—"
+        return L.pick(
+            "\(source) · 样本不足 · 样本 \(sample) / 总量 \(total)（门槛 \(threshold)，其中失联 \(lostText)）",
+            "\(source) · Insufficient samples · Samples \(sample) / Total \(total) (threshold \(threshold), lost \(lostText))"
         )
+    }
+
+    /// ③ 页未达项 · **样本不足**行的追加句（TC-038）。
+    ///
+    /// 逐字挂在四数形态**之后**：「失联不补足，下一轮以新快照重算」。
+    /// **不带任何数字** ⇒ 不影响 TC-038「行内数字恰 4 个」。
+    public static func unmetSampleNote() -> String {
+        L.pick(
+            "失联不补足，下一轮以新快照重算",
+            "Lost entries are not backfilled; recalculated from a new snapshot next round"
+        )
+    }
+
+    /// ③ 页未达项 · **L0 误判**行（`a ≠ 0`）。
+    ///
+    /// 形如「npm/_npx · L0 误判 1 次（检查 128 次）」。
+    /// - `checkCount` 未判定时显示「—」（**不是 0** —— 0 会被读成「未检查」）。
+    public static func unmetL0Misjudged(source: String, missCount: Int, checkCount: Int?) -> String {
+        let checkText = checkCount.map { "\($0)" } ?? "—"
+        return L.pick(
+            "\(source) · L0 误判 \(missCount) 次（检查 \(checkText) 次）",
+            "\(source) · L0 misjudgment \(missCount) time(s) (\(checkText) check(s))"
+        )
+    }
+
+    /// ③ 页未达项 · **L0 未检查**行（`b = 0`）。
+    ///
+    /// PRD v5.6 :157：`b = 0` 本期不可达（判定域来源入域当轮即被 L0 判定 ⇒ `b ≥ 1` 恒成立）
+    /// ⇒ 这是**防御性表述**，不需单独立验收用例。
+    public static func unmetL0NeverChecked(source: String) -> String {
+        L.pick(
+            "\(source) · L0 未检查（检查 0 次）",
+            "\(source) · L0 not checked (0 checks)"
+        )
+    }
+
+    /// ③ 页未达项 · **L0 未判定**行（无法枚举本用户进程）。
+    ///
+    /// R2 §25.1 裁定一：`degraded = true` ⇒ 该来源 `a`/`b` 均不判定。
+    public static func unmetL0Undetermined(source: String) -> String {
+        L.pick(
+            "\(source) · L0 未判定（无法枚举本用户进程）",
+            "\(source) · L0 undetermined (can’t enumerate this user’s processes)"
+        )
+    }
+
+    /// ③ 页未达项 · **归因说明**（附在「样本不足」行**之后、同一行内**）。
+    ///
+    /// 逐字：「因存在 L0 误判，本版本不再提示可点亮进度」。
+    /// **不带数字** ⇒ 不影响 TC-038「行内数字恰 4 个」；
+    /// **不单独成行**（DAC-78：两行，0 容差）。
+    public static func unmetL0AttributionNote() -> String {
+        L.pick(
+            "因存在 L0 误判，本版本不再提示可点亮进度",
+            "Because L0 misjudgment exists, this version no longer shows enable progress"
+        )
+    }
+
+    /// ③ 页「无未达项」静态文案。
+    ///
+    /// - 场景：判定域**非空**、报告已产出、观察期已满，但未达项集合为空。
+    /// - ⚠️ **不得**改成「已达达标条件」：未达项为空**不等于**可点亮
+    ///   （`a` 未判定时既无来源项、又过不了达标门槛 —— 见 §三 3.9）。
+    public static var unmetNone: String {
+        L.pick("无未达项", "No unmet items")
+    }
+
+    /// §8 空类成因文案（封闭两串 · DAC-79）。
+    ///
+    /// - `.noScannableSource` → 「无可扫描来源」（定位成功且页面上无候选）
+    /// - `.noCleanupCandidate` → 「无清理候选」（页面有候选但判定域内无）
+    ///
+    /// - ⚠️ **不得**新增第三串（DAC-79 容差「二串之一」+ 异议 #79）。
+    public static func emptyDomainText(_ cause: EmptyDomainCause) -> String {
+        switch cause {
+        case .noScannableSource:
+            return L.pick("无可扫描来源", "No scannable source")
+        case .noCleanupCandidate:
+            return L.pick("无清理候选", "No cleanup candidate")
+        }
+    }
+
+    /// ① 页扫描进度横条的**来源计数段**（CR-037 §3.3）。
+    ///
+    /// 形如「已完成 1/7 个来源」（来源数 = `Source.allCases.count`）。
+    ///
+    /// ## 为什么是「来源」而不是「条目」
+    ///
+    /// 总条目数**事先不知道** ⇒ 百分比是假的；
+    /// 来源总数**本次扫描开始时就知道** ⇒ 「x/y 个来源」是能如实说出口的量。
+    ///
+    /// ## 格式约定
+    ///
+    /// - 「x/y」**不加空格**（紧凑计数，视觉基线的数字式前缀惯例）；
+    /// - 段与段之间用「 · 」分隔（沿用既有三段的分隔符）。
+    public static func scanSourcesCompleted(done: Int, total: Int) -> String {
+        L.pick("已完成 \(done)/\(total) 个来源", "\(done)/\(total) sources completed")
+    }
+
+    /// ① 页扫描进度横条在**分母未知**时的首段（CR-037 §3.3）。
+    ///
+    /// ⚠️ **不得**写成「已完成 0/0 个来源」—— 「0/0」会被读成
+    /// 「一个来源都扫不完」，那是编造（守不变量③：不把未知判为已知）。
+    public static func scanningInProgress() -> String {
+        L.pick("正在扫描…", "Scanning…")
     }
 
     /// ⑤ 页在**只读态**显示这一串，而不是「本轮未结算」。
@@ -292,15 +434,53 @@ public enum UICopy {
     /// 报告产出前的结论列取值（**不得填「未达标」——那是假值**）。
     public static var notSettledThisRound: String { L.pick("本轮未结算", "Not settled this round") }
 
-    /// ⑤ 页「上一轮」行的前缀（`轮次 ≥ 2` 时才显示该行）。
+    /// **报告已产出、但该来源尚未结算**时的取值。
     ///
-    /// **前置数字式**（视觉基线 §五 跨页规则：三处轮次同构）。
-    /// 显示的轮次是**上一轮**，即 `round - 1`。
-    public static func previousRound(round: Int) -> String {
+    /// 与 `notSettledThisRound` 的区别：**整体**结算了 ≠ **每个来源**都结算了。
+    /// 一个来源结算了 ⇒ `settlement.producedAt` 落盘 ⇒ 矩阵整体进入「已产出」态，
+    /// 但**别的来源**（判定域外的、这轮没扫到的）仍可能 `K = nil`。
+    ///
+    /// 此时填 `0` 是**假值**：`0` 会被读成「一条都没归因成功」，
+    /// 而 `h(0) = min(30, 0) = 0` ⇒ `0 >= 0` 成立 ⇒ 结论还会被判成「**达标**」。
+    public static var sourceNotSettled: String {
+        L.pick("本来源未结算", "Not settled for this source")
+    }
+
+    /// ⑤ 页「上一轮」行 —— **四要素缺一即不通过**（DAC v2.0 :176 DAC-50（修订））。
+    ///
+    /// 形如「第 1 轮 · 样本 11 / 总量 12 · 未达标 · 冻结于 2023-11-14」。
+    ///
+    /// 四要素：①轮次 `第 <N−1> 轮` ②`样本 <K> / 总量 <T>` ③`未达标` ④`冻结于 <YYYY-MM-DD>`。
+    ///
+    /// ## 为什么不能只写标签
+    ///
+    /// 旧写法「上一轮结算」只有标签、没有轮次与样本量 ⇒ DAC-50（修订）不通过
+    /// （AC-09 现状栏：「上一轮行缺 3 要素」）。
+    ///
+    /// ## 轮次显示的是**被结算的那一轮**
+    ///
+    /// 由记录里的 `round` 给出（不是 `当前轮次 − 1`）——
+    /// 载体里的记录才是事实，推算会与事实分叉。
+    public static func previousRoundSettlement(_ record: PreviousRoundRecord) -> String {
         L.pick(
-            "第 \(round - 1) 轮 · 上一轮结算",
-            "Round \(round - 1) · Previous settlement"
+            "第 \(record.round) 轮 · 样本 \(record.sample) / 总量 \(record.total) · 未达标 · 冻结于 \(dayText(record.settledAt))",
+            "Round \(record.round) · Sample \(record.sample) / Total \(record.total) · Not met · Frozen at \(dayText(record.settledAt))"
         )
+    }
+
+    /// 日期「yyyy-MM-dd」——**Core 侧唯一样式串**。
+    ///
+    /// ## 为什么不用 `DateFormatter`
+    ///
+    /// - `DateFormatter` **非 `Sendable`** ⇒ 不能做成 `static let`（并发访问会崩）；
+    /// - `Date.FormatStyle` 随 locale 漂（`en_US` 会给出 `11/14/2023`）。
+    ///
+    /// 用 `Calendar` 取分量 + 手工拼串：**确定性 + 无共享可变状态**。
+    ///
+    /// - Parameter calendar: 取分量的日历（默认 `.current` = 用户所在地的日历日）。
+    public static func dayText(_ date: Date, calendar: Calendar = .current) -> String {
+        let parts = calendar.dateComponents([.year, .month, .day], from: date)
+        return String(format: "%04d-%02d-%02d", parts.year ?? 0, parts.month ?? 0, parts.day ?? 0)
     }
 
     /// ⑦ 页留存口径两行同址（14 日 + 90 天/200 MB）。

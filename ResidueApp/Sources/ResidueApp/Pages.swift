@@ -20,28 +20,74 @@ import ResidueCore
 
 // MARK: - ① 只读存储总览
 //
-// 骨架：三区块 + 状态条 + 加载态
-// 必须有的语义位：三区块各一个 `.metric`；状态条承载「并发冲突」
+// 骨架：来源区块（每来源一块）+ 状态条 + 加载态
+// 必须有的语义位：每个来源块各一个 `.metric`；状态条承载「并发冲突」
 struct OverviewPage: View {
     let model: PageModel
+    /// 空态里的主行动（「开始扫描」）。为空时不显示按钮（渲染稿 / 只读态）。
+    var onScan: (() -> Void)? = nil
+    /// 取消扫描（进度横条上的按钮）。为空时不显示取消按钮。
+    var onCancel: (() -> Void)? = nil
+
+    /// **是否正在扫描**（`scanProgress` 非空即为扫描中）。
+    private var isScanning: Bool { model.scanProgress != nil }
 
     var body: some View {
-        if model.loading {
-            LoadingView(message: model.loadingMessage)
-        } else {
-            VStack(alignment: .leading, spacing: Tokens.Spacing.m) {
+        // ⚠️ **不再整页替换**（CR-037 §3.12）——
+        //    原先扫描时整页换成 `LoadingView` ⇒ 来源区块 / 状态条 / 空态**全部消失**，
+        //    用户只能盯着一个转圈。加载态现在**是第四件**，与来源区块并存。
+        VStack(alignment: .leading, spacing: Tokens.Spacing.m) {
+                // ---- 扫描进度横条（① 页内容区顶部）----
+                //
+                // 圆环 + 进度文案 + 取消按钮（CR-037 §3.11）。
+                if let progress = model.scanProgress {
+                    ScanProgressStrip(progress: progress, onCancel: onCancel)
+                }
+
                 if let status = model.statusSlot {
                     StatusBar(slot: status)
                 }
 
-                if model.overviewBlocks.isEmpty {
-                    EmptyStateView(
-                        message: L.pick("还没有扫描过", "No scan yet"),
-                        hint: L.pick("首次扫描会在观察期内进行，不读取文件内容。", "The first scan runs during the observation period and never reads file contents.")
+                // **清理结果反馈**（执行完必须给答复 —— 原先什么都不变）
+                if let notice = model.lastExecutionNotice {
+                    // ⚠️ 扫描期退到中性 —— 信号色着色区只留给进度环（§3.13）
+                    ExecutionNoticeCard(notice: notice, usesSignalAccent: !isScanning)
+                }
+
+                if model.isFirstRunEmpty {
+                    // **空态可达**（原先 `overviewBlocks` 恒为「全部来源」块数 → 这条分支永远进不来）
+                    //
+                    // 首屏必须回答「我现在该做什么」。原先首启看到的是七张 0 B 卡片
+                    // 加一串 0 —— 既不说明状态，也不给动作入口，用户只能盯着 0 发呆。
+                    //
+                    // ⚠️ 扫描期不显示「开始扫描」按钮（§3.13）—— 此刻正在扫，
+                    //    再给一个「开始扫描」就是第二套互相矛盾的行动入口。
+                    FirstRunEmptyState(
+                        onScan: isScanning ? nil : onScan,
+                        showsTitle: !isScanning
                     )
                 } else {
-                    // 三区块横向并排（总览页的语义是「一眼看完三个来源的占用」）
-                    HStack(alignment: .top, spacing: Tokens.Spacing.m) {
+                    // **总量优先**：先回答「一共占了多少」，再看分来源明细。
+                    Card {
+                        HStack(alignment: .firstTextBaseline, spacing: Tokens.Spacing.s) {
+                            VStack(alignment: .leading, spacing: Tokens.Spacing.xxs) {
+                                Text(L.pick("来源占用合计", "Total across sources"))
+                                    .font(Tokens.Typography.secondary)
+                                    .foregroundStyle(Tokens.Color.textSecondary)
+                                SemanticSlotView(slot: model.totalFootprintBytes)
+                                    .font(Tokens.Typography.pageTitle)
+                            }
+                            Spacer()
+                        }
+                    }
+                    // 来源卡横排（CR-038 §3.8）：来源数从 3 增到 7 ⇒ `HStack` 会挤爆，
+                    // 改自适应网格 —— 列宽随可用宽度自动分配，2~3 列随视口走。
+                    //
+                    // ⚠️ `LazyVGrid` 只接受 `GridItem` 列 ⇒ 不能照抄 `HStack` 的写法。
+                    LazyVGrid(
+                        columns: [GridItem(.adaptive(minimum: 180), spacing: Tokens.Spacing.m)],
+                        spacing: Tokens.Spacing.m
+                    ) {
                         ForEach(model.overviewBlocks) { block in
                             OverviewBlockCard(block: block)
                         }
@@ -91,9 +137,8 @@ struct OverviewPage: View {
                     }
                 }
                 Spacer()
-            }
-            .padding(Tokens.Spacing.m)
         }
+        .padding(Tokens.Spacing.m)
     }
 }
 
@@ -226,6 +271,10 @@ struct PolicyPage: View {
     var onOpenLoginSettings: () -> Void = {}
     /// 改执行方式（AC-03 四项之一）。
     var onSetExecutionMode: (ExecutionMode) -> Void = { _ in }
+    /// 点亮 / 关闭自动删除（AC-08 组 B）。接 `AppModel.setAutoDelete`。
+    var onToggleAutoDelete: (Bool) -> Void = { _ in }
+    /// 注册为登录项（`.notRegistered` 时给这个动作）。接 `AppModel.registerLoginItem`。
+    var onRegisterLoginItem: () -> Void = {}
     /// 加入 / 移出白名单（AC-03：用户唯一的主动保护动作）。
     var onAddWhitelist: (String) -> Void = { _ in }
     var onRemoveWhitelist: (String) -> Void = { _ in }
@@ -262,19 +311,33 @@ struct PolicyPage: View {
                         // 自建开关（系统 `.switch` 在离屏渲染下不可用，且不符合 token 约束）
                         TokenSwitch(
                             isOn: model.autoDeleteEnabled,
-                            enabled: model.canLightUp && !model.readOnly
+                            enabled: model.canLightUp && !model.readOnly,
+                            onToggle: onToggleAutoDelete
                         )
                     }
 
                     // 未达项（带轮次，M1 唯一串）与剩余天数**同址**
                     HStack(alignment: .firstTextBaseline) {
-                        if let unmet = model.unmetNotice {
-                            SemanticSlotView(slot: unmet)
-                        } else {
-                            SemanticSlotView(slot: .text(L.pick("未达项读取中", "Loading unmet items")), muted: true)
+                        // 未达项**多行**：全局项在前、来源项在后，**一项一行**（DAC-74）。
+                        // ⚠️ **四态分派**（CR-036）：`.rows` 逐行 / `.none`「无未达项」/
+                        // `.emptyDomain`「无可扫描来源」或「无清理候选」。
+                        // 三者都是**已确定**的状态 —— 不得再显示「读取中」（那是把「尚未知」
+                        // 说成「还在读」，违不变量 ③）。
+                        VStack(alignment: .leading, spacing: Tokens.Spacing.xs) {
+                            switch model.unmetSection {
+                            case .rows(let slots):
+                                ForEach(slots.indices, id: \.self) { index in
+                                    SemanticSlotView(slot: slots[index])
+                                }
+                            case .none:
+                                SemanticSlotView(slot: .text(UICopy.unmetNone), muted: true)
+                            case .emptyDomain(let cause):
+                                SemanticSlotView(slot: .text(UICopy.emptyDomainText(cause)), muted: true)
+                            }
                         }
                         Spacer(minLength: Tokens.Spacing.s)
                         // 视觉基线 §五：「剩余天数」与未达项同一语义位旁另设一格
+                        // （DAC-77：同址相邻但**独立格**，不得合并进未达项那一句）
                         SemanticSlotView(slot: model.remainingDays, muted: true)
                     }
                 }
@@ -401,6 +464,12 @@ struct PolicyPage: View {
                                 // 只在 `.requiresApproval` 时给——其余三态给这个按钮
                                 // 等于把用户支使到一个解决不了问题的地方
                                 Button(L.pick("去系统设置允许", "Open System Settings")) { onOpenLoginSettings() }
+                                    .buttonStyle(SecondaryButtonStyle())
+                            }
+                            if model.canRegisterLoginItem {
+                                // `.notRegistered` 态：主动注册，把产品接上定时链。
+                                // 这是首启默认态唯一的出路——没有它，定时任务永不排程。
+                                Button(L.pick("设为登录项", "Add as Login Item")) { onRegisterLoginItem() }
                                     .buttonStyle(SecondaryButtonStyle())
                             }
                         }
@@ -750,6 +819,49 @@ struct ConfirmDrawer: View {
                         .font(Tokens.Typography.secondary)
                         .foregroundStyle(Tokens.Color.textSecondary)
                     SemanticSlotView(slot: model.deferredCountSlot)
+                }
+            }
+
+            // ---- **本次将处理的条目清单** ----
+            //
+            // 原先确认页只有「N 条 / X GB」两个数字和一个大片留白 —— 用户在
+            // 「即将被移进废纸篓」这最后一步，看不到**任何一条具体路径**。
+            // 那让他无法核对「是不是删我想的那些」。
+            //
+            // 清单数据 = `candidateRows`（已排除白名单、已按 200/页分页），
+            // 与 ② 页同一份来源，不另立第二份筛选。
+            if !model.candidateRows.isEmpty {
+                VStack(alignment: .leading, spacing: Tokens.Spacing.xxs) {
+                    SectionTitle(text: L.pick("本次涉及的条目", "Items in this batch"))
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: Tokens.Spacing.xxs) {
+                            ForEach(model.candidateRows) { row in
+                                HStack(spacing: Tokens.Spacing.s) {
+                                    Text(row.name)
+                                        // 视觉基线只有 body / secondary / title / pageTitle 四档，
+                                        // 不引入新字号 —— 路径用 secondary（info 类文案）。
+                                        .font(Tokens.Typography.secondary)
+                                        .foregroundStyle(Tokens.Color.textSecondary)
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                    Spacer(minLength: Tokens.Spacing.xs)
+                                    SemanticSlotView(slot: row.bytes, muted: true)
+                                }
+                            }
+                        }
+                    }
+                    .frame(maxHeight: 180)
+
+                    // **如实说明清单是分页的**：不让「我看了 200 条」被读成「只有 200 条」。
+                    if model.pageCount > 1 {
+                        Text(L.pick(
+                            "以上为第 1 页（最多 200 条）。本批次共 \(model.pageCount) 页，执行时会按上限逐条复核。",
+                            "Showing page 1 (up to 200 items). This batch has \(model.pageCount) pages; each item is re-checked at execution time."
+                        ))
+                        .font(Tokens.Typography.secondary)
+                        .foregroundStyle(Tokens.Color.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
             }
 

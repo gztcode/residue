@@ -34,9 +34,15 @@ public enum Redactor {
         public var description: String {
             switch self {
             case .leakedOriginalText(let items):
-                return "脱敏自检失败：以下原文串仍出现在导出物中：\(items.joined(separator: ", "))"
+                return L.pick(
+                    "脱敏自检失败：以下原文串仍出现在导出物中：\(items.joined(separator: ", "))",
+                    "Redaction self-check failed: these original strings still appear in the export: \(items.joined(separator: ", "))"
+                )
             case .missingSection(let name):
-                return "报告缺少必需段落：\(name)（缺任一段即视为报告不可用）"
+                return L.pick(
+                    "报告缺少必需段落：\(name)（缺任一段即视为报告不可用）",
+                    "Report is missing a required section: \(name) (missing any section makes the report unusable)"
+                )
             }
         }
     }
@@ -127,16 +133,25 @@ public enum Redactor {
         public var t: Int?
         public var k: Int?
         public var j: Int?
+        /// 失联条目中「无法归因」的条数（PRD v5.6 M3：**单列、不并入已归因**）。
+        ///
+        /// `nil` = 本轮尚未结算 → 必须渲染为「—」，不得写成 0
+        /// （0 会被读成「一条都无法归因」，而事实是「还没结算」）。
+        public var unattributable: Int?
         public var h: Int?
         public var a: Int
         public var b: Int
 
-        public init(source: String, state: String, t: Int?, k: Int?, j: Int?, h: Int?, a: Int, b: Int) {
+        public init(
+            source: String, state: String, t: Int?, k: Int?, j: Int?,
+            unattributable: Int? = nil, h: Int?, a: Int, b: Int
+        ) {
             self.source = source
             self.state = state
             self.t = t
             self.k = k
             self.j = j
+            self.unattributable = unattributable
             self.h = h
             self.a = a
             self.b = b
@@ -262,17 +277,32 @@ public enum Redactor {
     // MARK: - 渲染
 
     /// 渲染完整报告（**五段齐全，缺任一段即报错**）。
+    ///
+    /// ## 语言策略（段名双写、正文跟随界面语言）
+    ///
+    /// 报告是**用户可能外发给他人**的产物（AC-13 G-5），所以它不能像内部日志
+    /// 那样只写一种语言：英文界面下导出一份全中文报告，等于把内部语言暴露给收件人。
+    ///
+    /// 但**段标记**（`## ① 环境`）是「五段齐全」自检的判据，也是契约
+    /// （R2 IF-12）里「环境 / 量 / 取证 / 证据 / 上游」五段的落点 ——
+    /// 只写一种语言会让另一种语言的读者对不上契约，也让自检在切换语言时失效。
+    ///
+    /// 折中：**段标记中英双写**（两种语言都能定位），**正文（表头、说明）
+    /// 跟随界面语言**。这样报告无论哪种语言导出，段名都稳定可核对。
     public static func render(_ report: Report, context: Context) throws -> String {
         var lines: [String] = []
-        lines.append("# Residue 脱敏诊断报告")
+        lines.append(L.pick("# Residue 脱敏诊断报告", "# Residue Redacted Diagnostic Report"))
         lines.append("")
-        lines.append("> 本报告由用户在本地导出，已完成脱敏；产品不自动外发任何数据。")
+        lines.append(L.pick(
+            "> 本报告由用户在本地导出，已完成脱敏；产品不自动外发任何数据。",
+            "> Exported locally by the user and redacted; the product never sends data out on its own."
+        ))
         lines.append("")
 
         // ① 环境段
-        lines.append("## ① 环境")
+        lines.append(Section.environment.marker)
         lines.append("")
-        lines.append("| 项 | 值 |")
+        lines.append(L.pick("| 项 | 值 |", "| Item | Value |"))
         lines.append("|---|---|")
         lines.append("| appVersion | \(redact(report.appVersion, context: context)) |")
         lines.append("| schemaVersion | \(report.schemaVersion) |")
@@ -281,21 +311,24 @@ public enum Redactor {
         lines.append("")
 
         // ② 量段
-        lines.append("## ② 量")
+        lines.append(Section.metrics.marker)
         lines.append("")
-        lines.append("| 来源 | 状态 | T | K | J | H | a | b |")
-        lines.append("|---|---|---|---|---|---|---|---|")
+        lines.append(L.pick(
+            "| 来源 | 状态 | T | K | J | 其中无法归因 | H | a | b |",
+            "| Source | State | T | K | J | Of which unattributable | H | a | b |"
+        ))
+        lines.append("|---|---|---|---|---|---|---|---|---|")
         for s in report.sources {
             func cell(_ v: Int?) -> String { v.map(String.init) ?? "—" }
-            lines.append("| \(s.source) | \(s.state) | \(cell(s.t)) | \(cell(s.k)) | \(cell(s.j)) | \(cell(s.h)) | \(s.a) | \(s.b) |")
+            lines.append("| \(s.source) | \(s.state) | \(cell(s.t)) | \(cell(s.k)) | \(cell(s.j)) | \(cell(s.unattributable)) | \(cell(s.h)) | \(s.a) | \(s.b) |")
         }
         lines.append("")
 
         // ③ 取证段
         let d = report.diagnostics
-        lines.append("## ③ 取证")
+        lines.append(Section.diagnostics.marker)
         lines.append("")
-        lines.append("| 项 | 值 |")
+        lines.append(L.pick("| 项 | 值 |", "| Item | Value |"))
         lines.append("|---|---|")
         lines.append("| degraded | \(d.degraded) |")
         lines.append("| coverage.sameUIDTotal | \(d.sameUIDTotal) |")
@@ -312,15 +345,15 @@ public enum Redactor {
         lines.append("")
 
         // ④ 证据段
-        lines.append("## ④ 证据")
+        lines.append(Section.evidence.marker)
         lines.append("")
-        lines.append("### 举证链")
+        lines.append(L.pick("### 举证链", "### Evidence chain"))
         lines.append("")
         lines.append("```jsonl")
         for l in report.evidenceLines { lines.append(redact(l, context: context)) }
         lines.append("```")
         lines.append("")
-        lines.append("### 执行日志")
+        lines.append(L.pick("### 执行日志", "### Execution log"))
         lines.append("")
         lines.append("```jsonl")
         for l in report.executionLines { lines.append(redact(l, context: context)) }
@@ -328,9 +361,12 @@ public enum Redactor {
         lines.append("")
 
         // ⑤ 上游段
-        lines.append("## ⑤ 上游")
+        lines.append(Section.upstream.marker)
         lines.append("")
-        lines.append("| 命令 | 参数 | 退出码 | 耗时 ms | 时刻 |")
+        lines.append(L.pick(
+            "| 命令 | 参数 | 退出码 | 耗时 ms | 时刻 |",
+            "| Command | Arguments | Exit code | Duration ms | Time |"
+        ))
         lines.append("|---|---|---|---|---|")
         for c in report.upstreamCommands {
             let args = redactArguments(c.args, context: context).joined(separator: " ")
@@ -351,7 +387,9 @@ public enum Redactor {
         // 脱敏自检的前置：**至少有一个原串参与检查**。
         // 否则「Context 没配好 → 什么都没脱 → 自检通过」= 假绿通道（K2 用例实测命中）。
         guard hasRedactionBasis(context) else {
-            throw RedactionError.leakedOriginalText(["<无任何原串参与自检>"])
+            throw RedactionError.leakedOriginalText([
+                L.pick("<无任何原串参与自检>", "<no original string took part in the self-check>")
+            ])
         }
 
         // 脱敏自检：**替换后原文串出现次数必须 = 0**
@@ -397,13 +435,18 @@ public enum Redactor {
 
 extension Redactor.Section {
     /// 段落标记（用于「五段齐全」检查）。
+    ///
+    /// **中英双写，且不随界面语言变化** —— 两个理由：
+    /// 1. 它是「五段齐全」自检的判据：若标记随语言变，自检在切换语言后
+    ///    就可能对不上（同一份报告换个语言就判缺段）。
+    /// 2. 报告可能被外发给不懂导出方语言的人，双写让两边都能定位到段。
     var marker: String {
         switch self {
-        case .environment: return "## ① 环境"
-        case .metrics: return "## ② 量"
-        case .diagnostics: return "## ③ 取证"
-        case .evidence: return "## ④ 证据"
-        case .upstream: return "## ⑤ 上游"
+        case .environment: return "## ① 环境 / Environment"
+        case .metrics: return "## ② 量 / Metrics"
+        case .diagnostics: return "## ③ 取证 / Diagnostics"
+        case .evidence: return "## ④ 证据 / Evidence"
+        case .upstream: return "## ⑤ 上游 / Upstream"
         }
     }
 }

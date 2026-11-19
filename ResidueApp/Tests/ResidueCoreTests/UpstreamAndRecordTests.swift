@@ -20,6 +20,23 @@ final class UpstreamAndRecordTests: XCTestCase {
         try? FileManager.default.removeItem(at: tmpDir)
     }
 
+    /// 造一个**真实位图**并返回它的置位数 —— 夹具里的 `fSetBits` 由它推导。
+    ///
+    /// ## 为什么夹具也必须「真」
+    /// `fSetBits` 的契约语义 = 「`F` 位图的**置位数**」。夹具若写死一个与位图
+    /// 无关的自造值（早先写的是 `90`），则「这个数必须来自位图」这件事
+    /// **永远没人守** —— 生产侧把字段写死成 `0` 时，夹具照样全绿。
+    ///
+    /// 改为从**真实位图**推导 ⇒ 夹具与生产共用同一原语（`NegativeBitmap`），
+    /// 口径一旦漂移，夹具立刻显形（不变量②：同一判定只有一个实现处）。
+    private func realFSetBits(setSlots: Int) -> Int {
+        var bitmap = NegativeBitmap()
+        for slot in 0..<setSlots { bitmap.set(slot) }
+        return NegativeBitmap.setBitCount(
+            ofBytes: bitmap.dataRepresentation(bitCount: setSlots)
+        )
+    }
+
     // ========================================================================
     // MARK: - AC-19 白名单（全称命题：任何删文件命令必须被拒）
     // ========================================================================
@@ -76,6 +93,35 @@ final class UpstreamAndRecordTests: XCTestCase {
 
         XCTAssertNil(UpstreamWhitelist.rejectionReason(executable: "npm", args: ["cache", "ls"]))
         XCTAssertNotNil(UpstreamWhitelist.rejectionReason(executable: "npm", args: ["cache", "clean"]))
+    }
+
+    /// **CR-038 · A21：新来源的真删除命令必须进「必拒清单」**。
+    ///
+    /// ## 为什么不能只断言「被拒」
+    /// 白名单是**封闭**的 ⇒ `pnpm` / `bun` / `cargo` 的任何命令**本来就被拒**。
+    /// 只断言 `rejectionReason != nil` 会**恒绿**，测不出必拒清单有没有这三项。
+    ///
+    /// ## 断言的是什么
+    /// 必拒清单是**独立的一层**（`explicitlyForbidden`）：它的作用是
+    /// ① 让「为什么它被拒」在代码里可读；② 防止后续维护者**误把它加进白名单**
+    /// （只靠封闭白名单时，误加一条即造成真删除）。
+    /// 故断言**拒绝理由落在显式拒绝层**（`被显式拒绝`），而不是封闭白名单兜底
+    /// （`不在只读白名单内`）。
+    func testNewSourceDestructiveCommandsAreInExplicitForbiddenList() {
+        let destructive: [(String, [String])] = [
+            ("pnpm", ["store", "prune"]),
+            ("bun", ["pm", "cache", "rm"]),
+            ("cargo", ["cache", "--autoclean"]),
+        ]
+        for (exe, args) in destructive {
+            let reason = UpstreamWhitelist.rejectionReason(executable: exe, args: args)
+            XCTAssertNotNil(reason, "`\(exe) \(args.joined(separator: " "))` 必须被拒（AC-19）")
+            XCTAssertTrue(
+                reason?.contains("被显式拒绝") == true,
+                "`\(exe) \(args.joined(separator: " "))` 必须落在**必拒清单**（理由含「被显式拒绝」），"
+                + "实际理由：\(reason ?? "<nil>")"
+            )
+        }
     }
 
     /// **参数前缀必须**从头**匹配**——不能因为「参数里含有 `cache dir`」就放行。
@@ -169,7 +215,7 @@ final class UpstreamAndRecordTests: XCTestCase {
         let diag = ScanLogRecord.Diagnostics(
             degraded: false,
             coverage: .init(sameUIDTotal: 100, sameUIDRead: 100, statOtherUID: 20),
-            pNowCount: 5, fSetBits: 90, doneCount: 2,
+            pNowCount: 5, fSetBits: realFSetBits(setSlots: 90), doneCount: 2,
             a: 0, b: 12, round: 2, countedDays: 3,
             contentReads: 0
         )
