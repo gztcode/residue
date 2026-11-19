@@ -303,7 +303,7 @@ final class AppModel {
         if let c = result.contents {
             contents = c
         }
-        applyVersionResetIfNeeded()
+        applyObservationResetIfNeeded()
         loadExecutions()
         rebuild()
     }
@@ -324,14 +324,22 @@ final class AppModel {
     /// 自动删除，而新规则一次都没被观察过。这是不变量④（删之前先证明判得准）
     /// 在版本边界上的失效。
     ///
-    /// ## 三条边界（与 `VersionResetTests` 一一对应）
+    /// ## 四条边界（与 `VersionResetTests` / `ObservationSignatureTests` 一一对应）
     ///
     /// | 情形 | 行为 |
     /// |---|---|
-    /// | `appVersion` 为空（首启） | 只记下版本，**不清零** |
-    /// | 同版本 | 不动（否则每次启动重置 → 永远点不亮） |
-    /// | 版本变了 | 清零凭证，**保留轮次** |
-    private func applyVersionResetIfNeeded() {
+    /// | `appVersion` 为空（首启） | 只记下版本与指纹，**不清零** |
+    /// | 版本与指纹都没变 | 不动（否则每次启动重置 → 永远点不亮） |
+    /// | 版本变了 | 清零凭证（`a` 一并清零），**保留轮次** |
+    /// | 版本没变但判定域指纹变了 | 清零凭证，**保留 `a`**（M4） |
+    ///
+    /// ## 为什么判定住在 Core
+    ///
+    /// 「要不要重置」是**判定**，不变量②要求它只有一个实现处。
+    /// `AppModel` 在 App 层 ⇒ **不可单测**（本仓库只有一个 test target，
+    /// 只依赖 `ResidueCore`）⇒ 判定必须下沉到 Core 的
+    /// `ObservationResetPolicy.reason`，这里只做分派。
+    private func applyObservationResetIfNeeded() {
         // ⚠️ **只读 / 损坏态绝不写盘**。
         //
         // 载体损坏时 `load()` 把主文件移成 `.corrupt` 并返回只读。
@@ -345,26 +353,51 @@ final class AppModel {
         guard !readOnly else { return }
 
         let current = Self.currentAppVersion
-        let stored = contents.header.appVersion
+        let reason = ObservationResetPolicy.reason(
+            storedAppVersion: contents.header.appVersion,
+            currentAppVersion: current,
+            storedDecisionDomainSignature: contents.header.decisionDomainSignature,
+            currentDecisionDomainSignature: Source.decisionDomainSignature
+        )
 
-        // 首启：载体里没有版本 → 只记下，不清零（没有旧凭证可清）
-        guard !stored.isEmpty else {
+        switch reason {
+        case .none:
+            // 首启：载体里没有版本 → 只记下版本与指纹，不清零（没有旧凭证可清）。
+            //
+            // ⚠️ 指纹**必须在这里写下** —— 否则每次启动都会判成
+            // 「判定域指纹缺失 ⇒ 变更」⇒ 反复重置 ⇒ 产品永远点不亮。
+            guard contents.header.appVersion.isEmpty else { return }
             contents.header.appVersion = current
+            contents.header.decisionDomainSignature = Source.decisionDomainSignature
             persist()
-            return
+        case .appVersionChanged:
+            performObservationReset(preservingMissCount: false)
+        case .decisionDomainChanged:
+            performObservationReset(preservingMissCount: true)
         }
-        guard stored != current else { return }
+    }
 
-        // 版本变更 → 清零（保留轮次，M1：不产生新轮次）
+    /// 执行一次观察期重置（**版本变更清 `a` / 判定域变更保留 `a`**）。
+    private func performObservationReset(preservingMissCount: Bool) {
         do {
-            try stateFile.clearCarrierForVersionChange(
-                newAppVersion: current,
+            try stateFile.clearCarrierForObservationReset(
+                newAppVersion: Self.currentAppVersion,
+                newDecisionDomainSignature: Source.decisionDomainSignature,
+                preservingMissCount: preservingMissCount,
                 preservedRound: contents.header.round
             )
-            // 内存态同步成清零后的载体，避免界面继续显示旧凭证
-            contents = stateFile.load().contents ?? StateFileContents()
+            // 内存态同步成重置后的载体，避免界面继续显示旧凭证。
+            //
+            // ⚠️ 回读失败时**不覆盖内存态** —— 覆盖等于「清空成什么都没有」，
+            // 那会把 `a` 在界面上显示成 0（= 放行），违反不变量④。
+            let reloaded = stateFile.load()
+            if let error = reloaded.error {
+                errorMessage = describeWriteError(error)
+                return
+            }
+            contents = reloaded.contents ?? StateFileContents()
             if contents.header.appVersion.isEmpty {
-                contents.header.appVersion = current
+                contents.header.appVersion = Self.currentAppVersion
             }
         } catch {
             errorMessage = describeWriteError(error)
@@ -418,7 +451,9 @@ final class AppModel {
             candidates: candidates,
             executions: executions,
             readOnly: readOnly,
-            loading: isScanning,
+            // ★ 加载态只有一个事实源：`scanProgress`（§3.4/§3.9）。
+            //   `nil` = 不在扫描 ⇒ 界面不画进度横条。
+            scanProgress: isScanning ? scanProgress : nil,
             degraded: lastScanDiagnostics.degraded,
             coverage: L0Coverage(
                 sameUIDTotal: lastScanDiagnostics.coverage.sameUIDTotal,
@@ -483,7 +518,9 @@ final class AppModel {
         }
         guard !isScanning else { return }   // **防重复点击**（后台化后更容易被点到）
         isScanning = true
-        scanProgress = ScanProgress()
+        // ★ 起手就标「在跑」⇒ 页头按钮进「扫描中…」态、界面不空白（§3.8）。
+        //   此时分母未知（`totalSources == 0`）⇒ 圆环只画轨道不画弧。
+        scanProgress = ScanProgress(isRunning: true)
         rebuild()
 
         let started = Date()
@@ -536,7 +573,10 @@ final class AppModel {
             while !Task.isCancelled {
                 let p = cancelBox.takeProgress()
                 if p != scanProgress {
-                    scanProgress = p
+                    scanProgress = p        // 权威活值
+                    // ★ 同 tick 回填页面模型：`rebuild()` 会整体替换 `pageModel`，
+                    //   只写 `scanProgress` 的话，横条会停在上一拍（§3.9）。
+                    pageModel.scanProgress = p
                 }
                 try? await Task.sleep(for: .milliseconds(100))
             }
@@ -554,6 +594,10 @@ final class AppModel {
                 upstream: &job.upstream
             )
 
+            // ★ 累加器：**分母先到**（进循环之前）⇒ 第一拍的圆环就画得出弧（§3.6 (a)）
+            var acc = ScanProgressAccumulator(totalSources: roots.count)
+            cancelBox.report(acc.starting(elapsed: Date().timeIntervalSince(started)))
+
             // ---- 逐来源扫描 ----
             for (sourceName, root) in roots {
                 // **留存来源根**：执行期越界判定（AC-19）用它，
@@ -561,8 +605,17 @@ final class AppModel {
                 job.roots[sourceName] = root
                 // **取消检查**：每条来源一次（来源只有 3 个，开销可忽略）
                 if cancelBox.isCancelled { break }
-                guard FileManager.default.fileExists(atPath: root) else { continue }
+                guard FileManager.default.fileExists(atPath: root) else {
+                    // ★ 根不存在 = 这个来源已经扫完了（结果是「没有」）⇒ 分子照样推进（§3.6 (c)）
+                    cancelBox.report(acc.completing(
+                        source: sourceName, files: 0, candidates: 0,
+                        elapsed: Date().timeIntervalSince(started)
+                    ))
+                    continue
+                }
                 do {
+                    // ★ 不可变快照：`progress:` 闭包是 `@Sendable`，捕获 `var` 编译期报错（§3.7）
+                    let base = acc
                     let result = try engine.scan(
                         root: root,
                         mode: mode,
@@ -583,20 +636,24 @@ final class AppModel {
                         now: started,
                         // **进度回流**：每 2000 条一次 → 11 万条约 56 次
                         progress: { p in
-                            cancelBox.report(
-                                ScanProgress(
-                                    source: p.source,
-                                    filesScanned: p.filesScanned,
-                                    candidatesFound: p.candidatesFound,
-                                    elapsed: p.elapsed,
-                                    isRunning: true
-                                )
-                            )
+                            // ★ (b) 点：本来源进行中（分子不动，条目数临时叠加显示）
+                            cancelBox.report(base.progressing(
+                                source: p.source,
+                                deltaFiles: p.filesScanned,
+                                deltaCandidates: p.candidatesFound,
+                                elapsed: Date().timeIntervalSince(started)
+                            ))
                         }
                     )
                     job.results.append((sourceName, result))
-                    job.filesScanned += result.filesScanned
-                    job.candidatesFound += result.candidates.count
+                    // ★ (c) 点：**分子推进**（圆环走一格）+ 该来源的最终数落进合计
+                    //   ⇒ 小来源（< progressEvery = 2000 条）也会推进（修缺陷 #8）
+                    cancelBox.report(acc.completing(
+                        source: sourceName,
+                        files: result.filesScanned,
+                        candidates: result.candidates.count,
+                        elapsed: Date().timeIntervalSince(started)
+                    ))
                     // 中断的来源 → 带走它的断点，收尾时落盘（AC-20 可续扫）
                     if let cp = result.checkpoint {
                         job.abortedCheckpoints[sourceName] = cp
@@ -607,8 +664,19 @@ final class AppModel {
                 } catch {
                     // 单个来源不可读不阻断整体（AC-14 第一类：来源不可读 → 降级只读该来源）
                     job.failures.append((sourceName, error.localizedDescription))
+                    // ★ 失败**也算这个来源处理完了** ⇒ 分子照样推进
+                    //   （否则圆环会卡在失败来源那一格，直到整轮结束才跳走）
+                    cancelBox.report(acc.completing(
+                        source: sourceName, files: 0, candidates: 0,
+                        elapsed: Date().timeIntervalSince(started)
+                    ))
                 }
             }
+
+            // ★ 合计回填 `ScanJob`（执行记录用）⇒ **单一计数器**：
+            //   累加只发生在 `acc` 里（不变量②）。
+            job.filesScanned = acc.filesScanned
+            job.candidatesFound = acc.candidatesFound
 
             // ---- L0 探测（排除自身，防自污染）----
             // **也在主 actor 之外**：它要枚举同 uid 进程的 fd，同样是重 I/O。
@@ -921,7 +989,7 @@ final class AppModel {
         }.value
 
         for source in Source.allCases {
-            // **pipx 恒为仅报告**：不在判定域 → 永不参与自动删除（AC-04 ②）
+            // **域外只报告三类恒为仅报告**（`pipx` run / pnpm store / bun cache）：不在判定域 → 永不参与自动删除（AC-04 ②）
             guard source.isInDecisionDomain else { continue }
 
             // **白名单闸（AC-03）**：被保护的条目在执行路径上**真的被排除**。

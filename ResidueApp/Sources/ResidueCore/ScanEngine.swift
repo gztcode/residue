@@ -253,6 +253,11 @@ public struct ScanEngine: Sendable {
         /// 与「本次新扫」分开是必要的：续扫时**已完成的条目被跳过、不再计数**，
         /// 若把「本次计数」直接当累计值 → 续扫结果**比基线少**（实测 147 vs 168）。
         public var countedFiles: Int
+        /// 整块粒度来源的累计字节（来源 rawValue → 字节数）。
+        ///
+        /// ★ 整块候选**永不持久化** —— 它是 `aggregatedBytes` 的派生物。
+        ///   持久化两份 ⇒ 断点续扫会重复累加（同一份字节算两遍）。
+        public var aggregatedBytes: [String: Int64]
 
         public init(
             completed: [String: [String]] = [:],
@@ -261,7 +266,8 @@ public struct ScanEngine: Sendable {
             fileCount: Int = 0,
             byteCount: Int64 = 0,
             candidates: [Candidate] = [],
-            countedFiles: Int = 0
+            countedFiles: Int = 0,
+            aggregatedBytes: [String: Int64] = [:]
         ) {
             self.completed = completed
             self.expandedDirs = expandedDirs
@@ -270,6 +276,7 @@ public struct ScanEngine: Sendable {
             self.byteCount = byteCount
             self.candidates = candidates
             self.countedFiles = countedFiles
+            self.aggregatedBytes = aggregatedBytes
         }
 
         /// 该目录的某**叶子条目**是否已完成。
@@ -297,7 +304,8 @@ public struct ScanEngine: Sendable {
 
     /// 来源规则：**一个候选路径是否属于某个来源、命中哪些来源**。
     ///
-    /// **封闭枚举**（AC-04 ①）：`uv` cache / `npm/_npx` / `pipx` run。
+    /// **封闭枚举**（AC-04 ①，CR-038 后七类）：`uv` cache / `npm/_npx` /
+    /// `pipx` run / brew downloads / cargo cache / pnpm store / bun cache。
     /// **只做路径模式匹配**（不执行任何命令、不读内容）。
     public struct SourceRule: Sendable {
         /// **来源枚举本身**（唯一标识）。
@@ -328,10 +336,19 @@ public struct ScanEngine: Sendable {
         }
 
         /// 默认规则集（**封闭枚举**，新增须另出变更单 —— AC-04 ①）。
+        ///
+        /// CR-038：新增四个来源。**片段两两互不包含**（保证一条路径最多命中一个来源 ——
+        /// 否则 `Candidate.source` 会变成逗号串、`Source(rawValue:)` 解析失败、字节漏算）。
         public static let defaults: [SourceRule] = [
             SourceRule(source: .uvCache, pathFragments: ["/.cache/uv/"]),
             SourceRule(source: .npmNpx, pathFragments: ["/.npm/_npx/"]),
             SourceRule(source: .pipxRun, pathFragments: ["/.local/pipx/venv/"]),
+            // Homebrew：只匹配 `downloads`（`api` / `Cask` / `git` 不是可删缓存）。
+            SourceRule(source: .homebrewDownloads, pathFragments: ["/Library/Caches/Homebrew/downloads/"]),
+            // cargo：只匹配 `registry/cache`（`registry/src` 是解压后的源码，不是缓存）。
+            SourceRule(source: .cargoRegistryCache, pathFragments: ["/.cargo/registry/cache/"]),
+            SourceRule(source: .pnpmStore, pathFragments: ["/Library/pnpm/store/"]),
+            SourceRule(source: .bunCache, pathFragments: ["/.bun/install/cache/"]),
         ]
 
         /// 判断路径命中哪些来源（**一个路径可命中多个**；判定域成员由判定层决定）。
@@ -509,6 +526,28 @@ public struct ScanEngine: Sendable {
         var aborted: AbortReason? = nil
         var seen = Set<String>()
 
+        // ★ 整块粒度来源（CR-038 §3.6）：字节只累计、**不产逐条候选**
+        // （pnpm store / bun cache 是内容寻址 + 硬链接，逐条列哈希碎片没有意义）。
+        //
+        // **归属判定**：扫描根本身**恰好**归属一个整块来源时，该来源是本根的 owner。
+        // 命中 0 个或 ≥2 个 ⇒ **不做整块聚合**（叶子退回逐条候选）——
+        // 宁可逐条列，也不让一条扫描根产出两条同路径候选（身份键冲突）。
+        let wholeBlockOwner: Source? = {
+            let owners = SourceRule.match(path: root + "/", rules: rules)
+                .compactMap { Source(rawValue: $0) }
+                .filter { $0.candidateGranularity == .wholeBlock }
+            return owners.count == 1 ? owners[0] : nil
+        }()
+
+        // 整块字节的**唯一真相是断点**（续扫从断点接着累计 ⇒ 不重不漏）。
+        var aggregatedBytes = cp.aggregatedBytes
+        // 防御性：整块候选是 `aggregatedBytes` 的派生物，**永不持久化**；
+        // 若断点里混进了（理论上不可能），这里剔除，避免与收敛出的候选重复。
+        candidates.removeAll { candidate in
+            guard let source = Source(rawValue: candidate.source) else { return false }
+            return source.candidateGranularity == .wholeBlock
+        }
+
         // 广度优先遍历（**用栈**，避免深递归爆栈）。
         var stack = [root]
         while let dir = stack.popLast() {
@@ -578,15 +617,20 @@ public struct ScanEngine: Sendable {
                 let matched = SourceRule.match(path: full, rules: rules)
                 if !matched.isEmpty {
                     if let attr = try? fileSystem.attributes(at: full) {
-                        candidates.append(
-                            Candidate(
-                                path: full,
-                                birthtime: attr.birthtime,
-                                bytes: attr.size,
-                                isDirectory: attr.isDirectory,
-                                source: matched.joined(separator: ",")
+                        if let owner = wholeBlockOwner, matched == [owner.rawValue] {
+                            // 整块来源：**只累计字节，不产逐条候选**。
+                            aggregatedBytes[owner.rawValue, default: 0] += attr.size
+                        } else {
+                            candidates.append(
+                                Candidate(
+                                    path: full,
+                                    birthtime: attr.birthtime,
+                                    bytes: attr.size,
+                                    isDirectory: attr.isDirectory,
+                                    source: matched.joined(separator: ",")
+                                )
                             )
-                        )
+                        }
                         byteCount += attr.size
                     }
                 }
@@ -604,6 +648,7 @@ public struct ScanEngine: Sendable {
         cp.fileCount = filesScanned
         cp.byteCount = byteCount
         cp.candidates = candidates
+        cp.aggregatedBytes = aggregatedBytes
         cp.seenHash = ScanEngine.hash(seen)
 
         if let reason = aborted {
@@ -618,6 +663,28 @@ public struct ScanEngine: Sendable {
         }
 
         // 正常完成 → 断点可丢弃。
+        //
+        // ★ 整块来源在此**收敛成一条候选**（代表整个来源根）：
+        //   path = 扫描根、bytes = 累计叶子字节、isDirectory = true。
+        // 中止时**不收敛** —— 否则会把「扫了一半」说成「这个来源就这么多」
+        // （不变量③：不把未知判为安全）。
+        if let owner = wholeBlockOwner {
+            let total = aggregatedBytes[owner.rawValue] ?? 0
+            // 总量为 0 ⇒ 不产候选（对齐「总量为 0 的来源不占行」）。
+            if total > 0 {
+                let rootBirthtime = (try? fileSystem.attributes(at: root))?.birthtime ?? now
+                candidates.append(
+                    Candidate(
+                        path: root,
+                        birthtime: rootBirthtime,
+                        bytes: total,
+                        isDirectory: true,
+                        source: owner.rawValue
+                    )
+                )
+            }
+        }
+
         let snapshot = takeSnapshot ?? (mode == .full)
         return ScanResult(
             startedAt: startedAt, finishedAt: Date(), mode: mode,

@@ -230,6 +230,15 @@ public struct PreviousRoundRecord: Codable, Sendable, Equatable {
 public struct StateHeader: Codable, Sendable, Equatable {
     public var schemaVersion: Int
     public var appVersion: String
+    /// **判定域成员指纹**（CR-038）—— 载体写它是为了记住「这轮观察期是在
+    /// **哪个判定域**下积累的」。
+    ///
+    /// - `nil` = **旧载体没有这个键** ⇒ 无法证明判定域未变 ⇒ 必须重置。
+    /// - 判定域成员一变（新增来源进/出判定域）⇒ 指纹变 ⇒ 观察期自动重置。
+    ///
+    /// ⚠️ 可选属性是**向后兼容的关键**：合成 `Decodable` 对它用 `decodeIfPresent`，
+    /// 旧载体解码出来是 `nil` 而不是「解码失败」（那会让载体被判损坏、整个应用进只读）。
+    public var decisionDomainSignature: String?
     public var round: Int
     public var roundStartAnchor: Date?
     public var countedDays: Int
@@ -252,6 +261,7 @@ public struct StateHeader: Codable, Sendable, Equatable {
     public init(
         schemaVersion: Int = StateFileCodec.currentSchemaVersion,
         appVersion: String = "",
+        decisionDomainSignature: String? = nil,
         round: Int = 1,
         roundStartAnchor: Date? = nil,
         countedDays: Int = 0,
@@ -265,6 +275,7 @@ public struct StateHeader: Codable, Sendable, Equatable {
     ) {
         self.schemaVersion = schemaVersion
         self.appVersion = appVersion
+        self.decisionDomainSignature = decisionDomainSignature
         self.round = round
         self.roundStartAnchor = roundStartAnchor
         self.countedDays = countedDays
@@ -302,9 +313,13 @@ extension StateHeader {
     /// 载荷侧（`F` 位图 / `C_done` / 位槽占用表 / 快照成员集合）随 `a` 清零 ——
     /// 由**载荷全空**实现，不在本方法内。
     ///
+    /// - Parameter clearingMissCount: 是否连 `a`（误判累计）一起清。
+    ///   `true` = 应用版本变更（M4：`a` 只在应用版本变更时清零）；
+    ///   `false` = 判定域指纹变更（版本没变 ⇒ `a` 保留）。
+    ///
     /// ⚠️ 不变量③：尚未结算的量回到 `nil`，**不留 `0`**
     /// （`nil` = 无从归因；`0` = 已结算但无失联）。
-    public mutating func resetObservationCredentials() {
+    public mutating func resetObservationCredentials(clearingMissCount: Bool = true) {
         // ① 计数日归零 + 起算点重置
         countedDays = 0
         roundStartAnchor = nil
@@ -321,9 +336,16 @@ extension StateHeader {
             // ④ `b` 清零
             sources[index].b = 0
             // ⑥ `a` 清零（位图 / `C_done` / 位槽占用表随 `a` 一并清零）
-            sources[index].a = 0
-            sources[index].slotCount = 0
-            sources[index].doneCount = 0
+            //
+            // ⚠️ **保留 `a` 时必须同时保留它的三项载体**（`F` 位图 / `C_done` /
+            //    位槽占用表）—— 那是 `a` 的载荷载体。头说「误判 2 次」而载荷里
+            //    没有对应的阴性记录 ⇒ 头与载荷自相矛盾 ⇒ 误判记录凭空消失。
+            //    载荷侧的保留由 `StateFile.clearCarrierForObservationReset` 负责。
+            if clearingMissCount {
+                sources[index].a = 0
+                sources[index].slotCount = 0
+                sources[index].doneCount = 0
+            }
             // ⑦ `H` 随新 `T` 重算 ⇒ 先回到「未取快照」态
             sources[index].H = nil
             // 取快照时刻 / 结算时刻 / 无法归因条数 / 上次判定时刻随量一并清零
@@ -496,7 +518,7 @@ public struct StateFileContents: Sendable, Equatable {
     public var header: StateHeader
     /// 段表（**顺序 = 文件内顺序**）。
     public var segments: [SegmentDescriptor]
-    /// 各来源的三段内容（按 `Source` 索引）。
+    /// 各来源的段内容（按 `Source` 索引；schema 2 = 每来源四段）。
     public var payloads: [Source: SourcePayload]
     /// 文件总字节数。
     public var fileLength: Int

@@ -116,6 +116,15 @@ public enum UpstreamWhitelist {
               purpose: "直接删文件的上游命令（AC-19 禁止）"),
         .init(executable: "brew", argumentPrefix: ["cleanup"],
               purpose: "直接删文件的上游命令（AC-19 禁止）"),
+        // ↓ CR-038 · A21：新来源的真删除命令。
+        // 白名单封闭 ⇒ 它们本来就被拒；列在这里是为了**防止被误加进白名单**
+        // （只靠封闭白名单时，误加一条即造成真删除）。
+        .init(executable: "pnpm", argumentPrefix: ["store", "prune"],
+              purpose: "直接删文件的上游命令（AC-19 禁止）"),
+        .init(executable: "bun", argumentPrefix: ["pm", "cache", "rm"],
+              purpose: "直接删文件的上游命令（AC-19 禁止）"),
+        .init(executable: "cargo", argumentPrefix: ["cache", "--autoclean"],
+              purpose: "直接删文件的上游命令（AC-19 禁止）"),
         .init(executable: "trash-put", argumentPrefix: [],
               purpose: "非 macOS 原生第三方命令，2C 不能假设已装（AC-19 已剔除）"),
     ]

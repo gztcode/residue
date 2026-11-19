@@ -165,7 +165,7 @@ public enum ObservationWriteback {
             // ③ 取快照
             //
             // 只在「本轮首次成功的 `full` 扫描」取一次，此后冻结。
-            // 判定域外的来源（`pipx`）**不取快照** —— 它不参与自动删除。
+            // 判定域外的来源（`pipx` run / pnpm store / bun cache）**不取快照** —— 它们不参与自动删除。
             let wantsSnapshot = input.succeeded
                 && input.mode == .full
                 && source.isInDecisionDomain

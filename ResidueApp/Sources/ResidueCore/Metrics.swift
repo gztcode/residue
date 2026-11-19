@@ -40,30 +40,84 @@ public struct CandidateID: Hashable, Codable, Sendable, Comparable {
 
 // ---------- 来源（M3 / M4 的分组键第一维） ----------
 
-/// 上游来源。首版封闭枚举（契约：判定域 = `uv` cache / `npm/_npx` 两类；
-/// `pipx` run 只报告、不自动删、不进判定域）。
+/// 上游来源。封闭枚举（CR-038 后七类：判定域四类 = `uv` cache / `npm/_npx` /
+/// brew downloads / cargo cache；域外只报告三类 = `pipx` run / pnpm store / bun cache）。
 public enum Source: String, Codable, Sendable, CaseIterable {
     case uvCache = "uv_cache"
     case npmNpx = "npm_npx"
     case pipxRun = "pipx_run"
+    /// CR-038 · Homebrew 下载缓存（`~/Library/Caches/Homebrew/downloads`）。
+    case homebrewDownloads = "brew_downloads"
+    /// CR-038 · cargo registry 缓存（`~/.cargo/registry/cache`）。
+    case cargoRegistryCache = "cargo_registry_cache"
+    /// CR-038 · pnpm 内容寻址 store（`~/Library/pnpm/store`）—— **只报告、不自动删**。
+    case pnpmStore = "pnpm_store"
+    /// CR-038 · bun 安装缓存（`~/.bun/install/cache`）—— **只报告、不自动删**。
+    case bunCache = "bun_cache"
 
     /// 是否属判定域（参与自动删除的来源）。
-    /// 契约：判定域 = 本轮观察期开始快照内命中的来源（封闭枚举两类）。
+    /// 契约：判定域 = 本轮观察期开始快照内命中的来源（CR-038 后为封闭枚举四类）。
     public var isInDecisionDomain: Bool {
         switch self {
-        case .uvCache, .npmNpx: return true
-        case .pipxRun: return false
+        case .uvCache, .npmNpx, .homebrewDownloads, .cargoRegistryCache: return true
+        case .pipxRun, .pnpmStore, .bunCache: return false
         }
     }
 
     /// 展示名（界面用）。
+    ///
+    /// ⚠️ **长度受 ⑤ 页来源列宽约束**（`Pages.swift` `columnWidth` 的 `case 0`
+    /// = 100 pt，扣掉两侧 padding 只剩 84 pt）⇒ 超过 ~13 字符会**换行**，
+    /// 而数据行高是**固定 32 pt**（视觉基线 v1.1）⇒ 换行会撑破该行。
+    /// 故此处取短名；精确路径由 ② 页候选行与 ⑦ 页举证链给出。
     public var displayName: String {
         switch self {
         case .uvCache: return "uv cache"
         case .npmNpx: return "npm/_npx"
         case .pipxRun: return "pipx run"
+        case .homebrewDownloads: return "brew downloads"
+        case .cargoRegistryCache: return "cargo cache"
+        case .pnpmStore: return "pnpm store"
+        case .bunCache: return "bun cache"
         }
     }
+
+    /// 候选粒度：逐条列出，还是整块算一条。
+    ///
+    /// - `perEntry`：每个叶子条目各算一条候选（uv / npm / pipx / brew / cargo）。
+    /// - `wholeBlock`：整个来源目录算**一条**候选（pnpm / bun）。
+    ///
+    /// pnpm / bun 是内容寻址 + 硬链接布局（同一份文件在 store 里按哈希散落、
+    /// 实际项目里的实体是硬链接）⇒ 逐条列举会产出上万个哈希碎片，
+    /// 且逐条删除会误伤仍在使用的硬链接 ⇒ 本期只按整块报告。
+    public var candidateGranularity: CandidateGranularity {
+        switch self {
+        case .pnpmStore, .bunCache: return .wholeBlock
+        case .uvCache, .npmNpx, .pipxRun, .homebrewDownloads, .cargoRegistryCache: return .perEntry
+        }
+    }
+
+    /// ★ 判定域成员指纹（CR-038）。
+    ///
+    /// 编码**全部来源及其归属**（不只是判定域成员）⇒ 任何来源集合或归属变化
+    /// 都会改变本值 ⇒ 载体里存的指纹与本值不一致 ⇒ 判定域成员变了 ⇒
+    /// 必须重启全局观察期。
+    ///
+    /// 计时器是**全局单实例**、契约明令不可按来源分裂（PRD v5.6 `:1203`）⇒
+    /// 「来源变化 ⇒ 观察期重置」只能靠全局重置实现，指纹就是这条重置的触发依据。
+    public static var decisionDomainSignature: String {
+        allCases
+            .map { "\($0.rawValue)=\($0.isInDecisionDomain ? "1" : "0")" }
+            .joined(separator: "|")
+    }
+}
+
+/// 来源的候选粒度（CR-038）。
+public enum CandidateGranularity: String, Codable, Sendable {
+    /// 逐条：每个叶子条目各算一条候选。
+    case perEntry = "per_entry"
+    /// 整块：整个来源目录算一条候选。
+    case wholeBlock = "whole_block"
 }
 
 // ---------- M1 · 观察期进度量 ----------

@@ -538,12 +538,18 @@ final class PageModelBuilderTests: XCTestCase {
     }
 
     /// **`pipx` 行恒「仅报告」**，门槛取「不适用」。
+    ///
+    /// ⚠️ 须带**本窗候选**：`pipx` 是域外来源 ⇒ 永不取快照 ⇒ 行集合的判据
+    /// 只有「本窗候选数 ≥ 1」（PRD v5.6 :1094「行集合为条件式」）。
     func testReportOnlySourceRow() {
         let entries = [
             SourceHeaderEntry(source: .pipxRun, snapshotTaken: true,
                               T: 5, K: 5, J: 0, H: 5, a: 0, b: 1, slotCount: 5, doneCount: 0),
         ]
-        let input = PageModelBuilder.Input(contents: makeContents(makeHeader(entries: entries)))
+        let input = PageModelBuilder.Input(
+            contents: makeContents(makeHeader(entries: entries)),
+            candidates: [makeCandidate(path: "/x/pipx/venv", bytes: 10, source: .pipxRun)]
+        )
         let m = PageModelBuilder.build(input)
         let row = m.reportRows[0]
 
@@ -669,13 +675,17 @@ final class PageModelBuilderTests: XCTestCase {
     /// ⇒ `0 >= 0` 成立 ⇒ 只要 `a == 0 && b >= 1` 就被判「**达标**」。
     ///
     /// 「达标」比「未达标」危险得多 —— 用户会以为可以删，程序却不会删。
+    ///
+    /// ⚠️ 须带**本窗候选**：`snapshotTaken: false` 且 `T: nil` ⇒ 无快照 ⇒
+    /// 行集合的判据只剩「本窗候选数 ≥ 1」（PRD v5.6 :1094）。
     func testProducedButTNilDoesNotQualify() {
         let entries = [
             SourceHeaderEntry(source: .uvCache, snapshotTaken: false,
                               T: nil, K: nil, J: nil, H: nil, a: 0, b: 7, slotCount: 0, doneCount: 0),
         ]
         let input = PageModelBuilder.Input(
-            contents: makeContents(makeHeader(countedDays: 14, produced: true, entries: entries))
+            contents: makeContents(makeHeader(countedDays: 14, produced: true, entries: entries)),
+            candidates: [makeCandidate(path: "/x/uv/a", bytes: 10, source: .uvCache)]
         )
         let m = PageModelBuilder.build(input)
         let row = m.reportRows[0]
@@ -736,7 +746,7 @@ final class PageModelBuilderTests: XCTestCase {
             ]
         )
         let m = PageModelBuilder.build(input)
-        XCTAssertEqual(m.overviewBlocks.count, 3, "三区块 = Source.allCases 三个")
+        XCTAssertEqual(m.overviewBlocks.count, 7, "区块数 = Source.allCases 七个（CR-038）")
         XCTAssertEqual(m.overviewBlocks[0].slot.displayText, MetricUnit.formatBytes(3_000_000))
         XCTAssertEqual(m.overviewBlocks[1].slot.displayText, MetricUnit.formatBytes(3_000_000))
         XCTAssertEqual(m.overviewBlocks[2].slot.displayText, MetricUnit.formatBytes(0))
@@ -919,6 +929,192 @@ final class PageModelBuilderTests: XCTestCase {
             PageModelBuilder.Input(contents: makeContents(makeHeader()))
         )
         XCTAssertFalse(m.deferredCountSlot.displayText.isEmpty)
+    }
+
+    // MARK: - CR-036 · 未达项区四态（`.rows` / `.none` / `.emptyDomain`）
+
+    /// **态②：判定域非空且无未达项 ⇒ `.none`**（CR-036 §七 判据 9）。
+    ///
+    /// 样本：`produced: true`（报告已产出）+ `countedDays: 14`（观察期已满）
+    /// ⇒ 无全局项；域内来源 `K ≥ H` / `a = 0` / `b ≥ 1` ⇒ 无来源项。
+    /// **既有 `.rows([])` 一行都不能列** —— 空数组无法区分「无未达项」与
+    /// 「还没判定」（不变量 ③：看不见的东西如实说「无法判定」）。
+    func testUnmetSectionIsNoneWhenDecisionDomainNonEmptyAndNoUnmetItem() {
+        let input = PageModelBuilder.Input(contents: makeContents(makeHeader()))
+        let m = PageModelBuilder.build(input)
+
+        XCTAssertEqual(m.unmetSection, .none,
+                       "判定域非空且未达项为空 ⇒ 必须是 `.none`（实为「\(m.unmetSection)」）")
+    }
+
+    /// **态③：判定域为空且已扫过 ⇒ `.emptyDomain(.noScannableSource)`**
+    /// （CR-036 §七 判据 1 / 2 / 3）。
+    ///
+    /// ⚠️ **必须显式设 `lastScanAt != nil`** —— 否则落进态④（从未扫描），
+    /// 那时「尚未知」≠「已确定为空」（不变量 ③）。
+    func testUnmetSectionIsEmptyDomainWhenDecisionDomainEmptyAfterScan() {
+        var header = makeHeader(produced: false, entries: [])
+        header.lastScanAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let input = PageModelBuilder.Input(contents: makeContents(header))
+        let m = PageModelBuilder.build(input)
+
+        XCTAssertEqual(m.unmetSection, .emptyDomain(.noScannableSource),
+                       "扫过 + 判定域为空 + 无任何候选 ⇒ 「无可扫描来源」（实为「\(m.unmetSection)」）")
+    }
+
+    /// **态③的另一个成因：页面有候选但判定域内一个都没有 ⇒ `.noCleanupCandidate`**。
+    ///
+    /// `pipx run` 是**判定域外**来源（`Source.isInDecisionDomain == false`）⇒
+    /// **有候选 ≠ 有可清理的判定域内候选**。
+    /// ⚠️ 判据取 **`input.candidates`**（全部候选）而不是 `visibleCandidates`
+    /// —— 白名单过滤后的可见集会把「被白名单挡掉」误报成「无来源」。
+    func testUnmetSectionIsEmptyDomainNoCandidateWhenOnlyOutOfDomainCandidates() {
+        var header = makeHeader(produced: false, entries: [])
+        header.lastScanAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let input = PageModelBuilder.Input(
+            contents: makeContents(header),
+            candidates: [makeCandidate(path: "/pipx/venvs/t", bytes: 10, source: .pipxRun)]
+        )
+        let m = PageModelBuilder.build(input)
+
+        XCTAssertEqual(m.unmetSection, .emptyDomain(.noCleanupCandidate),
+                       "有候选但全是域外来源 ⇒ 「无清理候选」（实为「\(m.unmetSection)」）")
+    }
+
+    /// **空域成因的判据取「全部候选」，不是白名单过滤后的可见集**
+    /// （CR-036 §3.4 口径 · 步骤 6 变异 2 的区分点）。
+    ///
+    /// 样本：唯一候选**被白名单挡掉** ⇒ `input.candidates` 非空、`visibleCandidates` 为空。
+    /// 判据取未过滤的候选集 ⇒ 成因是「无清理候选」（**扫到了东西，只是没可清的**），
+    /// 不是「无可扫描来源」（那是**把白名单过滤后的空**误当成「没来源」）。
+    ///
+    /// ⚠️ **白名单必须与候选路径匹配**（`WhitelistGuard` 按路径前缀匹配）——
+    /// 否则过滤前后一致、两个口径区分不开，变异 2 会**全绿假过**
+    /// （CR-036 §10.5 实测到的第二处假绿）。
+    func testEmptyDomainCauseUsesUnfilteredCandidates() {
+        var header = makeHeader(produced: false, entries: [])
+        header.lastScanAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let input = PageModelBuilder.Input(
+            contents: makeContents(header),
+            candidates: [makeCandidate(path: "/uv/cache/abc", bytes: 10, source: .uvCache)],
+            whitelist: ["/uv/cache"]
+        )
+        let m = PageModelBuilder.build(input)
+
+        XCTAssertEqual(m.unmetSection, .emptyDomain(.noCleanupCandidate),
+                       "候选被白名单挡掉仍算「有候选」⇒ 成因应是「无清理候选」（实为「\(m.unmetSection)」）")
+    }
+
+    /// **态④：从未扫描 ⇒ 保留全局项**（CR-036 §七 判据 14）。
+    ///
+    /// 「从未扫描」是**尚未知**，不是「已确定为空」⇒ 不得显示「无可扫描来源」，
+    /// 也不得显示「无未达项」——**全局项必须留着**（全局项本身就是「还在观察期」）。
+    func testUnmetSectionKeepsGlobalItemWhenNeverScanned() {
+        let input = PageModelBuilder.Input(
+            contents: makeContents(makeHeader(round: 2, countedDays: 0, produced: false, entries: []))
+        )
+        let m = PageModelBuilder.build(input)
+
+        XCTAssertEqual(m.unmetSection, .rows([.text("第 2 轮 · 观察期 0/14 天")]),
+                       "从未扫描 ⇒ 必须保留全局项，不得退成「无未达项」/「无可扫描来源」")
+    }
+
+    /// **空判定域的两串成因文案逐字固定**（CR-036 §七 判据 1）。
+    ///
+    /// ⚠️ **不得**写成「已达达标条件」——空判定域是**没有可判的东西**，
+    /// 不是**判过了并且达标**（不变量 ③）。
+    func testEmptyDomainCauseStringsAreExact() {
+        XCTAssertEqual(UICopy.emptyDomainText(.noScannableSource), "无可扫描来源")
+        XCTAssertEqual(UICopy.emptyDomainText(.noCleanupCandidate), "无清理候选")
+    }
+
+    /// **空判定域 ⇒ 未达项行数 = 0**（CR-036 §七 判据 2 / 3）。
+    ///
+    /// 空判定域**不列**全局项 —— 全局项是「判定域内某来源没达标」的归因，
+    /// 域为空时它没有归属 ⇒ 一行都不列（DAC-79）。
+    ///
+    /// ⚠️ **样本必须让全局项真的存在**（`produced: false` ⇒ 报告未产出 ⇒
+    /// `unmet.global != nil`）——否则本断言在「回退到旧行为（列出全局项）」
+    /// 下**照样绿**，判据 2 形同虚设（防假绿步骤实测到的假绿）。
+    func testEmptyDomainHasNoUnmetRows() {
+        var header = makeHeader(produced: false, entries: [])
+        header.lastScanAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let input = PageModelBuilder.Input(contents: makeContents(header))
+        let m = PageModelBuilder.build(input)
+
+        XCTAssertEqual(m.unmetSection, .emptyDomain(.noScannableSource),
+                       "空判定域必须是 `.emptyDomain`，不得是 `.rows`")
+        XCTAssertEqual(m.unmetNotices.count, 0,
+                       "空判定域不得列任何未达项行（DAC-79；实为「\(m.unmetNotices.map(\.displayText))」）")
+    }
+
+    /// **「无未达项」逐字固定**（CR-036 §七 判据 9）。
+    func testUnmetNoneTextIsExact() {
+        XCTAssertEqual(UICopy.unmetNone, "无未达项")
+    }
+
+    /// **「无未达项」≠「可点亮」**（CR-036 §七 判据 9 · 不变量 ③）。
+    ///
+    /// 样本：域内来源 `K == nil`（**本轮未结算**）⇒ `unmetItems` 因
+    /// `let k = input.attributable` 绑定失败而**不产来源项** ⇒ 未达项为空；
+    /// 而 `isQualified` 在同一处 `guard let k = …` **判死** ⇒ 不可点亮。
+    ///
+    /// ⚠️ **造不出 `a == nil`** —— `SourceHeaderEntry.a` / `.b` 是**非可选 `Int`**；
+    /// 「未达项为空但不可点亮」的真实成因是**未结算（`K == nil`）**。
+    /// 另注：`b` 必须 ≥ 1，否则会多出一行「L0 未检查」，未达项就不空了。
+    func testNoUnmetItemsDoesNotMeanQualified() {
+        let entries = [
+            SourceHeaderEntry(source: .uvCache, snapshotTaken: true,
+                              T: 30, K: nil, J: nil, H: 30, a: 0, b: 5, slotCount: 30, doneCount: 0),
+        ]
+        let input = PageModelBuilder.Input(contents: makeContents(makeHeader(entries: entries)))
+        let m = PageModelBuilder.build(input)
+
+        XCTAssertEqual(m.unmetSection, .none,
+                       "未结算来源不产来源项 ⇒ 未达项区为空")
+        XCTAssertFalse(m.canLightUp,
+                       "未达项为空 ≠ 可点亮：`K == nil`（未结算）时不得判为可点亮")
+    }
+
+    // MARK: - CR-037：扫描进度透传
+
+    /// **扫描进度要进到页面模型里**（CR-037 §3.5 · §七 判据 3）。
+    ///
+    /// ① 页的进度环读的就是 `model.scanProgress` ⇒ 不透传则界面永远看不到环。
+    func testBuilderCarriesScanProgressIntoModel() throws {
+        let progress = ScanProgress(
+            source: "uv",
+            filesScanned: 12_847,
+            candidatesFound: 42,
+            elapsed: 3.2,
+            isRunning: true,
+            completedSources: 1,
+            totalSources: 3
+        )
+        let input = PageModelBuilder.Input(
+            contents: makeContents(makeHeader()),
+            scanProgress: progress
+        )
+        let m = PageModelBuilder.build(input)
+        XCTAssertEqual(m.scanProgress, progress, "扫描进度须原样透传到页面模型")
+        // ⚠️ 不用 `?? 0` —— 那会把「分母未知」当成「0%」（不变量③）。
+        let fraction = try XCTUnwrap(m.scanProgress?.fraction)
+        XCTAssertEqual(fraction, 1.0 / 3.0, accuracy: 1e-9)
+    }
+
+    /// **「加载」只剩 `scanProgress` 一个事实源**（CR-037 §3.4）。
+    ///
+    /// 旧的 `loading: Bool` + `loadingMessage: String` 是**两个并列的事实源**
+    /// （一个说「在加载」，一个说「加载到哪儿了」）⇒ 必然出现
+    /// 「loading 为真但 message 是旧的」这类自相矛盾状态。
+    ///
+    /// ⚠️ 用 `Mirror` 反射检查**存储属性名**，而不是直接访问 `model.loading` ——
+    /// 删掉字段后直接访问会**编译失败**（那就测不出「字段还在」了）。
+    func testModelHasNoLoadingField() {
+        let stored = Mirror(reflecting: PageModel()).children.compactMap { $0.label }
+        XCTAssertFalse(stored.contains("loading"), "`loading` 字段须删除（事实源须唯一）")
+        XCTAssertFalse(stored.contains("loadingMessage"), "`loadingMessage` 字段须删除")
+        XCTAssertTrue(stored.contains("scanProgress"), "加载态的真值载体应是 `scanProgress`")
     }
 
 }

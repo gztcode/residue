@@ -57,7 +57,8 @@ enum WiringSelfCheck {
         check(FileManager.default.fileExists(atPath: stateFile.fileURL.path),
               "首启即写出 state.residue（A-10 第 9 步判据可达的前提）")
         check((((try? Data(contentsOf: stateFile.fileURL))?.count) ?? 0) > 0, "state.residue 非空")
-        check(model.pageModel.overviewBlocks.count == 3, "① 页三区块由真实状态投影（Source.allCases 三个）")
+        check(model.pageModel.overviewBlocks.count == Source.allCases.count,
+              "① 页来源卡由真实状态投影（Source.allCases 全集）")
 
         print("\n--- 2. 扫描与落盘（runScan）---")
         // ⚠️ **不能**在主 actor 上 `sem.wait()` 等一个需要主 actor 的 Task —— 那是自己等自己，

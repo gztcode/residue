@@ -95,6 +95,35 @@ final class UpstreamAndRecordTests: XCTestCase {
         XCTAssertNotNil(UpstreamWhitelist.rejectionReason(executable: "npm", args: ["cache", "clean"]))
     }
 
+    /// **CR-038 · A21：新来源的真删除命令必须进「必拒清单」**。
+    ///
+    /// ## 为什么不能只断言「被拒」
+    /// 白名单是**封闭**的 ⇒ `pnpm` / `bun` / `cargo` 的任何命令**本来就被拒**。
+    /// 只断言 `rejectionReason != nil` 会**恒绿**，测不出必拒清单有没有这三项。
+    ///
+    /// ## 断言的是什么
+    /// 必拒清单是**独立的一层**（`explicitlyForbidden`）：它的作用是
+    /// ① 让「为什么它被拒」在代码里可读；② 防止后续维护者**误把它加进白名单**
+    /// （只靠封闭白名单时，误加一条即造成真删除）。
+    /// 故断言**拒绝理由落在显式拒绝层**（`被显式拒绝`），而不是封闭白名单兜底
+    /// （`不在只读白名单内`）。
+    func testNewSourceDestructiveCommandsAreInExplicitForbiddenList() {
+        let destructive: [(String, [String])] = [
+            ("pnpm", ["store", "prune"]),
+            ("bun", ["pm", "cache", "rm"]),
+            ("cargo", ["cache", "--autoclean"]),
+        ]
+        for (exe, args) in destructive {
+            let reason = UpstreamWhitelist.rejectionReason(executable: exe, args: args)
+            XCTAssertNotNil(reason, "`\(exe) \(args.joined(separator: " "))` 必须被拒（AC-19）")
+            XCTAssertTrue(
+                reason?.contains("被显式拒绝") == true,
+                "`\(exe) \(args.joined(separator: " "))` 必须落在**必拒清单**（理由含「被显式拒绝」），"
+                + "实际理由：\(reason ?? "<nil>")"
+            )
+        }
+    }
+
     /// **参数前缀必须**从头**匹配**——不能因为「参数里含有 `cache dir`」就放行。
     ///
     /// 否则 `uv --force cache dir` 这种变体会被当成只读命令放行。

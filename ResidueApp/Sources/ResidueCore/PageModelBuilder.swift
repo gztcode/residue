@@ -29,8 +29,8 @@ public enum PageModelBuilder {
         public var executions: [ExecutionRecord]
         /// 是否只读态（数据由更高版本创建）。
         public var readOnly: Bool
-        /// 是否正在加载。
-        public var loading: Bool
+        /// 扫描进度（`nil` = 不在扫描）。CR-037 §3.5。
+        public var scanProgress: ScanProgress?
         /// L0 是否降级（同 uid 枚举失败）。
         public var degraded: Bool
         /// L0 覆盖诊断（不上界面，仅用于 ① 页状态条判断）。
@@ -73,7 +73,7 @@ public enum PageModelBuilder {
             candidates: [ScanEngine.Candidate] = [],
             executions: [ExecutionRecord] = [],
             readOnly: Bool = false,
-            loading: Bool = false,
+            scanProgress: ScanProgress? = nil,
             degraded: Bool = false,
             coverage: L0Coverage = L0Coverage(),
             contentReads: Int = 0,
@@ -92,7 +92,7 @@ public enum PageModelBuilder {
             self.candidates = candidates
             self.executions = executions
             self.readOnly = readOnly
-            self.loading = loading
+            self.scanProgress = scanProgress
             self.degraded = degraded
             self.coverage = coverage
             self.contentReads = contentReads
@@ -130,14 +130,14 @@ public enum PageModelBuilder {
 
 var model = PageModel()
         model.readOnly = input.readOnly
-        model.loading = input.loading
+        model.scanProgress = input.scanProgress
 
         if input.readOnly {
             // **只读态**：不渲染任何数值（R2 §10.2）。
             // 显示 0 会让旧版把「错 1 次永久」显示成「一次都没错」——假值比空白更危险。
             model.pageLevelSlot = .unavailable(reason: UICopy.readOnlyNoSettlement)
             model.reportProduced = false
-            model.unmetNotices = [.unavailable(reason: UICopy.readOnlyNoSettlement)]
+            model.unmetSection = .rows([.unavailable(reason: UICopy.readOnlyNoSettlement)])
             model.remainingDays = .duration(days: nil)
             model.canLightUp = false
             model.autoDeleteEnabled = false
@@ -165,12 +165,15 @@ var model = PageModel()
         )
         let settlementProduced = header.settlement.producedAt != nil
 
-        // ---------- ① 三区块（按来源聚合字节） ----------
+        // ---------- ① 来源区块（按来源聚合字节；每来源一块） ----------
         // 聚合发生在 Core（此处），界面拿到的只有 `.metric`
         var bytesBySource: [Source: Int64] = [:]
+        // **每来源条目数**（不是字节数）—— ⑤ 页行集合的判据是「条目数 ≥ 1」。
+        var countBySource: [Source: Int] = [:]
         for c in input.candidates {
             if let s = Source(rawValue: c.source) {
                 bytesBySource[s, default: 0] += c.bytes
+                countBySource[s, default: 0] += 1
             }
         }
         model.overviewBlocks = Source.allCases.map { source in
@@ -180,12 +183,12 @@ var model = PageModel()
             )
         }
 
-        // **总量**：三来源占用之和（算术在 Core，界面不参与）。
+        // **总量**：全部来源占用之和（算术在 Core，界面不参与）。
         let totalBytes = bytesBySource.values.reduce(Int64(0), +)
         model.totalFootprintBytes = .metric(Int(totalBytes), unit: .bytes)
 
         // **空态判定**：没扫过（无候选）→ 首屏必须回答「现在该做什么」，
-        // 而不是摆三张 0 B 的卡。`hasScanned` 取自载体（有 `lastScanAt` 即扫过）。
+        // 而不是摆七张 0 B 的卡。`hasScanned` 取自载体（有 `lastScanAt` 即扫过）。
         model.isFirstRunEmpty = input.candidates.isEmpty && header.lastScanAt == nil
 
         // ① 状态条：只承载「并发冲突」（A1 裁定：全局页级状态条）
@@ -201,7 +204,7 @@ var model = PageModel()
             let source = Source(rawValue: c.source)
             return CandidateRow(
                 name: c.path,
-                // **判定域内的来源才可参与自动删除**（`pipx` run 恒为仅报告）
+                // **判定域内的来源才可参与自动删除**（域外只报告三类 `pipx` run / pnpm store / bun cache 恒为仅报告）
                 // **值域保持 2 值**（AC-04 判定冻结），阻断原因走 blockReason 副行
                 participation: (source?.isInDecisionDomain ?? false) ? .autoDeletable : .reportOnly,
                 bytes: .metric(Int(c.bytes), unit: .bytes),
@@ -240,9 +243,38 @@ var model = PageModel()
             decisionDomain: decisionDomain,
             sources: gateInputs
         )
-        model.unmetNotices = unmetNoticeSlots(
-            unmet, progress: progress, previous: header.previousRound
-        )
+        // ---------- ③ 未达项区（**四态**，CR-036） ----------
+        //
+        // ⚠️ **判据顺序不可调换**（CR-036 §3.3）：
+        //   1. **判定域空** ⇒ 从未扫描（`lastScanAt == nil`）是「尚未知」⇒ 态④ 保留全局项；
+        //      扫过 ⇒ 态③「没有可判定的东西」，成因二选一；
+        //   2. 判定域非空 ∧ 未达项为空 ⇒ 态②「无未达项」（**≠「已达标」**）；
+        //   3. 其余 ⇒ 态①逐行列出（全局项在前、来源项在后）。
+        //
+        // **成因判据取 `input.candidates`（全部候选），不是 `visibleCandidates`** ——
+        // 白名单过滤后的可见集会把「被白名单挡掉」误报成「无来源」。
+        if decisionDomain.isEmpty {
+            if header.lastScanAt == nil {
+                // 态④：从未扫描过 —— 判定域是「尚未知」而不是「已确定为空」
+                //       ⇒ 保留全局项，不显示空类成因（不变量 ③）。
+                model.unmetSection = .rows(
+                    unmetNoticeSlots(unmet, progress: progress, previous: header.previousRound)
+                )
+            } else {
+                // 态③：扫过、判定域为空 ⇒ 空类成因，**不列出任何未达项**（DAC-79）。
+                model.unmetSection = .emptyDomain(
+                    input.candidates.isEmpty ? .noScannableSource : .noCleanupCandidate
+                )
+            }
+        } else if unmet.isEmpty {
+            // 态②：判定域非空、报告已产出、观察期已满，但无任何未达项行。
+            model.unmetSection = .none
+        } else {
+            // 态①：有未达项（全局项在前、来源项在后）。
+            model.unmetSection = .rows(
+                unmetNoticeSlots(unmet, progress: progress, previous: header.previousRound)
+            )
+        }
         model.remainingDays = .duration(days: progress.remainingDays)
         model.canLightUp = GateEvaluator.isQualified(
             progress: progress,
@@ -354,8 +386,24 @@ var model = PageModel()
 
         // ---------- ⑤ 矩阵 ----------
         model.reportProduced = settlementProduced
-        model.reportRows = header.sources.map { entry in
-            reportRow(for: entry, round: header.round, produced: settlementProduced)
+        // **行集合是条件式**（PRD v5.6 :1094）：总量为 0 的来源不占行。
+        //
+        // - 判定域来源：本轮有快照（`T ≥ 1`）**或** 本窗扫到候选 ⇒ 占行；
+        // - 域外只报告来源：**只看本窗候选数** —— 它从不取快照，`T` 对它无意义，
+        //   判定域语义不得外溢到它身上。
+        //
+        // ⚠️ **不能用 `header.sources` 当行集合**：`ensureSourceRows()` 会把
+        // 7 个来源全补齐 ⇒ 头部行数恒为 7 ⇒ 无论本机有没有这些来源都会占行。
+        let entryBySource = Dictionary(
+            header.sources.map { ($0.source, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        model.reportRows = Source.allCases.compactMap { source in
+            let entry = entryBySource[source] ?? SourceHeaderEntry(source: source)
+            let hasSnapshot = source.isInDecisionDomain && (entry.T ?? 0) >= 1
+            let hasCandidates = (countBySource[source] ?? 0) >= 1
+            guard hasSnapshot || hasCandidates else { return nil }
+            return reportRow(for: entry, round: header.round, produced: settlementProduced)
         }
         let qualified = model.canLightUp
         model.pageLevelSlot = .text(

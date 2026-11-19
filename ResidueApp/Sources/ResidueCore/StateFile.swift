@@ -330,7 +330,43 @@ public struct StateFile: Sendable {
         newAppVersion: String,
         preservedRound: Int? = nil
     ) throws {
-        // **基于现有载体改字段** —— 不造全新 `StateHeader()`。
+        // 版本变更 ⇒ 观察期重置的「清 `a`」分支（**同一套清零逻辑**，不变量②）。
+        //
+        // 判定域指纹写**当前值**：载体从此对应当前判定域 ⇒ 下次启动不会因为
+        // 「旧载体没有指纹键」再多触发一次重置。
+        try clearCarrierForObservationReset(
+            newAppVersion: newAppVersion,
+            newDecisionDomainSignature: Source.decisionDomainSignature,
+            preservingMissCount: false,
+            preservedRound: preservedRound
+        )
+    }
+
+    /// **观察期重置**（CR-038 §3.8）—— 两条路径共用一个入口。
+    ///
+    /// | 触发 | `a`（误判累计） | 载荷（`F` / `C_done` / 位槽占用表） |
+    /// |---|---|---|
+    /// | 应用版本变更（`preservingMissCount: false`） | **清零** | 清空 |
+    /// | 判定域指纹变更（`preservingMissCount: true`） | **保留** | **保留** |
+    ///
+    /// 判错过一次不会因为「判定域变了」就变成没发生过（PRD v5.6 S2「错 1 次永久」）
+    /// ⇒ 第二条路径必须保留 `a`，而 `a` 的载荷载体也必须一并保留，
+    /// 否则头与载荷自相矛盾（头说「误判 2 次」而载荷里没有对应的阴性记录）。
+    ///
+    /// - Parameters:
+    ///   - newAppVersion: 写进载体的应用版本号。
+    ///   - newDecisionDomainSignature: 写进载体的判定域成员指纹。
+    ///   - preservingMissCount: `true` = 判定域指纹变更（**保留 `a` 及其载荷**）；
+    ///     `false` = 应用版本变更（`a` 与载荷一并清零）。
+    ///   - preservedRound: 要保留的轮次（`nil` = 沿用载体里的轮次）。
+    public func clearCarrierForObservationReset(
+        newAppVersion: String,
+        newDecisionDomainSignature: String,
+        preservingMissCount: Bool,
+        preservedRound: Int? = nil
+    ) throws {
+        // **基于现有载体改字段** —— 不造全新 `StateHeader()`（理由同
+        // `clearCarrierForVersionChange`）：用户设置类字段不得被重置改掉。
         //
         // 载体读不出来（损坏 / 只读）时**抛错**，不静默新建空载体：
         // 那会把 `a` 清零（= 放行），是「静默重建」（不变量④）。
@@ -341,21 +377,24 @@ public struct StateFile: Sendable {
         // 写出的永远是**当前** schema 版本（载体可能是旧 schema）。
         header.schemaVersion = StateFileCodec.currentSchemaVersion
         header.appVersion = newAppVersion
-        // **轮次不变**（M1：版本变更重置当前轮次，不产生新轮次）
+        header.decisionDomainSignature = newDecisionDomainSignature
+        // **轮次不变**（M1：重置当前轮次，不产生新轮次）
         header.round = preservedRound ?? header.round
 
-        // ① 本轮计数日归零 + 本轮计数日起算点重置
-        //    （起算点重置 = 版本变更后的**下一次**成功扫描完成所在日 ⇒ 此刻无起算点）
-        // ③ 结算凭证（报告产出时刻与报告标识）随 `K` / `J` 一并清零
-        //    （凭证与结算值不同源 → 会造出「有报告、无样本」的假态）
-        // ② `T` 待重取 / ③ `K`·`J` 清零 / ④ `b` 清零 / ⑥ `a` 清零 /
-        // ⑦ `H` 回到 nil / 取快照·结算时刻与无法归因条数随量一并清零
-        //
-        // ⚠️ 走**共享原语**（不变量②）：schema 迁移要清的是同一套量，
-        //    两处各写一遍必然漂移。
-        header.resetObservationCredentials()
-
-        // 载荷全空 → 四项（`F` / `C_done` / 位槽占用表 / `a`）自然清零
-        try save(header: header, payloads: [:])
+        if preservingMissCount {
+            // 判定域指纹变更 ⇒ `a` 保留（PRD v5.6 M4：「`a` 只在应用版本变更时清零」）。
+            header.resetObservationCredentials(clearingMissCount: false)
+            // 载荷侧：`a` 的三项载体（`F` 位图 / `C_done` / 位槽占用表）**必须保留**。
+            // 只清**本轮快照成员集合** —— `T` 要重取 ⇒ 旧成员不再属于新快照。
+            var payloads = loaded.contents?.payloads ?? [:]
+            for source in Array(payloads.keys) {
+                payloads[source]?.clearSnapshotMembers()
+            }
+            try save(header: header, payloads: payloads)
+        } else {
+            // 应用版本变更 ⇒ `a` 与载荷一并清零（载荷段整体不存在 ⇒「无段」= 无数据）。
+            header.resetObservationCredentials(clearingMissCount: true)
+            try save(header: header, payloads: [:])
+        }
     }
 }

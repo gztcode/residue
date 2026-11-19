@@ -26,7 +26,7 @@ import Foundation
 /// 断点的读写（`state/checkpoints.json`）。
 ///
 /// 落盘形态是**来源 → 断点**的映射（文件名是复数）：一次全量扫描会遍历
-/// 三个来源，每个来源各有一个 `Checkpoint`，中断可能发生在任意一个之中。
+/// 每个来源各有一个 `Checkpoint`（`Source.allCases`），中断可能发生在任意一个之中。
 public struct CheckpointStore: Sendable {
 
     /// `state/` 目录（**不是** N7 的 `.jsonl` 记录目录）。

@@ -291,27 +291,83 @@ struct TokenSwitch: View {
 }
 
 
-struct LoadingView: View {
-    let message: String
+// MARK: - 扫描进度（CR-037）
+//
+// ⚠️ **信号色着色区 = 1，且落在进度环上**（DAC-105）——
+//    扫描期的执行结果卡退到中性、空态不出主行动按钮，都是为了这一条。
+
+/// **自绘进度环**（**确定弧**，不是系统的未定 spinner）。
+///
+/// ## 为什么不用 `ProgressView(.circular)`
+///
+/// 系统那个是**不定**的 —— 转圈表示「还在动」，但**不表示还剩多少**。
+/// 用户要的是后者：扫到第几个来源了。
+///
+/// ## 为什么不放在 `Pages.swift`
+///
+/// a9 的「七页视图 struct」计数用正则
+/// `^struct (Overview|Environments|…)[A-Za-z_]*: View` —— 新组件名不匹配，
+/// 但放 `Pages.swift` 会被当成页面结构的一部分 ⇒ 放 `Components.swift`。
+struct ScanProgressRing: View {
+    /// **弧长比例**（`nil` = 分母未知 ⇒ 只画轨道不画弧）。
+    ///
+    /// ⚠️ **不得 `?? 0`** —— 分母未知与「0%」是两件事（不变量③：`nil ≠ 0`）。
+    let fraction: Double?
+
+    /// 圆环直径。
+    ///
+    /// ⚠️ `DesignTokens` **没有圆环尺寸 token** ⇒ 本单不新增 token 类别
+    ///    （登记备查，见 CR-037 §五）。
+    private let diameter: CGFloat = 16
+    /// 环线宽。
+    private let lineWidth: CGFloat = 2
+
+    var body: some View {
+        ZStack {
+            // 底圈（中性）
+            Circle()
+                .stroke(Tokens.Color.divider, lineWidth: lineWidth)
+            // 弧（信号色）—— 分母未知时**不画**
+            if let fraction {
+                Circle()
+                    .trim(from: 0, to: CGFloat(fraction))
+                    .stroke(
+                        Tokens.Color.signal,
+                        style: StrokeStyle(lineWidth: lineWidth, lineCap: .round)
+                    )
+                    // 12 点方向起画（视觉常规）
+                    .rotationEffect(.degrees(-90))
+            }
+        }
+        .frame(width: diameter, height: diameter)
+    }
+}
+
+/// **扫描进度横条**（① 页内容区顶部）：圆环 + 进度文案 + 取消按钮。
+///
+/// 样式照 `StatusBar`（横条 + `surface` 底 + `control` 圆角）。
+struct ScanProgressStrip: View {
+    let progress: ScanProgress
+    /// 取消扫描。为空时不显示取消按钮。
     var onCancel: (() -> Void)?
 
     var body: some View {
-        VStack(spacing: Tokens.Spacing.s) {
-            ProgressView()
-                .progressViewStyle(.circular)
-                // 视觉基线 §三：加载态 = 中性 + 信号色（进度环）
-                .tint(Tokens.Color.signal)
-            Text(message)
+        HStack(spacing: Tokens.Spacing.xs) {
+            ScanProgressRing(fraction: progress.fraction)
+            // ⚠️ 显示**已拼好的字符串**，不在视图里插值数字（a9 §2.5）。
+            Text(progress.displayText)
                 .font(Tokens.Typography.secondary)
                 .foregroundStyle(Tokens.Color.textSecondary)
+            Spacer()
             if let onCancel {
+                // **中性色**（DAC-105：取消按钮取中性色，不得用信号色）
                 Button(L.pick("取消", "Cancel"), action: onCancel)
-                    .buttonStyle(.plain)
-                    .font(Tokens.Typography.secondary)
-                    .foregroundStyle(Tokens.Color.textSecondary)
+                    .buttonStyle(SecondaryButtonStyle(enabled: true))
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(.vertical, Tokens.Spacing.xs)
+        .padding(.horizontal, Tokens.Spacing.s)
+        .background(Tokens.Color.surface, in: RoundedRectangle(cornerRadius: Tokens.Radius.control))
     }
 }
 
@@ -344,9 +400,17 @@ struct EmptyStateView: View {
 /// 这里只决定配色：有失败/拦下 = 需注意（次文字色），干净成功 = 信号色。
 struct ExecutionNoticeCard: View {
     let notice: PageModel.ExecutionNotice
+    /// 是否用信号色（扫描期传 `false` ⇒ 退到中性）。
+    ///
+    /// ## 为什么是「退到中性」而不是「隐藏」
+    ///
+    /// 隐藏 = 改变**信息量**；退到中性 = 改变**表达**。
+    /// 契约（视觉基线 §二「其余全部退到中性表达」）要的是后者。
+    var usesSignalAccent: Bool = true
 
     private var accent: SwiftUI.Color {
-        notice.didNothing || notice.failedCount > 0
+        guard usesSignalAccent else { return Tokens.Color.textSecondary }
+        return notice.didNothing || notice.failedCount > 0
             ? Tokens.Color.textSecondary
             : Tokens.Color.signal
     }
@@ -372,21 +436,29 @@ struct ExecutionNoticeCard: View {
 ///
 /// ## 为什么要有这个东西
 ///
-/// 原先首屏在没有数据时显示的是三张 `0 B` 卡片 + 一串 0 —— 因为
-/// `overviewBlocks` 恒为三块（`Source.allCases.map`），空态分支根本不可达。
-/// 用户第一眼看到的是「三个 0」，既不知道产品在干什么，也不知道自己该干什么。
+/// 原先首屏在没有数据时显示的是七张 `0 B` 卡片 + 一串 0 —— 因为
+/// `overviewBlocks` 恒为「全部来源」块数（`Source.allCases.map`），空态分支根本不可达。
+/// 用户第一眼看到的是「七个 0」，既不知道产品在干什么，也不知道自己该干什么。
 ///
 /// 空态的正确职责是**给方向**：说明首次扫描会做什么（观察期、不读内容）、
 /// 并放一个「开始扫描」按钮作为唯一主行动。
 struct FirstRunEmptyState: View {
     var onScan: (() -> Void)?
+    /// 是否显示「还没有扫描过」标题。
+    ///
+    /// ⚠️ 扫描期传 `false` —— 空态与进度横条并存时，
+    ///    「还没有扫描过」与「已完成 1/7 个来源」**自相矛盾**。
+    ///    （「还没有扫描过」本身是 DAC-80 违例，本单不修，只是不再叠加矛盾。）
+    var showsTitle: Bool = true
 
     var body: some View {
         VStack(spacing: Tokens.Spacing.m) {
             VStack(spacing: Tokens.Spacing.xs) {
-                Text(L.pick("还没有扫描过", "No scan yet"))
-                    .font(Tokens.Typography.body)
-                    .foregroundStyle(Tokens.Color.textSecondary)
+                if showsTitle {
+                    Text(L.pick("还没有扫描过", "No scan yet"))
+                        .font(Tokens.Typography.body)
+                        .foregroundStyle(Tokens.Color.textSecondary)
+                }
                 Text(L.pick(
                     "首次扫描会建立观察期基线：只读取文件元数据（大小、时间），不读取文件内容。",
                     "The first scan builds the observation baseline. It reads file metadata only (size, timestamps) — never file contents."

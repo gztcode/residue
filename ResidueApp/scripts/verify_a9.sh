@@ -679,7 +679,22 @@ else
 fi
 
 # ⑤ 界面必须显示进度 + 提供取消
-if grep -qF 'scanProgress.displayText' "$UI_DIR/RootView.swift" 2>/dev/null; then
+#
+# ⚠️ 锚点已随 CR-037 迁移：进度横条从**页头**搬到了**① 页内容区顶部**
+#    （`ScanProgressStrip`）⇒ 判据跟着改成「① 页用这个组件 + 组件里显示文案」。
+# ⚠️ 必须用 `progress.displayText`（带限定符）——裸 `displayText` 会撞上
+#    `Components.swift` 里既有的 `Text(slot.displayText)`。
+#
+# ⚠️ **锚点已收紧**（CR-037 步骤 6 实测发现，见变更单 §10.5）：
+#    ① `ScanProgressStrip(` —— **带调用括号**。裸 `ScanProgressStrip` 是
+#       子串匹配 ⇒ 把它改名成 `ScanProgressStripMutated` 也能蒙混过关
+#       （实测 a9 仍绿）。
+#    ③ `trim(from: 0, to:` —— **确定弧**的证据。缺这一条时，
+#       把自绘圆环换回系统的 `ProgressView(.circular)`（**不定** spinner，
+#       正是缺陷 #5）判据**不会红**。
+if grep -qF 'ScanProgressStrip(' "$UI_DIR/Pages.swift" 2>/dev/null \
+   && grep -qF 'progress.displayText' "$UI_DIR/Components.swift" 2>/dev/null \
+   && grep -qF 'trim(from: 0, to:' "$UI_DIR/Components.swift" 2>/dev/null; then
   ok "界面显示扫描进度（用户看得到它在动）"
 else
   bad "界面不显示扫描进度 → 「按了没反应」与卡死无异"

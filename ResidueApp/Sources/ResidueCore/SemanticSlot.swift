@@ -341,6 +341,55 @@ public enum UICopy {
         )
     }
 
+    /// ③ 页「无未达项」静态文案。
+    ///
+    /// - 场景：判定域**非空**、报告已产出、观察期已满，但未达项集合为空。
+    /// - ⚠️ **不得**改成「已达达标条件」：未达项为空**不等于**可点亮
+    ///   （`a` 未判定时既无来源项、又过不了达标门槛 —— 见 §三 3.9）。
+    public static var unmetNone: String {
+        L.pick("无未达项", "No unmet items")
+    }
+
+    /// §8 空类成因文案（封闭两串 · DAC-79）。
+    ///
+    /// - `.noScannableSource` → 「无可扫描来源」（定位成功且页面上无候选）
+    /// - `.noCleanupCandidate` → 「无清理候选」（页面有候选但判定域内无）
+    ///
+    /// - ⚠️ **不得**新增第三串（DAC-79 容差「二串之一」+ 异议 #79）。
+    public static func emptyDomainText(_ cause: EmptyDomainCause) -> String {
+        switch cause {
+        case .noScannableSource:
+            return L.pick("无可扫描来源", "No scannable source")
+        case .noCleanupCandidate:
+            return L.pick("无清理候选", "No cleanup candidate")
+        }
+    }
+
+    /// ① 页扫描进度横条的**来源计数段**（CR-037 §3.3）。
+    ///
+    /// 形如「已完成 1/7 个来源」（来源数 = `Source.allCases.count`）。
+    ///
+    /// ## 为什么是「来源」而不是「条目」
+    ///
+    /// 总条目数**事先不知道** ⇒ 百分比是假的；
+    /// 来源总数**本次扫描开始时就知道** ⇒ 「x/y 个来源」是能如实说出口的量。
+    ///
+    /// ## 格式约定
+    ///
+    /// - 「x/y」**不加空格**（紧凑计数，视觉基线的数字式前缀惯例）；
+    /// - 段与段之间用「 · 」分隔（沿用既有三段的分隔符）。
+    public static func scanSourcesCompleted(done: Int, total: Int) -> String {
+        L.pick("已完成 \(done)/\(total) 个来源", "\(done)/\(total) sources completed")
+    }
+
+    /// ① 页扫描进度横条在**分母未知**时的首段（CR-037 §3.3）。
+    ///
+    /// ⚠️ **不得**写成「已完成 0/0 个来源」—— 「0/0」会被读成
+    /// 「一个来源都扫不完」，那是编造（守不变量③：不把未知判为已知）。
+    public static func scanningInProgress() -> String {
+        L.pick("正在扫描…", "Scanning…")
+    }
+
     /// ⑤ 页在**只读态**显示这一串，而不是「本轮未结算」。
     ///
     /// R2 §10.2：只读态不产出 AC-09 报告、不写任何落盘物；

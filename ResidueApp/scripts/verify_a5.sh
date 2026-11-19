@@ -433,8 +433,14 @@ if [ -f "$README2" ]; then
 
   if grep -q "已扫描" "$README2" 2>/dev/null; then
     # 承诺 ②：实时显示进度 → 实现里必须有进度回调 + 界面显示
+    # ⚠️ 锚点已随 CR-037 迁移：进度横条从**页头**搬到了**① 页内容区顶部**。
+    # ⚠️ 必须用 `progress.displayText`（带限定符）——裸 `displayText` 会撞上
+    #    `Components.swift` 里既有的 `Text(slot.displayText)`。
+    # ⚠️ `ScanProgressStrip(` **带调用括号**（CR-037 步骤 6 实测：
+    #    裸串是子串匹配 ⇒ 改名可绕过判据）。
     if grep -qF 'progressEvery' "Sources/ResidueCore/ScanEngine.swift" 2>/dev/null \
-       && grep -qF 'scanProgress.displayText' "Sources/ResidueApp/RootView.swift" 2>/dev/null; then
+       && grep -qF 'ScanProgressStrip(' "Sources/ResidueApp/Pages.swift" 2>/dev/null \
+       && grep -qF 'progress.displayText' "Sources/ResidueApp/Components.swift" 2>/dev/null; then
       ok "README 承诺「实时显示已扫描 N 项」→ 引擎有进度回调且界面有显示"
     else
       bad "README 承诺实时进度，实现里找不到进度回调或界面显示（**文档骗人**）"

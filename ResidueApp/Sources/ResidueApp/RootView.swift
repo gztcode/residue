@@ -118,40 +118,19 @@ struct RootView: View {
 
             Spacer()
 
-            // ---- 扫描进度（**扫描期间必须有反馈**）----
-            //
-            // ## 为什么必须有这一行
-            //
-            // 扫描是重 I/O（实测本机：`~/.cache/uv` 115,875 项 ≈ 6.44 s，
-            // `~/.npm/_npx` 106,983 项 ≈ 6.79 s —— 合计约 13 秒）。
-            //
-            // 即便把扫描搬到后台线程，**没有这一行的话用户看到的就是「按了没反应」**
-            // —— 界面能动，但没有任何反馈。那和卡死的差别只是「能拖动了」，
-            // 用户仍然不知道它在干什么、多久能好、要不要继续等。
-            //
-            // 所以「搬走」与「汇报」是**两件都必须做的事**。
-            if app.isScanning, !app.scanProgress.displayText.isEmpty {
-                Text(app.scanProgress.displayText)
-                    .font(Tokens.Typography.secondary)
-                    .foregroundStyle(Tokens.Color.textSecondary)
-                    .monospacedDigit()
-            }
-
             // 扫描（真实触发 ScanEngine；只读态禁用）
+            //
+            // ⚠️ **页头只留标题 + 扫描按钮**（CR-037 §3.14）——
+            //    扫描进度（圆环 + 文案 + 取消按钮）搬到**① 页内容区顶部横条**：
+            //    进度属于内容，不属于页头；且页头在②~⑦ 页也会出现，
+            //    放页头意味着「在②页按扫描，进度显示在①页」这种错位。
+            //
+            // 扫描期间按钮显示「扫描中…」并禁用 —— **不再重复**报进度。
             Button(app.isScanning ? L.pick("扫描中…", "Scanning…") : L.pick("扫描", "Scan")) {
                 Task { await app.runScan() }
             }
             .buttonStyle(SecondaryButtonStyle(enabled: !app.isScanning && !model.readOnly))
             .disabled(app.isScanning || model.readOnly)
-
-            // ---- 取消（**13 秒不能反悔**）----
-            //
-            // 契约：`E-104`「用户取消」—— **取消不是失败**，
-            // 它落断点、且**不计入计数日**（M1）。
-            if app.isScanning {
-                Button(L.pick("取消", "Cancel")) { app.cancelScan() }
-                    .buttonStyle(SecondaryButtonStyle(enabled: true))
-            }
 
             if selection == .confirm {
                 // ⚠️ 不用 `.borderedProminent`：系统样式自带配色与圆角，
@@ -174,7 +153,9 @@ struct RootView: View {
             // 空态主行动：首屏在没数据时也能直接开始扫描
             OverviewPage(
                 model: model,
-                onScan: model.readOnly ? nil : { Task { await app.runScan() } }
+                onScan: model.readOnly ? nil : { Task { await app.runScan() } },
+                // 取消扫描（契约 `E-104`：取消不是失败，落断点、不计入计数日 M1）
+                onCancel: { app.cancelScan() }
             )
         case .environments:
             EnvironmentsPage(model: model)

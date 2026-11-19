@@ -104,9 +104,18 @@ enum PageRenderer {
         overLimitModel.deferredCountSlot = .metric(38, unit: .items)
         overLimitModel.statusSlot = .stateLabel(.overLimit)
 
+        // 加载态（CR-037）：① 页顶部横条 —— 圆环 + 进度文案 + 取消按钮。
+        // ⚠️ 分母 = 来源总数（CR-038 起为 7）、分子 = 1 ⇒ 弧长 1/7。
         var loadingModel = model
-        loadingModel.loading = true
-        loadingModel.loadingMessage = L.pick("正在扫描 3 个来源 · 已扫描 12,847 条", "Scanning 3 sources · 12,847 items scanned")
+        loadingModel.scanProgress = ScanProgress(
+            source: "uv",
+            filesScanned: 12_847,
+            candidatesFound: 42,
+            elapsed: 3.2,
+            isRunning: true,
+            completedSources: 1,
+            totalSources: Source.allCases.count
+        )
 
         var envEmptyModel = model
         envEmptyModel.candidateRows = []
@@ -124,7 +133,9 @@ enum PageRenderer {
         for (name, page, m) in [
             ("08-观察期报告-只读态-版本降级", Page.report, readOnlyModel),
             ("09-存储总览-空态", Page.overview, {
-                var e = model; e.overviewBlocks = []; return e
+                // 必须显式置 true：样例骨架是「已扫过」的常态态，
+                // 这里要的是「还没扫描过」的空态，不能沿用骨架的值。
+                var e = model; e.isFirstRunEmpty = true; e.overviewBlocks = []; return e
             }()),
             ("10-存储总览-错误态", Page.overview, errorModel),
             ("11-授权与隐私-无权限态", Page.privacy, noPermModel),
@@ -234,7 +245,9 @@ struct RenderWrapper: View {
     @ViewBuilder
     private var pageContent: some View {
         switch page {
-        case .overview:    OverviewPage(model: model)
+        // ⚠️ 渲染稿里给一个**空 action** 的取消按钮 ——
+        //    要让「13-存储总览-加载态」这张稿能看出横条上确实有取消按钮。
+        case .overview:    OverviewPage(model: model, onCancel: {})
         case .environments: EnvironmentsPage(model: model)
         case .policy:      PolicyPage(model: model)
         case .privacy:     PrivacyPage(model: model)

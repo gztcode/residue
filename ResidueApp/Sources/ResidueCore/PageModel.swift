@@ -73,22 +73,28 @@ public enum Page: Int, CaseIterable, Identifiable, Sendable {
 public struct PageModel: Sendable {
     /// 是否处于只读态（数据由更高版本创建）。
     public var readOnly: Bool = false
-    /// 是否正在加载。
-    public var loading: Bool = false
-    /// 加载进度文案。
-    public var loadingMessage: String = L.pick("正在扫描…", "Scanning…")
-
-    /// ① 页三区块。
-    public var overviewBlocks: [OverviewBlock] = []
-    /// ① 页：**三来源占用总量**（字节）。
+    /// **扫描进度**（`nil` = 不在扫描）。
     ///
-    /// 原首屏只有三张各自数额的卡，**没有「一共占了多少」** —— 用户要自己心算。
+    /// ## 为什么取代 `loading` + `loadingMessage`（CR-037 §3.4）
+    ///
+    /// 旧的两个字段是**并列的事实源**（一个说「在加载」、一个说「加载到哪儿了」）
+    /// ⇒ 必然出现「`loading` 为真但 `loadingMessage` 是旧的」这类自相矛盾状态。
+    ///
+    /// 现在**只有这一个载体**：`nil` 表示不在扫描；
+    /// 在扫描时它同时携带**弧长**（`fraction`）与**文案**（`displayText`）。
+    public var scanProgress: ScanProgress? = nil
+
+    /// ① 页来源区块（每来源一块）。
+    public var overviewBlocks: [OverviewBlock] = []
+    /// ① 页：**全部来源占用总量**（字节）。
+    ///
+    /// 原首屏只有各来源各自数额的卡，**没有「一共占了多少」** —— 用户要自己心算。
     /// 而「我到底能被腾出多少空间」正是这个产品最该先回答的问题。
     public var totalFootprintBytes: SemanticSlot = .metric(0, unit: .bytes)
     /// ① 页：**是否还没有任何扫描数据**（决定显示空态还是数据）。
     ///
-    /// 原先 `overviewBlocks` 恒为三块（`Source.allCases.map`）→ 空态分支
-    /// **在真实产品里不可达**，首启看到的是三张 `0 B` 卡 + 一串 0 ——
+    /// 原先 `overviewBlocks` 恒为全部来源块数（`Source.allCases.map`）→ 空态分支
+    /// **在真实产品里不可达**，首启看到的是七张 `0 B` 卡 + 一串 0 ——
     /// 既不告诉用户「你还没扫过」，也不给「开始扫描」的入口。
     public var isFirstRunEmpty: Bool = true
     /// ① 页状态条。
@@ -178,10 +184,21 @@ public struct PageModel: Sendable {
     /// 这比「不能点」更糟（AC-08 组 B 的全部意义就是「未达线不得点亮」）。
     public var canLightUp: Bool = false
 
-    /// ③ 页：未达项（**多行** —— 全局项在前、来源项在后，**一项一行**）。
+    /// ③ 页：未达项区的**态**（CR-036）。
     ///
-    /// 空数组 = 无未达项（空判定域 ⇒ 不列任何来源项，DAC-79）。
-    public var unmetNotices: [SemanticSlot] = []
+    /// 四态：`.rows`（有未达项，**一项一行**）/ `.none`（确无未达项）/
+    /// `.emptyDomain`（**没有可判定的东西**）/ `.rows`（从未扫描 ⇒ 保留全局项）。
+    ///
+    /// ⚠️ **四态里的 `.rows` 有两种来源**，靠 `.none` / `.emptyDomain` 区分「空」的两种含义。
+    public var unmetSection: UnmetSection = .rows([])
+    /// ③ 页：未达项（**派生** —— 真值在 `unmetSection`）。
+    ///
+    /// 保留为派生属性 ⇒ 既有断言与调用点一行不动。
+    /// 空数组 = 无未达项行可列（`.none` / `.emptyDomain`）。
+    public var unmetNotices: [SemanticSlot] {
+        if case .rows(let slots) = unmetSection { return slots }
+        return []
+    }
     /// ③ 页：剩余天数（`.duration`，`nil` → 「—」）。
     public var remainingDays: SemanticSlot = .duration(days: nil)
     /// **只读态的成因**（`nil` = 非只读）。

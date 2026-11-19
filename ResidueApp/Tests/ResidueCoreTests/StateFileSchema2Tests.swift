@@ -277,7 +277,7 @@ final class StateFileSchema2Tests: XCTestCase {
         let data = try StateFileCodec.encode(header: makeHeader(), payloads: payloads)
         let contents = try StateFileCodec.decode(data)
 
-        XCTAssertEqual(Source.allCases.count, 3, "来源数变了，夹具的位图长度恒等式不再成立")
+        XCTAssertEqual(Source.allCases.count, 7, "来源数变了，夹具的位图长度恒等式不再成立")
         for source in Source.allCases {
             XCTAssertEqual(
                 contents.payloads[source]?.snapshotMembers,
@@ -309,7 +309,7 @@ final class StateFileSchema2Tests: XCTestCase {
         let data = try StateFileCodec.encode(header: makeHeader(), payloads: payloads)
         let contents = try StateFileCodec.decode(data)
 
-        XCTAssertEqual(Source.allCases.count, 3, "来源数变了，夹具的位图长度恒等式不再成立")
+        XCTAssertEqual(Source.allCases.count, 7, "来源数变了，夹具的位图长度恒等式不再成立")
         for source in Source.allCases {
             guard let payload = contents.payloads[source] else {
                 XCTFail("\(source.displayName) 的载荷丢了")
@@ -360,7 +360,7 @@ final class StateFileSchema2Tests: XCTestCase {
         )
         let contents = try StateFileCodec.decode(data)
 
-        XCTAssertEqual(Source.allCases.count, 3, "来源数变了，夹具的位图长度恒等式不再成立")
+        XCTAssertEqual(Source.allCases.count, 7, "来源数变了，夹具的位图长度恒等式不再成立")
         for source in Source.allCases {
             XCTAssertEqual(
                 contents.payloads[source]?.slots[0]?.birthtime.timeIntervalSince1970,

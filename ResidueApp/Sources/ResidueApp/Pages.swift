@@ -20,39 +20,58 @@ import ResidueCore
 
 // MARK: - ① 只读存储总览
 //
-// 骨架：三区块 + 状态条 + 加载态
-// 必须有的语义位：三区块各一个 `.metric`；状态条承载「并发冲突」
+// 骨架：来源区块（每来源一块）+ 状态条 + 加载态
+// 必须有的语义位：每个来源块各一个 `.metric`；状态条承载「并发冲突」
 struct OverviewPage: View {
     let model: PageModel
     /// 空态里的主行动（「开始扫描」）。为空时不显示按钮（渲染稿 / 只读态）。
     var onScan: (() -> Void)? = nil
+    /// 取消扫描（进度横条上的按钮）。为空时不显示取消按钮。
+    var onCancel: (() -> Void)? = nil
+
+    /// **是否正在扫描**（`scanProgress` 非空即为扫描中）。
+    private var isScanning: Bool { model.scanProgress != nil }
 
     var body: some View {
-        if model.loading {
-            LoadingView(message: model.loadingMessage)
-        } else {
-            VStack(alignment: .leading, spacing: Tokens.Spacing.m) {
+        // ⚠️ **不再整页替换**（CR-037 §3.12）——
+        //    原先扫描时整页换成 `LoadingView` ⇒ 来源区块 / 状态条 / 空态**全部消失**，
+        //    用户只能盯着一个转圈。加载态现在**是第四件**，与来源区块并存。
+        VStack(alignment: .leading, spacing: Tokens.Spacing.m) {
+                // ---- 扫描进度横条（① 页内容区顶部）----
+                //
+                // 圆环 + 进度文案 + 取消按钮（CR-037 §3.11）。
+                if let progress = model.scanProgress {
+                    ScanProgressStrip(progress: progress, onCancel: onCancel)
+                }
+
                 if let status = model.statusSlot {
                     StatusBar(slot: status)
                 }
 
                 // **清理结果反馈**（执行完必须给答复 —— 原先什么都不变）
                 if let notice = model.lastExecutionNotice {
-                    ExecutionNoticeCard(notice: notice)
+                    // ⚠️ 扫描期退到中性 —— 信号色着色区只留给进度环（§3.13）
+                    ExecutionNoticeCard(notice: notice, usesSignalAccent: !isScanning)
                 }
 
                 if model.isFirstRunEmpty {
-                    // **空态可达**（原先 overviewBlocks 恒三块 → 这条分支永远进不来）
+                    // **空态可达**（原先 `overviewBlocks` 恒为「全部来源」块数 → 这条分支永远进不来）
                     //
-                    // 首屏必须回答「我现在该做什么」。原先首启看到的是三张 0 B 卡片
+                    // 首屏必须回答「我现在该做什么」。原先首启看到的是七张 0 B 卡片
                     // 加一串 0 —— 既不说明状态，也不给动作入口，用户只能盯着 0 发呆。
-                    FirstRunEmptyState(onScan: onScan)
+                    //
+                    // ⚠️ 扫描期不显示「开始扫描」按钮（§3.13）—— 此刻正在扫，
+                    //    再给一个「开始扫描」就是第二套互相矛盾的行动入口。
+                    FirstRunEmptyState(
+                        onScan: isScanning ? nil : onScan,
+                        showsTitle: !isScanning
+                    )
                 } else {
                     // **总量优先**：先回答「一共占了多少」，再看分来源明细。
                     Card {
                         HStack(alignment: .firstTextBaseline, spacing: Tokens.Spacing.s) {
                             VStack(alignment: .leading, spacing: Tokens.Spacing.xxs) {
-                                Text(L.pick("三来源占用合计", "Total across three sources"))
+                                Text(L.pick("来源占用合计", "Total across sources"))
                                     .font(Tokens.Typography.secondary)
                                     .foregroundStyle(Tokens.Color.textSecondary)
                                 SemanticSlotView(slot: model.totalFootprintBytes)
@@ -61,8 +80,14 @@ struct OverviewPage: View {
                             Spacer()
                         }
                     }
-                    // 三区块横向并排（总览页的语义是「一眼看完三个来源的占用」）
-                    HStack(alignment: .top, spacing: Tokens.Spacing.m) {
+                    // 来源卡横排（CR-038 §3.8）：来源数从 3 增到 7 ⇒ `HStack` 会挤爆，
+                    // 改自适应网格 —— 列宽随可用宽度自动分配，2~3 列随视口走。
+                    //
+                    // ⚠️ `LazyVGrid` 只接受 `GridItem` 列 ⇒ 不能照抄 `HStack` 的写法。
+                    LazyVGrid(
+                        columns: [GridItem(.adaptive(minimum: 180), spacing: Tokens.Spacing.m)],
+                        spacing: Tokens.Spacing.m
+                    ) {
                         ForEach(model.overviewBlocks) { block in
                             OverviewBlockCard(block: block)
                         }
@@ -112,9 +137,8 @@ struct OverviewPage: View {
                     }
                 }
                 Spacer()
-            }
-            .padding(Tokens.Spacing.m)
         }
+        .padding(Tokens.Spacing.m)
     }
 }
 
@@ -295,13 +319,20 @@ struct PolicyPage: View {
                     // 未达项（带轮次，M1 唯一串）与剩余天数**同址**
                     HStack(alignment: .firstTextBaseline) {
                         // 未达项**多行**：全局项在前、来源项在后，**一项一行**（DAC-74）。
+                        // ⚠️ **四态分派**（CR-036）：`.rows` 逐行 / `.none`「无未达项」/
+                        // `.emptyDomain`「无可扫描来源」或「无清理候选」。
+                        // 三者都是**已确定**的状态 —— 不得再显示「读取中」（那是把「尚未知」
+                        // 说成「还在读」，违不变量 ③）。
                         VStack(alignment: .leading, spacing: Tokens.Spacing.xs) {
-                            if model.unmetNotices.isEmpty {
-                                SemanticSlotView(slot: .text(L.pick("未达项读取中", "Loading unmet items")), muted: true)
-                            } else {
-                                ForEach(model.unmetNotices.indices, id: \.self) { index in
-                                    SemanticSlotView(slot: model.unmetNotices[index])
+                            switch model.unmetSection {
+                            case .rows(let slots):
+                                ForEach(slots.indices, id: \.self) { index in
+                                    SemanticSlotView(slot: slots[index])
                                 }
+                            case .none:
+                                SemanticSlotView(slot: .text(UICopy.unmetNone), muted: true)
+                            case .emptyDomain(let cause):
+                                SemanticSlotView(slot: .text(UICopy.emptyDomainText(cause)), muted: true)
                             }
                         }
                         Spacer(minLength: Tokens.Spacing.s)

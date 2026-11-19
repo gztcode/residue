@@ -21,50 +21,10 @@ import ResidueCore
 // 只是第一种是**界面冻住**，第二种是**界面能动但没反馈**，第三种是**没得反悔**。
 // ============================================================
 
-// MARK: - 进度
-
-/// 一次扫描的**进度快照**（`Sendable`，可跨 actor 边界传递）。
-///
-/// ## 为什么需要它
-///
-/// 若只是把扫描搬到后台线程而**不汇报进度**，用户看到的是「按了没反应」——
-/// **那和卡死没有区别**，甚至更糟（用户会去重复点击）。
-struct ScanProgress: Sendable, Equatable {
-    /// 当前正在扫的来源（`Source.rawValue`）。
-    var source: String = ""
-    /// 已扫描的条目数。
-    var filesScanned: Int = 0
-    /// 已发现的候选数。
-    var candidatesFound: Int = 0
-    /// 已耗时（秒）。
-    var elapsed: TimeInterval = 0
-    /// 是否仍在运行。
-    var isRunning: Bool = false
-
-    /// **给用户看的进度文案**。
-    ///
-    /// ## 为什么写「已扫描 N 项」而不是「已完成 x%」
-    ///
-    /// 总条目数**事先不知道**（要先扫一遍才知道）→ 百分比是假的。
-    /// 「已扫描 N 项 + 已用时」是**能如实说出口**的量。
-    var displayText: String {
-        guard isRunning else { return "" }
-        var parts = [L.pick("已扫描 \(filesScanned.formatted()) 项", "\(filesScanned.formatted()) items scanned")]
-        if candidatesFound > 0 {
-            parts.append(L.pick(
-                "发现 \(candidatesFound.formatted()) 个可回收条目",
-                "\(candidatesFound.formatted()) reclaimable items found"
-            ))
-        }
-        parts.append(L.pick(
-            String(format: "已用时 %.1f 秒", elapsed),
-            String(format: "%.1f s elapsed", elapsed)
-        ))
-        return parts.joined(separator: " · ")
-    }
-}
-
 // MARK: - 取消
+//
+// ⚠️ `ScanProgress` 已迁入 Core（CR-037 §3.1）——
+// 进度环弧长与跨来源累计必须在 Core 可单测，且界面不得做除法。
 
 /// 扫描的**取消令牌**（`Sendable`，主 actor 与后台任务共享）。
 ///
@@ -173,24 +133,26 @@ func resolveSourceRoots(
     if let override { return override }
 
     let home = NSHomeDirectory()
-    var out: [(String, String)] = []
 
     // uv：`uv cache dir`（白名单内，纯本地）
     let uv = probe.run(executable: "uv", args: ["cache", "dir"])
     upstream.append(uv.record)
-    let uvRoot = (uv.stdout?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 }
-        ?? home + "/.cache/uv"
-    out.append((Source.uvCache.rawValue, uvRoot))
 
     // npm：`npm config get cache`（白名单内）
     let npm = probe.run(executable: "npm", args: ["config", "get", "cache"])
     upstream.append(npm.record)
-    let npmBase = (npm.stdout?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 }
-        ?? home + "/.npm"
-    out.append((Source.npmNpx.rawValue, npmBase + "/_npx"))
 
-    // pipx：规则目录固定（`.local/pipx/venv`，与 SourceRule 一致）
-    out.append((Source.pipxRun.rawValue, home + "/.local/pipx/venv"))
+    // Homebrew：`brew --cache`（白名单内，纯本地定位；PRD v5.6 N6 已点名）
+    let brew = probe.run(executable: "brew", args: ["--cache"])
+    upstream.append(brew.record)
 
-    return out
+    // ★ **路径计算在 Core**（`SourceRoots.resolve`）——
+    // 纯函数、可单测、**只有一处实现**（不变量②）。
+    // cargo / pnpm / bun 走固定路径、零探测（零进程开销、零网络）。
+    return SourceRoots.resolve(
+        home: home,
+        uvCacheDir: uv.stdout,
+        npmCacheDir: npm.stdout,
+        brewCacheDir: brew.stdout
+    )
 }
