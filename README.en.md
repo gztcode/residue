@@ -10,7 +10,7 @@
 
 > See what the AI tooling on your Mac has been hoarding — then reclaim it **only after the app has proven its judgment**.
 
-`uv`, `npm/npx`, and `pipx` quietly accumulate tens of gigabytes of cache. Residue does exactly three things:
+`uv`, `npm/npx`, `pipx`, `brew`, `cargo`, `pnpm`, and `bun` quietly accumulate tens of gigabytes of cache. Residue does exactly three things:
 
 | # | What it does | What it never does |
 |---|---|---|
@@ -112,9 +112,9 @@ codesign --verify --deep --strict --verbose=2 /Applications/Residue.app
 <details open>
 <summary><b>It reads</b></summary>
 
-- Cache directories of `uv` / `npm` / `pipx`: path, item count, bytes, creation time
+- Cache directories of the seven sources (`uv` / `npm` / `pipx` / `brew` / `cargo` / `pnpm` / `bun`): path, item count, bytes, creation time
 - **File-descriptor ownership** of same-uid processes (is this cache in use right now?)
-- Output of **read-only lookup commands** (`uv cache dir`, etc.) to locate caches
+- Output of **read-only lookup commands** from `uv` / `npm` / `brew` / `pipx` (`uv cache dir`, etc.) to locate caches
 
 </details>
 
@@ -167,7 +167,7 @@ rm -rf ~/Library/Application\ Support/Residue
 | 1 | **Apple Silicon only** | Won't run on Intel Macs |
 | 2 | **Cross-uid fds are not enumerable** | Only your own user's processes are visible; others are shown as "can't tell" |
 | 3 | **Incremental scans don't find deep new candidates** | Newly installed packages enter the list on the next full scan (daily by default) |
-| 4 | **Three sources only** | `uv` / `npm(npx)` / `pipx` |
+| 4 | **Seven sources only** | Four in the decision domain (`uv` / `npm(npx)` / `brew` / `cargo`) + three report-only (`pipx` / `pnpm` / `bun`) |
 | 5 | **The observation period cannot be skipped** | 14 days is the core of the design, not an option |
 | 6 | **A full scan itself takes ~10+ seconds** | ~12 s for ~220k items. Scans run on a background thread; the UI stays usable, shows live progress, and can be cancelled |
 | 7 | **Un-notarized builds need a one-time manual approval** | See Case B above |

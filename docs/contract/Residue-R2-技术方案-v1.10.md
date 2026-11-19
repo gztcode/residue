@@ -13,7 +13,7 @@
 > - **依据**：`docs/changes/Residue-CR-033-轮次自动推进.md`。
 >
 > **v1.9 修订说明（CR-031 · K/J 结算写入 · 2026-11-16）**：本版只落**实现层载体与结算契约**，**不动已冻结的验收口径、不新增 AC**，故**不重开 R2 评审**：
-> - **schema 1 → 2**：载体新增第 4 段 `0x04 Snapshot`（快照成员集合），每来源由三段改四段（`F` → `C_done` → `Slots` → `Snapshot`）；`headerJSON` 的 `schemaVersion` 改 2。**理由**：`T`（数）此前**从未**与成员集合（内容）一起落盘 → 下一轮拿不到「上轮到底有哪些候选」→ 无法逐条归因 → `K` / `J` 在生产路径上恒为 `null` → 门槛恒不满足 → 自动删除永远点不亮（CR-031 §1.1）。
+> - **schema 1 → 2**：载体新增第 4 段 `0x04 Snapshot`（快照成员集合），每来源由三段改四段（`F` → `C_done` → `Slots` → `Snapshot`）；`headerJSON` 的 `schemaVersion` 改 2。**理由**：`T`（数）此前**从未**与成员集合（内容）一起落盘 → 下一轮拿不到「上轮到底有哪些候选」→ 无法逐条归因 → `K` / `J` 在生产路径上恒为 `null` → 门槛恒不满足 → 自动删除永远点不亮（CR-031 §1.1）。**〔v1.10 · CR-038〕来源扩到 7 个 ⇒ 总段数 12 → 28**（每来源仍四段；`sourceIndex` 仍在 `u8` 内 ⇒ 二进制布局不变；**schema 版本不升**，见 §10.3「新增来源」行）。
 > - **归因判据写死**（PRD v5.6 · M3）：封闭七行；**改名检测不得依赖 inode**（inode 随改名即变），**同一 birthtime 命中多条时匹配必须唯一**（不唯一即判「无法归因」），**无法归因条数必须如实披露**。
 > - **旧载体就地升级**：schema 1 → 2 **就地升级**，升级后**首次成功扫描重新取快照、观察期从头开始**；**用户设置类字段（如自动删除总开关）不随版本变更清零**（修 IF-09「造全新 `StateHeader()`」的缺陷）。
 > - **载体规模口径**：M4 的「约 1 MB 量级」**已实删**，改为「**约 640 MB 量级**」（位槽占用表 ≈ 336 MB + 快照成员集合 ≈ 300 MB + `F` 位图 375 KB + `C_done`）；**D-03 由 CR-031 裁决①关闭**（接受载体变大），**取代 CR-023 的旧限定**。
@@ -108,13 +108,13 @@
 
 - **判定域写死 = 同 uid 进程（质量 B-01，v1.2 新增）**：`P_now` 的定义域**只有同 uid 进程**。**跨 uid 进程（含 root）持有的文件，本产品看不到**（`EPERM`，FDA 不解锁）。因此：
   - **举证链 / 报告 / 界面上的 L0 结论文案不得写「全系统无活引用」「无任何进程占用」**，只能写「**本用户进程无引用**」（`M4` 的 `a` 判据不受影响：跨 uid 不可见只会导致「漏保护」，不会「误计」）。
-  - **保守化补丁**：若候选所在目录**其他用户可写**（`stat` 的 `mode` 含 group/other write 且非 sticky），则该来源**不进入自动删除候选集**（只进报告）——这类目录在 `~/.cache` 下正常不存在，但**不能靠「正常不存在」来保证安全**。
+  - **保守化补丁**：若候选所在目录**其他用户可写**（`stat` 的 `mode` 含 group/other write 且非 sticky），则该来源**不进入自动删除候选集**（只进报告）——这类目录在 `~/.cache` 下正常不存在，但**不能靠「正常不存在」来保证安全**。**〔v1.10 · CR-038〕规则不变，但结论不可从 `~/.cache` 外推**：`~/.cargo/registry` / `~/Library/pnpm/store` / `~/.bun/install/cache` 的**目录可写性未实测** ⇒ 「其他用户可写 ⇒ 不进自动删除候选集」必须**逐源实测**，不得沿用 `~/.cache` 的结论。
   - 该限定需在 PRD 的 M4 补一句（**偏差 #7，随 CR-022 一并提**）。
 - **约束**：P-L0 / AC-05 / AC-17 / AC-14 / N5 / §8。
 
 ### ADR-04 · 扫描：两阶段（`readdir` + `d_type` 遍历 → 命中路径批量 `getattrlistbulk`）
 
-- **决策（v1.0 的 `getdirentries64` 在 arm64 `libSystem` 无符号、按字面实现编不过，已换）**：**阶段 1** 用 `readdir`（`DIR*`，`d_type` 取自 APFS，无需 `stat`）只做目录遍历；**阶段 2** 只对命中来源模式的条目用 `getattrlistbulk` 批量取 `name/size/mtime/birthtime/fileid`。遍历**不跟随符号链接**（`O_NOFOLLOW` 语义 + 遇 `DT_LNK` 只记录不下降）。
+- **决策（v1.0 的 `getdirentries64` 在 arm64 `libSystem` 无符号、按字面实现编不过，已换）**：**阶段 1** 用 `readdir`（`DIR*`，`d_type` 取自 APFS，无需 `stat`）只做目录遍历；**阶段 2** 只对命中来源模式的条目用 `getattrlistbulk` 批量取 `name/size/mtime/birthtime/fileid`。遍历**不跟随符号链接**（`O_NOFOLLOW` 语义 + 遇 `DT_LNK` 只记录不下降）。**〔v1.10 · CR-038〕命中来源模式的七条路径**（按 `Source.allCases` 序）：`uv_cache` → `~/.cache/uv`；`npm_npx` → `~/.npm/_npx`；`pipx_run` → `~/.local/pipx/venv`；`brew_downloads` → `~/Library/Caches/Homebrew/downloads`；`cargo_registry_cache` → `~/.cargo/registry/cache`；`pnpm_store` → `~/Library/pnpm/store`；`bun_cache` → `~/.bun/install/cache`。★ **`~/.cargo/registry/cache` 与 `~/.cargo/registry/src` 必须区分 —— 只有 `cache` 在允许根内，`src`（源码展开目录）不在 ⇒ 永不进入候选集**。
 - **`getattrlistbulk` 三条解析硬约束**（不写死这三条会读出脏数据）：
   1. 必须以 `ATTR_CMN_RETURNED_ATTRS` 回读**实际返回的属性位图**——批量接口允许「请求了但没返回」，按请求位图解析会错位；
   2. 变长字段（`ATTR_CMN_NAME`）偏移按 `attrreference_t.attr_dataoffset` 相对**该属性起始**计算，不是相对记录起始；
@@ -133,7 +133,7 @@
 
 - **决策（v1.0 的三条 canary 实测全部退化为常量，已废）**：不做「FDA 是否已授予」的判定——macOS 无公开 API，且实测：跨 uid 进程恒 `EPERM`（FDA 也不解锁）、`TCC.db` 受 SIP 保护恒失败、`~/.Trash` 恒可写。**三条都不携带 FDA 信息。**
 - **改为能力探测**（只报「能不能干活」，不报「有没有授权」）：
-  1. `opendir(来源根)` 是否成功（失败 → `E-101`/`E-501`）；
+  1. `opendir(来源根)` 是否成功（失败 → `E-101`/`E-501`）；**〔v1.10 · CR-038〕来源根定位手段由 1 类扩为 4 类**：`uv`（`uv cache dir`）/ `npm`（`npm config get cache`）/ `brew`（`brew --cache`）三条只读命令 + **固定路径、零探测**（`pipx_run` / `cargo_registry_cache` / `pnpm_store` / `bun_cache`）；**探测命令数 2 → 3**（`brew --cache` 已在白名单内，见 §4 · IF-04）；**固定路径来源不产生探测失败登记**；七个来源**逐源探测**（`sourceRootReadable` 覆盖全部 7 个来源）。
   2. 同 uid 进程 fd 枚举是否成功（失败 → `E-501`）；
   3. `~/.Trash` 是否可写（失败 → `E-202`）。
 - **FDA 的新定位**：**从「前置授权」降为「失败后的补救指引」**——只有当①或②失败时，第 ④ 页提示「可能需要在系统设置 → 隐私与安全性 → 完全磁盘访问权限中允许 Residue」。**产品不再声称「没有 FDA 就不能用」**（实测：L0 判定只读同 uid 进程 fd，`~/.cache` 也不在 TCC 保护范围内，多数机器上无 FDA 也能正常判定）。
@@ -299,13 +299,15 @@ Residue.app（单进程，登录项 SMAppService.mainApp，菜单栏常驻）
   "schemaVersion": 2, "appVersion": "1.0.0 (1)",
   "round": 2, "roundStartAnchor": "2026-11-08T09:12:00Z",
   "countedDays": 3, "countedDaysCap": 14,
-  "sources": [ { "source": "uv.cache", "state": "inDomain",
-                 "snapshotTakenAt": null, "T": null, "K": null, "J": null, "H": null,
-                 "a": 0, "b": 0, "slotCount": 0, "doneCount": 0,
-                 "snapshotDate": null, "settlementDate": null, "unattributableCount": 0,
-                 "lastJudgmentAt": "..." } ],
+  "sources": [ { "source": "uv.cache", "state": "inDomain", "snapshotTakenAt": null, "T": null, "K": null, "J": null, "H": null, "a": 0, "b": 0, "slotCount": 0, "doneCount": 0, "snapshotDate": null, "settlementDate": null, "unattributableCount": 0, "lastJudgmentAt": "..." },
+               { "source": "npm_npx", "state": "inDomain", "snapshotTakenAt": null, "T": null, "K": null, "J": null, "H": null, "a": 0, "b": 0, "slotCount": 0, "doneCount": 0, "snapshotDate": null, "settlementDate": null, "unattributableCount": 0, "lastJudgmentAt": "..." },
+               { "source": "pipx_run", "state": "outOfDomain", "snapshotTakenAt": null, "T": null, "K": null, "J": null, "H": null, "a": 0, "b": 0, "slotCount": 0, "doneCount": 0, "snapshotDate": null, "settlementDate": null, "unattributableCount": 0, "lastJudgmentAt": "..." },
+               { "source": "brew_downloads", "state": "inDomain", "snapshotTakenAt": null, "T": null, "K": null, "J": null, "H": null, "a": 0, "b": 0, "slotCount": 0, "doneCount": 0, "snapshotDate": null, "settlementDate": null, "unattributableCount": 0, "lastJudgmentAt": "..." },
+               { "source": "cargo_registry_cache", "state": "inDomain", "snapshotTakenAt": null, "T": null, "K": null, "J": null, "H": null, "a": 0, "b": 0, "slotCount": 0, "doneCount": 0, "snapshotDate": null, "settlementDate": null, "unattributableCount": 0, "lastJudgmentAt": "..." },
+               { "source": "pnpm_store", "state": "outOfDomain", "snapshotTakenAt": null, "T": null, "K": null, "J": null, "H": null, "a": 0, "b": 0, "slotCount": 0, "doneCount": 0, "snapshotDate": null, "settlementDate": null, "unattributableCount": 0, "lastJudgmentAt": "..." },
+               { "source": "bun_cache", "state": "outOfDomain", "snapshotTakenAt": null, "T": null, "K": null, "J": null, "H": null, "a": 0, "b": 0, "slotCount": 0, "doneCount": 0, "snapshotDate": null, "settlementDate": null, "unattributableCount": 0, "lastJudgmentAt": "..." } ],
   "settlement": { "producedAt": null, "reportId": null },
-  "previousRound": { "round": 1, "source": "uv_cache", "sample": 11, "total": 12,
+  "previousRound": { "round": 1, "source": "uv_cache", "sample": 11, "total": 12,   // 取值池（按 `Source.allCases` 序）：uv_cache / npm_npx / pipx_run / brew_downloads / cargo_registry_cache / pnpm_store / bun_cache
                      "settledAt": "2026-11-08T09:12:00Z" },
   "note": "T / H / K / J 的 null 有明确语义：T=null 表示本轮尚未取快照（M3：T 待重取），H=null 随之；K/J=null 表示本轮报告尚未产出（M3：报告产出前不存在）。写 0 是错值：H=min(30,0)=0 会让门槛恒过，界面也会显示假 0。
   "bytes": { "header": 0, "segTable": 0, "payload": 0 }
@@ -317,7 +319,7 @@ Residue.app（单进程，登录项 SMAppService.mainApp，菜单栏常驻）
 | 项 | 说明 |
 |---|---|
 | 语义 | **被结算的那一轮**的未达标结论（轮次 / 来源 / `K` / `T` / 冻结时刻）。**不是**「当前轮次 − 1」——载体里的记录才是事实，推算会与事实分叉 |
-| 取值 | 判定域内按 `Source.allCases` 序**首个** `K < H` 的来源（`uv_cache` → `npm_npx`）；**不合成合计值**（不变量③） |
+| 取值 | 判定域内按 `Source.allCases` 序**首个** `K < H` 的来源（`uv_cache` → `npm_npx` → `brew_downloads` → `cargo_registry_cache`；域外三来源 `pipx_run` / `pnpm_store` / `bun_cache` 不参与本判定）；**不合成合计值**（不变量③） |
 | 何时写 | **本轮结算未达标 ⇒ 自动开下一轮时**，由本轮结算值写入并**覆盖**旧记录（PRD v5.6 :69 ③「直到下一轮开轮时才由本轮结算值替换」） |
 | 何时清 | **不清**。应用版本变更路径同样**保留**（PRD v5.6 :107「应用版本变更不产生新轮次」⇒ 上一轮的冻结结论仍然成立） |
 | 兼容 | **可选字段**：`encodeIfPresent` ⇒ 为 `nil` 时**不写该键**；`decodeIfPresent` ⇒ 旧载体（**无该键**）解为 `nil` 而非解码失败 ⇒ **升级即判 `E-304` 的风险不存在** |
@@ -325,11 +327,11 @@ Residue.app（单进程，登录项 SMAppService.mainApp，菜单栏常驻）
 
 **四条硬约束（v1.0 三条缺陷的修法）**：
 
-1. **段序固定**：`sources` 是**数组**，顺序 = `Source.allCases` 的**声明序**（`uv.cache`, `npm.npx`, `pipx.run`），**不用 `Dictionary`**（Swift 每进程随机哈希种子 → 段序漂移 → 读方串段）。每个来源**四段**（schema 2 起：`F` → `C_done` → `Slots` → `Snapshot`；schema 1 为三段，前三位相同），段表里带 `(kind, sourceIndex)`，**读方按 `(sourceIndex, kind)` 索引，不按位置猜**。
+1. **段序固定**：`sources` 是**数组**，顺序 = `Source.allCases` 的**声明序**（`uv_cache`, `npm_npx`, `pipx_run`, `brew_downloads`, `cargo_registry_cache`, `pnpm_store`, `bun_cache`），**不用 `Dictionary`**（Swift 每进程随机哈希种子 → 段序漂移 → 读方串段）。每个来源**四段**（schema 2 起：`F` → `C_done` → `Slots` → `Snapshot`；schema 1 为三段，前三位相同），段表里带 `(kind, sourceIndex)`，**读方按 `(sourceIndex, kind)` 索引，不按位置猜**。**〔v1.10 · CR-038〕新增来源只能尾部追加、不得插入中间**（声明序即段索引序；插入中间会让存量载体的段索引整体错位 ⇒ 误判数 `a` 归到错误的来源上）；**已发布的 `rawValue` 不可改**。
 2. **段长恒由 `slotCount` 决定，与置位情况无关**：`F` 段长 `= ceil(slotCount/8)`。**`v1.0` 若按「已置位数」算长度，则 35,500 条「有引用未置位」的候选会让段短 4,436 B，读方会把 `C_done` 的头当位图尾吃掉** → 加载期断言 `bitmapBytes == (slotCount + 7) / 8`，不等即 `E-304`。
 3. **加载期校验三连**（尺寸公式必须写全——v1.2 的「`Σ段长 + 头部长 == 文件长 − 8`」漏算了 4 B 的 `segCount` 与段表自身，按字面实现**每份合规文件都会判 `E-304`**）：
-   - ① **尺寸恒等式**：`fileLen == 4(magic) + 4(schemaVersion) + 4(headerLen) + headerLen + 4(segCount) + **24×segCount** + Σ(payload 段长) + 4(CRC)`。**段表项固定 24 B**（`offset u64(8) | length u64(8) | kind u8(1) | sourceIndex u8(1) | reserved u16(2) | reserved u32(4)`，全项 8 字节对齐、无隐式 padding），故 `segCount` 一读出来段表多长就确定了；**例：`headerLen=300`、`segCount=9`、`Σpayload=1000` → `4+4+4+300+4+216+1000+4 = 1536 B`**（v1.3 写 `16×segCount` 与同句字段相加 24 B 矛盾，按字面实现每份合规文件仍会判 `E-304`）；
-   - **〔v1.9 · CR-031〕段数随 schema 变**：上例是 **schema 1（每来源三段）** 的算例，字面保留；schema 2 每来源四段 → `segCount = 12`（段表 `24×12 = 288 B`）。**尺寸恒等式本身不变**，只换 `segCount` 与 `Σ(payload 段长)` 两项；
+   - ① **尺寸恒等式**：`fileLen == 4(magic) + 4(schemaVersion) + 4(headerLen) + headerLen + 4(segCount) + **24×segCount** + Σ(payload 段长) + 4(CRC)`。**段表项固定 24 B**（`offset u64(8) | length u64(8) | kind u8(1) | sourceIndex u8(1) | reserved u16(2) | reserved u32(4)`，全项 8 字节对齐、无隐式 padding），故 `segCount` 一读出来段表多长就确定了；**〔v1.10 · CR-038〕现役算例（schema 2 · 7 个来源 × 四段 ⇒ `segCount = 28`，段表 `24×28 = 672 B`）：`headerLen=300`、`segCount=28`、`Σpayload=1000` → `4+4+4+300+4+672+1000+4 = 1992 B`**；**存量算例（schema 1 · 3 个来源 × 三段 ⇒ `segCount = 9`，字面保留）：`headerLen=300`、`segCount=9`、`Σpayload=1000` → `4+4+4+300+4+216+1000+4 = 1536 B`**（v1.3 写 `16×segCount` 与同句字段相加 24 B 矛盾，按字面实现每份合规文件仍会判 `E-304`）；
+   - **〔v1.9 · CR-031〕段数随 schema 变**：上例是 **schema 1（每来源三段）** 的算例，字面保留；schema 2 每来源四段 → 3 个来源时 `segCount = 12`（段表 `24×12 = 288 B`）；**〔v1.10 · CR-038〕来源扩到 7 个 ⇒ `segCount = 28`**（7 × 四段，段表 `24×28 = 672 B`）。**尺寸恒等式本身不变**，只换 `segCount` 与 `Σ(payload 段长)` 两项；**`schemaVersion` 仍为 2`**（只加来源、不加段种类 ⇒ 版本不升，见 §10.3「新增来源」行）；
    - ② `offset + length` 不越界、段间不重叠、`offset ≥ 段表末尾`；
    - ③ **CRC32 一致**（CRC 覆盖 `header + segTable + payload`，不含 magic / 长度字段 / CRC 自身）。
    任一失败 → `E-304`，**不猜、不部分加载**。
@@ -369,10 +371,10 @@ Residue.app（单进程，登录项 SMAppService.mainApp，菜单栏常驻）
 
 | # | 字段 | 类型 | 空值规则 |
 |---|---|---|---|
-| 1 | `source` | enum(`uv.cache`/`npm.npx`/`pipx.run`) | 不允许空 |
+| 1 | `source` | enum(`uv_cache`/`npm_npx`/`pipx_run`/`brew_downloads`/`cargo_registry_cache`/`pnpm_store`/`bun_cache`)（**7 个 rawValue**，与 `Source.allCases` 一一对应） | 不允许空 |
 | 2 | `birthtime` | ISO8601（毫秒） | 不适用 + 原因 |
 | 3 | `l1Conclusion` | enum(`regenerable`/`notRegenerable`/`undetermined`) | 不适用 + 原因 |
-| 4 | `l2Signals` | 四组信号各 `value + verdict` | 本期两组无通道 → 「不适用 + 该来源无 L2 观测通道」 |
+| 4 | `l2Signals` | 四组信号各 `value + verdict` | 本期两组无通道 → 「不适用 + 该来源无 L2 观测通道」；**〔v1.10 · CR-038〕逐源登记**：七个来源**各自**登记有无 L2 观测通道，**不得把「本期无通道」写成全来源合一的结论** |
 | 5 | `l0CheckAt` | `{first, second}` 两子值 | `second = "不适用 + 未进入删除流程"` |
 | 6 | `ruleHit` | `{ruleId, ruleVersion}` | 不适用 + 原因 |
 | 7 | `executionAction` | enum(`rename_to_trash`/`none`) | `none` 是值，非空 |
@@ -468,7 +470,7 @@ Residue.app（单进程，登录项 SMAppService.mainApp，菜单栏常驻）
 | `ENOENT`（不存在） | 检查来源路径（升级后目录可能变了） | 错误 | — |
 | `EACCES`（存在但读不到） | 去授权 | **无权限** | 归成一类只能取「错误」→ **AC-14 第一类的「所缺权限 + 授权指引条目 ID」永远不出现** |
 
-**判定实现必须在第一道映射上分开**，否则后面怎么改文案都补不回来。落地位置：`ScanEngine.ScanError.classify(path:error:)`。
+**判定实现必须在第一道映射上分开**，否则后面怎么改文案都补不回来。落地位置：`ScanEngine.ScanError.classify(path:error:)`。**〔v1.10 · CR-038〕七个来源各自走这道第一道映射**（`uv_cache` / `npm_npx` / `pipx_run` / `brew_downloads` / `cargo_registry_cache` / `pnpm_store` / `bun_cache`）——**规则不变**（`ENOENT` → `E-101` / `EACCES` → `E-108`），但**一个来源的结论不得外推到另一个来源**（`~/.cache` 的结论不可外推到 `~/.cargo/registry`）。
 
 > **⚠️ 实现层已记录一个静默错**：`(error as NSError).code` 在 `NSCocoaErrorDomain` 下**不是 errno**（实测 `chmod 000` → code 257，underlying `NSPOSIXErrorDomain 13`；不存在 → code 260，underlying `NSOSStatusErrorDomain -43`）。直接比较 `code == EACCES` 永远为 false → 全部落兜底 → `E-108` 一次都不抛，且无任何报错。正确判法是三级（POSIX 域 → underlying 的 POSIX 域 → Cocoa 码映射），见 `DiagnosticCodeTests.testClassifyEACCESAsDenied`（用真实 `chmod 000` 复现）。
 
@@ -576,26 +578,26 @@ Residue.app（单进程，登录项 SMAppService.mainApp，菜单栏常驻）
 | 状态载体 | 见 §12.3（**〔v1.9 · CR-031〕约 640 MB 量级**） | M4 |
 | 记录目录 | 可回收字节 < 200×10⁶（14 日内执行记录豁免） | N7 / M6 |
 
-### 7.2 全量扫描预算（`V8 = 328 万` 待确认）
+### 7.2 全量扫描预算（`V8 ≈ 342 万`〔v1.10 · CR-038：328 万 → 约 342 万〕待确认）
 
 | 阶段 | 量 | 单价（保守） | 预算 |
 |---|---|---|---|
-| `readdir` 遍历（两阶段之一） | 328 万条目 | **30 k 条/s 是冷缓存下限**（warm 可达 60–80 k） | **109 s** |
-| `DT_UNKNOWN` 补 `lstat` | ≈ 1% = 3.3 万 | 15 µs | 0.5 s |
+| `readdir` 遍历（两阶段之一） | **约 342 万条目**〔v1.10 · CR-038：328 万 → 约 342 万（新增四来源的遍历条目 ≈ 14.3 万：`pnpm_store` ≈ 12.9 万 + `bun_cache` ≈ 1.3 万 + `cargo_registry_cache` 870 + `brew_downloads` 193，**开发机实测 2026-11-19**；**基线 328 万本身仍是未实测的规模假设**，见 §13 V8）—— ★ **本表按 `readdir`「条目」口径计（文件 + 目录 + 符号链接）**；PRD v5.6 `:1213` 按「**文件**」口径记 ≈ **341 万**（新增 ≈ 129,032 文件），两者差额即目录数，不是数字冲突〕 | **30 k 条/s 是冷缓存下限**（warm 可达 60–80 k） | **114 s**（342 万 ÷ 30 k） |
+| `DT_UNKNOWN` 补 `lstat` | ≈ 1% = **3.4 万**〔v1.10 · CR-038：随总量 328 万 → 约 342 万〕 | 15 µs | 0.5 s |
 | `getattrlistbulk`（命中路径） | ≤ 30 万 | 3 µs/条 | 0.9 s |
 | 逐候选 `lstat`（symlink / 真实路径） | ≤ 30 万 | 12 µs | 3.6 s |
 | L0 判定（建倒排 + 查表） | 同 uid 进程 ~600 × fd 120 = 7.2 万 fd | 15 µs/fd | 1.5 s |
 | 归因 / 差分 / 落盘 | 30 万候选 | — | 2 s |
-| **合计** | | | **≈ 118 s** |
+| **合计** | | | **≈ 123 s**〔v1.10 · CR-038：随总量 328 万 → 约 342 万，表内逐行相加 114 + 0.5 + 0.9 + 3.6 + 1.5 + 2 = **122.5 s**，取整 ≈ 123 s〕 |
 
-**p95 余量 ≈ 5×**。该推导是**估算**，唯一裁判是 AC-20 的实测用例。
+**p95 余量 ≈ 4.9×**（600 s ÷ 123 s）〔v1.10 · CR-038：随合计 118 s → 123 s 而由 ≈ 5× 微降〕。该推导是**估算**，唯一裁判是 AC-20 的实测用例。
 
 ### 7.3 增量扫描（**v1.0 的「目录 mtime 变化则重扫」会造成退化，已改**）
 
 - **v1.0 的缺陷**：`uv` / `npm` 的子树目录**天天变**（每次装包都动 `archive-v0` 与 `_npx` 的 mtime）→ 「mtime 变则重扫该目录」实际退化为「重扫整个子树」，30–120 s，超 N1「持续 ≤ 30 s」5–20 倍。
-- **改为**：增量**只做两件事**——① 对**已登记候选**（`slotTable` 内）批量重取属性，判断是否失联 / 是否被持有；② 对**来源根 + 一级子目录**做 `readdir` 计数粗差（`direntCount` 与上次比对，**不用 mtime**）。
+- **改为**：增量**只做两件事**——① 对**已登记候选**（`slotTable` 内）批量重取属性，判断是否失联 / 是否被持有；② 对**来源根 + 一级子目录**做 `readdir` 计数粗差（`direntCount` 与上次比对，**不用 mtime**）。**〔v1.10 · CR-038〕已知缺口（如实登记）**：上述增量手段对 `pnpm_store` / `cargo_registry_cache` 的**深目录 + 内容寻址散列布局**几乎失效 ⇒ 计数粗差恒为「不变」⇒ 增量**发现不了新候选**；**本期以全量扫描为准**，新来源的单列增量策略另开变更单。
 - **明确的能力边界（如实登记）**：增量**不负责发现深层新候选**；新候选由每日全量（N3 默认每日 1 次）或每 7 天全量（N3 建议值）发现。**后果**：新装的包可能要到下一次全量才进清单。
-- **预算**：30 万候选 × 3 µs ≈ 0.9 s + 根目录 `readdir`（约 10 万 dirent）≈ 3 s → **< 10 s**，满足「持续 ≤ 30 s」。
+- **预算**〔v1.10 · CR-038 重估〕：30 万 → **约 30.1 万**候选 × 3 µs ≈ **0.9 s**（**不变** —— 新增四来源只增约 1,063 条候选：`cargo_registry_cache` 868 个 `.crate`、`brew_downloads` 193 个 bottle、`pnpm_store` / `bun_cache` 各 1 个整块）+ 根目录 `readdir` 的**来源根由 3 个增至 7 个**（约 10 万 dirent ≈ 3 s —— **新增四个来源根的 dirent 数未实测，此处沿用旧值，待实测校正**）→ **< 10 s**，满足「持续 ≤ 30 s」。
 
 - **快照必须由 `full` 取（客户端第 2 轮 B1，v1.2 新增）**：**开轮后的第一次扫描强制 `mode = full`**；在该次之前若发生 `incremental`（例：版本变更后调度器先触发了增量），**不取快照、`T` 保持「待重取」**。理由：M3 规定 `T` 的唯一来源是「本轮首次成功扫描」的快照；若该次是增量，`T` 会由**部分候选集**确定 → 系统性偏小且**静默**（IF-02 的一致性断言只比「同一次扫描」，查不出）→ 新候选在 `F` 里可观测天数被截短 1–6 天 → `a` 少记、门槛朝「更易点亮」方向松。
 - **与 M1 的边界（不改冻结基线）**：`incremental` 仍是「成功扫描」，**仍正常 +1 计数日**（M1 未区分 full/incremental，本方案不擅自区分）。本节只约束「**哪一类扫描可以产生快照**」，不改变计数日口径。
@@ -608,7 +610,7 @@ Residue.app（单进程，登录项 SMAppService.mainApp，菜单栏常驻）
 | 100 万 | 125 KB | ~0 | 112 MB | ≈ 100 MB | **≈ 212 MB** |
 | 300 万 | 375 KB | ~0 | 336 MB | ≈ 300 MB | **≈ 636 MB** |
 
-112 B = 路径均长 98 B + `slot 4` + `birthtime 8` + `pathLen 2`（APFS 上 `~/.cache/uv/archive-v0/<64 位哈希>/<文件名>` 实测 70–110 B）。
+112 B = 路径均长 98 B + `slot 4` + `birthtime 8` + `pathLen 2`（APFS 上 `~/.cache/uv/archive-v0/<64 位哈希>/<文件名>` 实测 70–110 B）。**〔v1.10 · CR-038〕适用边界（如实登记）**：98 B 的路径均长**只由 `~/.cache/uv` 样本测得**；`cargo_registry_cache`（`~/.cargo/registry/cache/<registry>/<crate>/<file>`）与 `pnpm_store`（`~/Library/pnpm/store/v3/files/<2 位>/<64 位哈希>`）的路径**显著更长** ⇒ 这两个来源上 **`112 B/条` 假设失效** ⇒ `336 MB` / `约 640 MB 量级` 须**逐源重测校正**；**本版不编新数字** —— 缺 cargo / pnpm 的路径均长实测样本。
 
 **〔v1.9 · CR-031〕载体规模口径 = 「约 640 MB 量级」**（PRD v5.6 · M4；原「约 1 MB 量级」只对 `F` 位图成立，**已实删**）。快照成员集合每条 = `birthtime 8` + `pathLen 2` + 路径均长 98 B ≈ **100 B/条**（**不含 `slot`——它不是位槽**）。**它不属 M4 的四项误判状态字段**（四项的口径与清零边界不变），但**随 `T` 落载体**（CR-031 裁决①）。
 
@@ -643,7 +645,7 @@ Residue.app（单进程，登录项 SMAppService.mainApp，菜单栏常驻）
 
 | # | 要点 | 一句话 |
 |---|---|---|
-| S-03 | 符号链接穿越 | 候选先 `lstat` 判 `S_ISLNK`；真实路径不在允许根内 → **不删**，记 `E-204`（**归 §8「错误」类，不归「无权限」**）。否则 `~/.cache/uv` 里一个指向 `~/Documents` 的 symlink 就能删个人文件，直接违反 AC-07 |
+| S-03 | 符号链接穿越 | 候选先 `lstat` 判 `S_ISLNK`；真实路径不在允许根内 → **不删**，记 `E-204`（**归 §8「错误」类，不归「无权限」**）。否则 `~/.cache/uv` 里一个指向 `~/Documents` 的 symlink 就能删个人文件，直接违反 AC-07 |**〔v1.10 · CR-038〕允许根判定必须逐源精确**：`cargo_registry_cache` 内确有 symlink（`~/.cargo/bin` 是 shim）、`pnpm_store` 有 `node_modules` 链接结构 ⇒ **不得用「同一来源根前缀」代替逐源允许根判定**。
 | S-04 | 跨卷 / 硬链接 | `EXDEV` → 拒绝，**绝不退化为 copy+unlink**（等于 `rm`，违反 N5）；`st_nlink > 1` → 标「硬链接，回收量不符预期」，只删该链接 |
 | S-05 | 二次检查 | AC-17 的 `second` 检查与 `rename` 在**同一临界区**；产物落 `l0CheckAt.second`；**排除自身 pid** |
 | S-06 | 脱敏 | 导出替换 `<user>/<path>/<host>`，替换后原文出现次数 = 0 断言 |
@@ -656,7 +658,7 @@ Residue.app（单进程，登录项 SMAppService.mainApp，菜单栏常驻）
 ## 10. 发布、回滚与兼容
 ## 9.5 测试注入点约定（K2 质量组要求 · **只影响可观测字段，不改判定逻辑**）
 
-> **为什么需要**：观察期已满 = **14 个计数日 = 14 个日历日**（M1：一天最多 +1），macOS 无电量注入点，本期三类来源无 L2 观测通道。**没有注入点，AC-02 / 04 / 08 / 09 / 20 的用例构造前置根本跑不出来**，写出来就是恒真。
+> **为什么需要**：观察期已满 = **14 个计数日 = 14 个日历日**（M1：一天最多 +1），macOS 无电量注入点，本期**七类来源逐源登记**为「无 L2 观测通道」（**逐源表述，不合并成一条全来源结论**）。**没有注入点，AC-02 / 04 / 08 / 09 / 20 的用例构造前置根本跑不出来**，写出来就是恒真。
 > **边界（写死，不可放宽）**：① **只在测试构建生效**（`#if DEBUG` + 测试构建），Release 构建**必须剥离**（§10.1 增发布准入检查）；② **只影响可观测字段的取值**，**不得改变任何判定逻辑**（`a` / `b` / `K` / `J` / `H` / 门槛的算法一字不改）；③ **不得进入任何持久化落盘物**（`state.residue` 与 `.jsonl` 里不得出现注入值本身，只允许出现它影响后的正常读数）。
 
 | 注入点 | 方式 | 影响的可观测量 | 不得影响 |
@@ -664,7 +666,7 @@ Residue.app（单进程，登录项 SMAppService.mainApp，菜单栏常驻）
 | **时钟 / 观察期** | 环境变量 `RESIDUE_TEST_CLOCK`（ISO 时刻）、`RESIDUE_TEST_COUNTED_DAYS`（直接置本轮计数日） | `Metrics.ObservationClock` 的当前时刻与计数日 → 观察期是否已满、剩余天数 | 七量的算法 |
 | **电量 / 电源** | 环境变量 `RESIDUE_TEST_POWER`（`normal` / `onBattery` / `lowBattery`） | `Scheduler` 的低电量分支 → 是否 `E-103`、是否暂停定时任务 | 扫描结果本身 |
 | **L2 推断值** | 环境变量 `RESIDUE_TEST_L2`（来源名 → 推断值 JSON） | AC-02 判据 3 的读数（「可删除量」随 L2 变化） | 任何门槛（L2 本期不构成门槛） |
-| **来源枚举** | 环境变量 `RESIDUE_TEST_SOURCES`（封闭枚举子集） | 判定域成员 → 空域 / 新入域来源 / `pipx` 行 | 候选的发现逻辑 |
+| **来源枚举** | 环境变量 `RESIDUE_TEST_SOURCES`（封闭枚举子集：`uv_cache` / `npm_npx` / `pipx_run` / `brew_downloads` / `cargo_registry_cache` / `pnpm_store` / `bun_cache`，共 7 个） | 判定域成员 → 空域 / 新入域来源 / **域外只报告行** | 候选的发现逻辑 |
 | **候选注入** | 环境变量 `RESIDUE_TEST_CANDIDATES`（路径列表 + 期望 `T`/`K`/`J`） | `T` / `K` / `J` 的快照与归因 | `a` 的判据（仍由真实 L0 判定产生） |
 
 **Release 剥离检查（§10.1 第 10 条）**：Release 构建产物中 `RESIDUE_TEST_` 前缀字符串的**出现次数 = 0**（`strings` 扫描）。
@@ -711,6 +713,7 @@ Residue.app（单进程，登录项 SMAppService.mainApp，菜单栏常驻）
 |---|---|
 | 相同 | 直接加载 |
 | **低一档（schema 1 → 2，CR-031 升级）** | **就地升级，不丢弃载体**：① 段表由每来源三段扩到四段（`0x04 Snapshot` 追加在 `Slots` 之后），旧载体无该段 → **快照成员集合为空**；② **观察期从头开始**（计数日归零 + 起算点重置 + `T` 待重取 + `K` / `J` 清零 + 结算凭证清零 + `b` 清零 + `a` 的四项载体清零）；③ **用户设置类字段（如 `autoDeleteEnabled`）原样保留**（**不得造全新 `StateHeader()`**）；④ 升级后**首次成功扫描重新取快照**；⑤ 空间预检同「低」行 |
+| **新增来源（同一 schema 版本 · CR-038 扩展来源集）** | **就地兼容，不升 schema 版本**（`schemaVersion` 仍为 2）：① **新程序读旧载体**（旧载体只有 3 个来源的段）⇒ 按 `(sourceIndex, kind)` 索引，**新来源无段 ⇒ 跳过**（**当前实现**：段长一致性校验对「有头部条目、无段」的来源 `continue`，**不判 `E-304`**）；② **旧程序读新载体**（段表含 `sourceIndex` 3–6，超出旧程序的来源集）⇒ **`E-304`（fail-closed：不写、不清、不迁移）**；③ 存量载体首次成功写回后段数 `12 → 28`（段表 `288 B → 672 B`）；④ **新来源只能追加在 `Source.allCases` 末尾**（插入中间会让存量载体的段索引整体错位 ⇒ 误判数 `a` 归到错误的来源上），**已发布的 `rawValue` 不可改**。★ **待裁决**：若将来把「有头部条目、无段」收紧为一律 `E-304`，则 ① 由「跳过」改为「拒绝加载」，本行须同步改写。 |
 | 低（旧数据 + 新程序） | ① **空间预检**：需 `≥ 3 × 状态文件 + 64 MB`（峰值 = 原件 + `.bak` + 新件，**v1.1 的 `2×+20%` 少算了新件 → 336 MB 状态下缺口 200+ MB，迁移末段必 `ENOSPC`**），不足 → `E-305` 并给出所需 MB；② 写 `state/migrating.json`（`{step, fromSchema, toSchema, bakPath, startedAt}`，**原子 + fsync**）；③ 写 `state.residue.bak`（原子）；④ 迁移；⑤ **成功后删 `.bak` 与 `migrating.json`**；⑥ 失败 → 从 `.bak` 原子恢复 + **`E-308`**（恢复成功）；**无可用 `.bak`** → `E-302`；**恢复本身失败** → `E-306` + 进入只读 |
 | 高（新数据 + 旧程序） | **只读模式**（`E-301` 仅提示） |
 | 损坏（CRC/结构失败） | 先备份为 `state.residue.corrupt`，再报 `E-302`；**不静默新建空状态**（那会把 `a` 清零，等于放行） |
@@ -754,7 +757,7 @@ Residue.app（单进程，登录项 SMAppService.mainApp，菜单栏常驻）
 |---|---|---|
 | M1 计数日 / 轮次 | `Metrics.ObservationClock` | ✅ |
 | M2 `H = min(30,T)` | `Metrics.Threshold.h` | ✅ |
-| M3 `K + J = T` / 取快照时点 | `Metrics` + `StateStore` | ✅（含 `pipx` 不套恒等式） |
+| M3 `K + J = T` / 取快照时点 | `Metrics` + `StateStore` | ✅（含 **3 个域外只报告来源**：`pipx_run` / `pnpm_store` / `bun_cache` 不套恒等式） |
 | M4 `a`（`F ∩ P_now − C_done`） | `Metrics.MissCounter` + `StateStore` | ✅ 8 场景 |
 | M5 `b` | `Metrics.CheckCounter` | ✅ |
 | M6 可回收字节 | `Metrics.RetentionMath` + `Retention` | ⬜ 算式已测，回收未实现 |
@@ -786,9 +789,9 @@ Residue.app（单进程，登录项 SMAppService.mainApp，菜单栏常驻）
 
 ### 12.3 已知能力边界
 
-1. **位槽表体量**（§7.4）：3M 候选 ≈ **336 MB** 状态文件；**〔v1.9 · CR-031〕快照成员集合入载体后再加 ≈ 300 MB → 载体 ≈ 636 MB（量级：约 640 MB 量级）**。**D-03 已由 CR-031 裁决①关闭**（**接受载体变大**）——**取代 CR-023 的旧限定**（那条把「约 1 MB 量级」限定为「只算 `F` 位图、位槽表另计」，现已随 PRD v5.6 · M4 的口径修订一并**已实删**）；PRD v5.6 · M4 的载体规模口径已改为「约 640 MB 量级」。
+1. **位槽表体量**（§7.4）：3M 候选 ≈ **336 MB** 状态文件；**〔v1.9 · CR-031〕快照成员集合入载体后再加 ≈ 300 MB → 载体 ≈ 636 MB（量级：约 640 MB 量级）**。**D-03 已由 CR-031 裁决①关闭**（**接受载体变大**）——**取代 CR-023 的旧限定**（那条把「约 1 MB 量级」限定为「只算 `F` 位图、位槽表另计」，现已随 PRD v5.6 · M4 的口径修订一并**已实删**）；PRD v5.6 · M4 的载体规模口径已改为「约 640 MB 量级」。**〔v1.10 · CR-038〕载体体积随**候选条数**变化、**不随来源数变化** ⇒ 3M 候选的 **336 MB** 与载体 **636 MB（量级：约 640 MB 量级）** 口径不变**；来源集 3 → 7 只带来两处增量：① 段表 `288 B → 672 B`（+384 B，可忽略）；② **每条的字节口径**（§7.4 的 `112 B` 路径均长样本只覆盖 `~/.cache/uv` ⇒ 新来源须逐源重测，见 §7.4 ★ 登记）⇒ **量级仍为约 640 MB 量级**。
 2. **`P_now` 的判定域 = 同 uid 进程（按 ADR-03 表述，不另立第二套口径）**：其他用户进程（含 root）持有的文件**本产品看不到**（`EPERM`，FDA 不解锁）。**正确说法是「不可见」，不是「无法判定」**——`a` 与删除判定都不依赖跨 uid 结果：① `a` 只用同 uid 的 `F ∩ P_now`，跨 uid 不可见只会「漏保护」不会「误计」；② 举证链 / 报告 / 界面的 L0 结论**只许写「本用户进程无引用」**；③ 候选所在目录**其他用户可写**时，该来源**不进自动删除候选集**（ADR-03 保守化补丁）。→ 需在 M4 补一句，**偏差 #7（CR-022）**。
-3. **增量不发现深层新候选**（§7.3）→ 新装包可能等到下一次全量才进清单。
+3. **增量不发现深层新候选**（§7.3）→ 新装包可能等到下一次全量才进清单。**〔v1.10 · CR-038〕新增来源必须全部进入 `sourceRootReadable` 探测集合**（`brew_downloads` / `cargo_registry_cache` / `pnpm_store` / `bun_cache` 逐个探测）：**未被探测 ≠ 不可读** —— 漏一个即该来源的 `undetermined` 永远判不出。
 4. **`a` 在目标机器上可能因真实缓存复用 ≥ 1** → 门槛可能长期不可满足（C2 计数制裁决的直后果，已裁决不重开）；**对外文案不得宣称「一定能点亮」**。
 
 ---
@@ -804,13 +807,13 @@ Residue.app（单进程，登录项 SMAppService.mainApp，菜单栏常驻）
 | V5 | 废纸篓 rename 目标 | IF-07 | 常量 |
 | V6 | 「持有」判据 | ADR-03 | 判据集合 | **〔K2 裁定 · 定稿〕V6 = 「该候选的 `(dev, ino)` 出现在任一同 uid 进程的 fd 集合中，或候选（目录）是任一同 uid 进程 cwd 的祖先路径」** |
 | V7 | 增量触发条件 | §7.3 | 调度器 |
-| V8 | 328 万规模假设 | §7.2 | 仅影响推导 |
+| V8 | 约 342 万规模假设〔v1.10 · CR-038：328 万 → 约 342 万；**本身仍是未实测的规模假设**〕 | §7.2 | 仅影响推导 |
 
 ---
 
 ## 14. 本方案的自我限制
 
-1. **未做真机实测**：§7.2 的 118 s 是推导值；AC-20 实测用例是唯一裁判。
+1. **未做真机实测**：§7.2 的 123 s 是推导值；AC-20 实测用例是唯一裁判。
 2. **未覆盖 7 页界面细节**：属设计基线（R1.5），本方案只保证「界面不自己算数」。
 3. **V2/V3/V5/V6/V7 不代填**：只留一处常量位。
 
@@ -961,7 +964,7 @@ Residue.app（单进程，登录项 SMAppService.mainApp，菜单栏常驻）
 
 | # | 异议 | 处置 |
 |---|---|---|
-| 1 | AC-19 命令白名单不封闭 | **给出封闭白名单**（6 条命令 + 参数形态 + 归属来源；`uv cache clean --dry-run` 明确**不纳入**）；白名单外 → `E-107`，不删除不点亮。**白名单本体见 K2 交底裁定 §二·异议 1** |
+| 1 | AC-19 命令白名单不封闭 | **给出封闭白名单**（**6 条命令**〔v1.10 · CR-038 重数后**仍为 6 条** —— 白名单**零扩张**，新增来源走固定路径、零探测〕+ 参数形态 + **归属来源按 7 类来源登记**：`uv_cache` / `npm_npx` / `pipx_run` / `brew_downloads` / `cargo_registry_cache` / `pnpm_store` / `bun_cache`（后三个**无放行命令**，走固定路径）；`uv cache clean --dry-run` 明确**不纳入**）；白名单外 → `E-107`，不删除不点亮。**白名单本体见 K2 交底裁定 §二·异议 1** |
 | 2 | AC-16 与 B-1「逐条覆盖」冲突 | **B-1 验收口径改**（交底单层面）：AC-16 挂「本期不交付」说明行；冻结 PRD 不动 |
 | 3 | V2 / V3 / V6 未定稿 | **V6 定稿**（§13）；**V2 / V3 待用户拍板**（业务取舍，非技术事实）——在拍板前，用例按「注入位 + 判据结构」冻结、数值后填 |
 | 4 | 缺三类注入点 | **新增 §9.5 测试注入点约定**（5 个注入点 + 三条不可放宽的边界）；§10.1 增第 10 条 Release 剥离检查 |
@@ -1050,7 +1053,7 @@ Residue.app（单进程，登录项 SMAppService.mainApp，菜单栏常驻）
 
 | K2 验收问 | 达成方式 | 断言位置 |
 |---|---|---|
-| ① 尺寸恒等式成立 | `fileLen == 4+4+4+headerLen+4+24×segCount+Σpayload+4`，并复算 §5.1 的算例（`headerLen=300, segCount=9, Σpayload=1000` → **1536 B**） | `testSizeIdentityHolds` / `testSectionFivePointOneWorkedExample` |
+| ① 尺寸恒等式成立 | `fileLen == 4+4+4+headerLen+4+24×segCount+Σpayload+4`，并复算 §5.1 的两个算例：现役（schema 2 · 7 来源 · `segCount=28`）`headerLen=300, segCount=28, Σpayload=1000` → **1992 B**；存量（schema 1 · 3 来源 · `segCount=9`）`headerLen=300, segCount=9, Σpayload=1000` → **1536 B** | `testSizeIdentityHolds` / `testSectionFivePointOneWorkedExample` |
 | ② 段长恒 = `ceil(slotCount/8)` | 位图长度**只由 `slotCount` 决定**（置 1 位与全置位产出**逐字节相同**的文件）；长度不符 → `E-304` | `testBitmapLengthDependsOnlyOnSlotCount` / `testBitmapLengthMismatchTriggersE304` |
 | ③ 短写 / ENOSPC 不 rename | 写 `.tmp` → `fsync` → **校验落盘长度 == 预期** → 不符则抛 `E-303` 且**不 rename**；另加空间预检（`E-305`） | `testShortWriteDoesNotReplaceGoodFile` |
 | ④ `T/H/K/J` 可为 null | `T/H/K/J` 为**可选**，`nil` 往返保持；**null ≠ 0**（写 0 会让 `H=min(30,0)=0` 门槛恒过） | `testNullableMetricsRoundTrip` / `testNullIsDistinctFromZero` |
@@ -1066,7 +1069,7 @@ Residue.app（单进程，登录项 SMAppService.mainApp，菜单栏常驻）
 
 ### 与 §5.1 的一致性
 
-- **段序固定** = `Source.allCases` 声明序，**不用 `Dictionary`**；读方按 `(sourceIndex, kind)` 索引，**不按位置猜**。
+- **段序固定** = `Source.allCases` 声明序，**不用 `Dictionary`**；读方按 `(sourceIndex, kind)` 索引，**不按位置猜**。**〔v1.10 · CR-038〕新增来源只能尾部追加、不得插入中间**（声明序即段索引序）；**已发布的 `rawValue` 不可改**。
   断言「同输入产出**逐字节相同**的文件」——Swift 每进程随机哈希种子，用 Dictionary 会让段序逐进程漂移。
 - **加载期校验三连**：尺寸恒等式 / 越界 + 重叠 + `offset ≥ 段表末尾` / CRC32 一致。任一失败 → `E-304`，**不猜、不部分加载**。
 - **CRC 覆盖 `header + segTable + payload`**，不含 magic / 长度字段 / CRC 自身。
@@ -1105,15 +1108,15 @@ Residue.app（单进程，登录项 SMAppService.mainApp，菜单栏常驻）
 
 ### A-8 · 上游只读命令 + 记录落盘（AC-19 / §5.4）
 
-**产出**：`Sources/ResidueCore/UpstreamCommand.swift`（白名单 + runner）+ `Sources/ResidueCore/RecordWriter.swift`（`scan.jsonl` / `execution.jsonl` / `evidence.jsonl`）+ `Tests/.../UpstreamAndRecordTests.swift`（15 测试）。
+**产出**：`Sources/ResidueCore/UpstreamCommand.swift`（白名单 + runner）+ `Sources/ResidueCore/RecordWriter.swift`（`scan.jsonl` / `execution.jsonl` / `evidence.jsonl`）+ `Tests/.../UpstreamAndRecordTests.swift`（**16 测试**〔v1.10 · CR-038 重数：必拒清单新增 3 条真删除命令的用例〕）。**交付物文件数不变** —— 白名单零扩张，无新增模块。
 
 #### 白名单是**封闭集合**，不是黑名单
 AC-19 要求「直接删文件的上游命令出现次数 = 0」——这是**全称命题**，只有白名单能证。判据 = **可执行名匹配 且 参数从头前缀匹配**：
 - 只按可执行名匹配不够——`uv cache dir`（放行）与 `uv cache clean`（必拒）是同一个可执行
 - 只按「参数包含」不够——`uv --verbose cache dir` 不该被当成白名单条目
 
-实测拦住的破坏性命令：`uv cache clean` / `uv cache prune` / `npm cache clean --force` / `brew cleanup` / `rm -rf` / `trash-put` / `mv` / `find -delete` / `sh -c "rm -rf"`。
-放行的只读命令：`uv cache dir` / `npm cache ls` / `npm config get cache` / `brew --cache` / `pipx list` / `pipx environment`。
+实测拦住的破坏性命令：`uv cache clean` / `uv cache prune` / `npm cache clean --force` / `brew cleanup` / **`pnpm store prune` / `bun pm cache rm` / `cargo cache --autoclean`**（〔v1.10 · CR-038〕新增来源的**真删除命令**，列此仅为**防止被误加进白名单**）/ `rm -rf` / `trash-put` / `mv` / `find -delete` / `sh -c "rm -rf"`。
+放行的只读命令：`uv cache dir` / `npm cache ls` / `npm config get cache` / `brew --cache` / `pipx list` / `pipx environment`。**〔v1.10 · CR-038〕新增来源的定位方式 = 固定路径、零探测、无放行命令**：`brew_downloads` → `brew --cache` 的输出目录 + `/downloads`（`brew --cache` 已在白名单内）；`cargo_registry_cache` → `~/.cargo/registry/cache`；`pnpm_store` → `~/Library/pnpm/store`；`bun_cache` → `~/.bun/install/cache`。★ `pnpm store path` **不入白名单**（固定路径已够用，不扩张白名单）。
 
 #### 两条不可妥协
 1. **被白名单拒绝的调用也必须产生一条记录** —— 否则「有人试图跑删除命令」这件事查不出来。
@@ -1171,13 +1174,13 @@ swift run ResidueApp --render-pages <dir>
 
 | 页 | 状态 | 核对到的要点 |
 |---|---|---|
-| ① 存储总览 | ✅ | 三区块横排，值为 `2.4 GB` / `860 MB` / `140 MB`（人可读），标签小字 + 数值 17 pt 有层级 |
-| ② 环境与候选 | ✅ | 每行「路径 + 参与度徽标 + 字节」；`可参与自动删除` 用信号色、`仅报告` 用次文字色；分页「第 1 / 3 页」 |
+| ① 存储总览 | ✅ | **七区块横排**〔v1.10 · CR-038：来源 3 → 7，**每区块一来源**〕，值为 `2.4 GB` / `860 MB` / `140 MB` / `620 MB` / `310 MB` / `540 MB` / `90 MB`（人可读，**七区块的取值须按重渲染核对**），标签小字 + 数值 17 pt 有层级；**〔v1.10 · CR-038〕实现侧连带**：`WiringSelfCheck.swift` 与 `PageModelBuilderTests.swift` 里的「区块数 == 3」硬断言须同步改为 7 |
+| ② 环境与候选 | ✅ | 每行「路径 + 参与度徽标 + 字节」；`可参与自动删除` 用信号色、`仅报告` 用次文字色；分页「第 1 / **N** 页」〔v1.10 · CR-038：**页数随候选量变化**、`N` 不写死 —— 每页 200 条（IF-06 `limit ≤ 200`），候选量随来源集变化 ⇒ 渲染前按实际候选量算出 `N`〕 |
 | ③ 清理策略 | ✅ | 开关本体可见（关态灰轨道）；未达项 `第 2 轮 · 观察期 5/14 天` 与剩余 `9 天` 同址；两个语义位分两张卡、不重叠 |
 | ④ 授权与隐私 | ✅ | 清除范围说明含「不重置观察期进度与 L0 误判记录」；主按钮信号色 |
-| ⑤ 观察期报告 | ✅ | 七列三行完整；③ 列两行冻结时点标注（`总量冻结：开轮时` / `样本冻结：报告产出时`）；页级「本轮可点亮：否」+「报告已产出」 |
+| ⑤ 观察期报告 | ✅ | **七列七行完整**〔v1.10 · CR-038：来源 3 → 7 ⇒ 行 3 → 7，**上限 7 行**（行集合是条件式的：判定域四类 + 域外三类中「本机候选总量 ≥ 1」者才占行 ⇒ 见 PRD v5.6 `:1094`）〕；★ **版面须复核**：一屏放不下 7 行时的处理留实施时复核，**本版不改版式契约**；③ 列两行冻结时点标注（`总量冻结：开轮时` / `样本冻结：报告产出时`）；页级「本轮可点亮：否」+「报告已产出」 |
 | ⑥ 确认清理 | ✅ | 危险色不可逆提示 + 两个 `.metric`（`12 条` / `296 MB`）+ 危险色主动作 |
-| ⑦ 举证链与日志 | ✅ | 三行三种徽标（可恢复 = 信号色 / 已恢复 / 已阻断）；`恢复` 只在「可恢复」行出现；底部**留存口径两行同址** |
+| ⑦ 举证链与日志 | ✅ | **七行三种徽标**〔v1.10 · CR-038：来源 3 → 7 ⇒ 举证链样本行 3 → 7，**每行一来源**，徽标种类不变〕（可恢复 = 信号色 / 已恢复 / 已阻断）；`恢复` 只在「可恢复」行出现；底部**留存口径两行同址** |
 
 ### A-9 遗留（**明确登记，不假装已覆盖**）
 
@@ -1259,14 +1262,14 @@ swift run ResidueApp --render-pages <dir>
 
 ### 25.3 裁定三：`undetermined` 的**定义域写死**（`degraded` 全局 vs 逐来源）—— 契约补写，不改 AC
 
-**问题**：`L0Probe` 只产一个全局 `degraded`（`Bool`）；`GateEvaluator` 的入参 `SourceGateInput.undetermined` 是**按来源**的。AC-08 ②″/②‴、AC-09 ④/③ 都要求「**某来源**未判定」与「**全部来源**未判定」可区分。当前没有任何一处把这个映射写死 → **TC-032 写成「`npm.npx` 一个来源未判定」，实现层无法给出。**
+**问题**：`L0Probe` 只产一个全局 `degraded`（`Bool`）；`GateEvaluator` 的入参 `SourceGateInput.undetermined` 是**按来源**的。AC-08 ②″/②‴、AC-09 ④/③ 都要求「**某来源**未判定」与「**全部来源**未判定」可区分。当前没有任何一处把这个映射写死 → **TC-032 写成「`npm.npx` 一个来源未判定」，实现层无法给出。****〔v1.10 · CR-038〕补充：`sourceRootReadable` 的探测集合必须覆盖**全部七个来源**（含新增的 `brew_downloads` / `cargo_registry_cache` / `pnpm_store` / `bun_cache`）—— 漏探测一个，该来源的 `undetermined` 就永远判不出来。
 
 **裁定（写死为唯一定义，随 v1.7 落实到 §4 IF-04 / IF-05 之间）**：
 
 ```
 undetermined[source] = true
   ⟺ ( sameUIDEnumeration == false )                      // 全局：全部来源都置 true
-    ∨ ( sourceRootReadable[source] == false && 成因 == EACCES )   // 逐来源：只置该来源
+    ∨ ( sourceRootReadable[source] == false && 成因 == EACCES )   // 逐来源：只置该来源   // 〔v1.10 · CR-038〕`sourceRootReadable` 必须覆盖全部七个来源
 ```
 
 - **全局枚举失败 → 全部来源 `undetermined`** → 页级取「否（**权限不足 · 未判定**）」（AC-09 优先级 ③）；
@@ -1406,7 +1409,7 @@ undetermined[source] = true
 - **改名检测不得依赖 inode**（inode 随改名即变，依赖它会把改名误判成失联）。
 - **同一 birthtime 命中多条时匹配必须唯一**（不唯一即判「无法归因」，**不得随意挑一条**）。
 - **无法归因的条数必须如实披露**（`unattributableCount`，**不并入已归因、不静默丢弃**）。
-- **恒等式**：`K + J = T`（`J = T − K` 派生；**同名重建命中计入 `J`**）；**`pipx.run` 不套该恒等式**（其 ③ 单元格须标注「**扫描时点值 · 非结算值**」）。
+- **恒等式**：`K + J = T`（`J = T − K` 派生；**同名重建命中计入 `J`**）；**域外三来源 `pipx_run` / `pnpm_store` / `bun_cache` 一律不套该恒等式**（其 ③ 单元格须标注「**扫描时点值 · 非结算值**」）。
 
 ### 26.3 `a` 写入路径与 `b` 累计
 
