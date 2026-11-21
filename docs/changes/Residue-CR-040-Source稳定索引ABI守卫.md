@@ -2,7 +2,7 @@
 
 > 状态：已实施（代码 + 守卫 + 自证随本 PR 提交）
 > 变更类型：契约层面的 **ABI 声明**（不改落盘格式、不改已有 `sourceIndex` 取值、不新增来源 case）
-> 影响面：`ResidueCore`（`Metrics.swift` / `ResidueStateFile.swift`）、`ResidueCoreTests`（新增 `SourceABITests.swift`）、单测数声明 555 → 559
+> 影响面：`ResidueCore`（`Metrics.swift` / `ResidueStateFile.swift`）、`ResidueCoreTests`（新增 `SourceABITests.swift`）、单测数声明 571 → 575
 > 风险等级：P0 —— 触碰不变量④「删之前先证明自己判得准」；破坏方式**不报错、不告警**，只是把 `a` 归错来源
 
 ---
@@ -108,8 +108,8 @@ public init?(stableIndex: UInt8) { /* allCases.first(where:)；未知 → nil */
 | `ResidueApp/Sources/ResidueCore/Metrics.swift` | 新增 `stableIndex` / `init?(stableIndex:)` |
 | `ResidueApp/Sources/ResidueCore/ResidueStateFile.swift` | 读写段索引改走 `stableIndex`；注释同步 |
 | `ResidueApp/Tests/ResidueCoreTests/SourceABITests.swift` | 新增（4 个用例） |
-| `CLAUDE.md` / `README.md` / `ARCHITECTURE.md`（×3） | 单测数 555 → 559 |
-| `.github/workflows/ci.yml` / `release.yml` | 单测数 555 → 559 |
+| `CLAUDE.md` / `README.md` / `ARCHITECTURE.md`（×3） | 单测数 571 → 575 |
+| `.github/workflows/ci.yml` / `release.yml` | 单测数 571 → 575 |
 
 不动的：`Source` 枚举成员与顺序、`rawValue`、`SourceRule`、载体格式、`sourceIndex` 取值。
 
@@ -126,7 +126,7 @@ public init?(stableIndex: UInt8) { /* allCases.first(where:)；未知 → nil */
 
 ## 六、验收判据
 
-1. `swift build` 通过；`swift test` 0 failures（559）。
+1. `swift build` 通过；`swift test` 0 failures（575）。
 2. **自证红**：把 `npmNpx` 与 `pipxRun` 换序 ⇒ `SourceABITests` 失败（贴输出见 §七）。
 3. **自证红（绕过）**：把写方改回 `Source.allCases.enumerated()` ⇒
    `testStateFileIndexesGoThroughStableIndex` 失败。
@@ -184,6 +184,31 @@ Executed 4 tests, with 0 failures (0 unexpected)
 EXIT=0
 
 swift test
-Executed 559 tests, with 0 failures (0 unexpected)
+Executed 575 tests, with 0 failures (0 unexpected)
 EXIT=0
 ```
+
+### 7.4 rebase 到 main（含 #8）后复跑
+
+§7.1–7.3 是分支刚建立时（基线 559）的实测。rebase 到 `fd45ee8` 后重做两组变异，命中面比原先更大 —— 换序后全量 575 个单测里 10 条断言失败、5 个用例变红；绕过写方后 2 条断言失败：
+
+```
+# 换序 npmNpx / pipxRun 后全量 swift test
+Executed 575 tests, with 10 failures (0 unexpected)
+EXIT=1
+失败用例：PageModelBuilderTests.testOverviewBlocksAggregatePerSource
+          SourceABITests.testSourceDeclarationOrderIsFrozenABI
+          SourceABITests.testStableIndexIsContiguousBijection
+          SourceExpansionTests.test_sourceRawValuesOfFirstThreeAreUnchanged
+          SourceExpansionTests.test_sourceRootsResolveProducesSevenRoots
+```
+
+```
+# 写方改回 Source.allCases.enumerated() 后全量 swift test
+SourceABITests.swift:105: error: XCTAssertTrue failed - 写方必须用 source.stableIndex 落盘段索引
+SourceABITests.swift:113: error: XCTAssertFalse failed - 发现 Source.allCases.enumerated() —— 段索引不得依赖声明序下标这个隐式巧合
+Executed 575 tests, with 2 failures (0 unexpected)
+EXIT=1
+```
+
+两处均已还原；还原后 `swift test` 575 / 0 failures、`--verify-wiring` 117 / 0 failures。
