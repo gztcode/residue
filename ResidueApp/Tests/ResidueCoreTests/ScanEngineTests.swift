@@ -405,4 +405,173 @@ final class ScanEngineTests: XCTestCase {
         let matched = ScanEngine.SourceRule.match(path: "/x/.cache/uv/.npm/_npx/y")
         XCTAssertEqual(matched.count, 2, "一个路径可命中多个来源")
     }
+
+    // MARK: - 增量：**只复核已登记候选**（R2 §7.3 ①）
+
+    /// 登记的候选**消失了**（路径不存在）→ 剔除，不保留陈旧字节。
+    func testIncrementalRescanDropsVanishedCandidate() throws {
+        let fs = MemoryFS()
+        fs.dirs["/root/.cache/uv"] = []
+        // 只登记，不在 fs 里 → `exists` 为 false
+        let registered = [
+            ScanEngine.Candidate(
+                path: "/root/.cache/uv/gone", birthtime: Date(), bytes: 100,
+                isDirectory: false, source: Source.uvCache.rawValue
+            )
+        ]
+        let engine = makeEngine(fs)
+        let r = try engine.scan(root: "/root/.cache/uv", mode: .incremental, registered: registered)
+
+        XCTAssertTrue(r.candidates.isEmpty, "已消失的候选必须剔除")
+        XCTAssertNil(r.aborted)
+    }
+
+    /// 同名**重建**（`birthtime` 变了）→ 剔除：新文件不是那个「观察过 14 天」的文件。
+    func testIncrementalRescanDropsRebuiltCandidate() throws {
+        let fs = MemoryFS()
+        fs.dirs["/root/.cache/uv"] = [("rebuilt", false)]
+        fs.attrs["/root/.cache/uv/rebuilt"] = (Date(timeIntervalSince1970: 2000), 100, false)
+        let registered = [
+            ScanEngine.Candidate(
+                path: "/root/.cache/uv/rebuilt",
+                birthtime: Date(timeIntervalSince1970: 1000),
+                bytes: 100, isDirectory: false, source: Source.uvCache.rawValue
+            )
+        ]
+        let engine = makeEngine(fs)
+        let r = try engine.scan(root: "/root/.cache/uv", mode: .incremental, registered: registered)
+
+        XCTAssertTrue(r.candidates.isEmpty, "身份变了（birthtime 不同）⇒ 不是同一个文件，必须剔除")
+    }
+
+    /// 同一个文件**长大了**（`birthtime` 不变）→ 保留并更新字节；不取快照。
+    func testIncrementalRescanUpdatesBytesWithoutSnapshot() throws {
+        let fs = MemoryFS()
+        fs.dirs["/root/.cache/uv"] = [("grown", false)]
+        let birth = Date(timeIntervalSince1970: 1000)
+        fs.attrs["/root/.cache/uv/grown"] = (birth, 999, false)
+        let registered = [
+            ScanEngine.Candidate(
+                path: "/root/.cache/uv/grown", birthtime: birth, bytes: 100,
+                isDirectory: false, source: Source.uvCache.rawValue
+            )
+        ]
+        let engine = makeEngine(fs)
+        let r = try engine.scan(root: "/root/.cache/uv", mode: .incremental, registered: registered)
+
+        XCTAssertEqual(r.candidates.count, 1)
+        XCTAssertEqual(r.candidates.first?.bytes, 999, "字节必须重取，不能沿用登记值")
+        XCTAssertEqual(r.filesScanned, 1, "增量只碰已登记候选，不遍历子树")
+        XCTAssertFalse(r.snapshotTaken, "增量不取快照（R2 §7.3）")
+    }
+
+    /// 整块粒度来源（`pnpmStore`）：候选的 `bytes` 是**聚合值**，不是目录自身 `st_size`。
+    /// 存在即原样保留 —— 重取属性会把「3 GB」读成「96 B」。
+    func testIncrementalRescanKeepsWholeBlockCandidateAsIs() throws {
+        let fs = MemoryFS()
+        let root = "/root/Library/pnpm/store"
+        fs.dirs[root] = []
+        fs.attrs[root] = (Date(timeIntervalSince1970: 1), 96, true)
+        let engine = ScanEngine(fileSystem: fs, rules: [
+            ScanEngine.SourceRule(source: .pnpmStore, pathFragments: ["/Library/pnpm/store/"])
+        ])
+        let registered = [
+            ScanEngine.Candidate(
+                path: root, birthtime: Date(timeIntervalSince1970: 1), bytes: 3_000_000_000,
+                isDirectory: true, source: Source.pnpmStore.rawValue
+            )
+        ]
+        let r = try engine.scan(root: root, mode: .incremental, registered: registered)
+
+        XCTAssertEqual(r.candidates.count, 1)
+        XCTAssertEqual(r.candidates.first?.bytes, 3_000_000_000,
+                       "整块来源的字节是聚合值，不得用目录自身属性覆盖")
+    }
+
+    /// `registered` 为空 ⇒ 没有比对基线，回落到全量遍历；模式仍是增量（不取快照）。
+    func testIncrementalWithoutRegisteredFallsBackToFullWalk() throws {
+        let fs = MemoryFS()
+        fs.dirs["/root/.cache/uv"] = [("a", false), ("b", false)]
+        fs.attrs["/root/.cache/uv/a"] = (Date(), 1, false)
+        fs.attrs["/root/.cache/uv/b"] = (Date(), 2, false)
+        let engine = makeEngine(fs)
+
+        let r = try engine.scan(root: "/root/.cache/uv", mode: .incremental, registered: [])
+
+        XCTAssertEqual(r.candidates.count, 2, "没有基线时不能静默产出空清单")
+        XCTAssertEqual(r.filesScanned, 2, "回落路径确实遍历了子树")
+        XCTAssertFalse(r.snapshotTaken, "模式仍是 incremental ⇒ 不取快照")
+    }
+
+    /// 增量复核中途取消：**未复核的候选原样保留** —— 取消不是「候选消失」的证据，
+    /// 丢掉它们会让界面清单静默缩水，下一次清理也漏掉（要等下一轮全量才回来）。
+    func testIncrementalAbortKeepsUnrescannedCandidates() throws {
+        let fs = MemoryFS()
+        let root = "/root/.cache/uv"
+        fs.dirs[root] = [("a", false), ("b", false), ("c", false)]
+        let birth = Date(timeIntervalSince1970: 1000)
+        // 三个文件实际都变大了；只有 a 会被复核到。
+        for name in ["a", "b", "c"] {
+            fs.attrs["\(root)/\(name)"] = (birth, 200, false)
+        }
+        let registered = ["a", "b", "c"].map {
+            ScanEngine.Candidate(
+                path: "\(root)/\($0)", birthtime: birth, bytes: 100,
+                isDirectory: false, source: Source.uvCache.rawValue
+            )
+        }
+
+        let counter = Counter()
+        let abort = ScanEngine.AbortCheck {
+            counter.bump()
+            return counter.value >= 2 ? .userCancelled : nil
+        }
+        let engine = makeEngine(fs)
+        let r = try engine.scan(
+            root: root, mode: .incremental, registered: registered, abortCheck: abort
+        )
+
+        XCTAssertEqual(r.aborted, .userCancelled)
+        XCTAssertEqual(r.filesScanned, 1, "只复核了第 1 条就取消")
+        XCTAssertEqual(r.candidates.map(\.path), ["\(root)/a", "\(root)/b", "\(root)/c"],
+                       "未复核的候选必须原样带回，不能因取消而消失")
+        XCTAssertEqual(r.candidates.first?.bytes, 200, "复核过的候选要更新字节")
+        XCTAssertEqual(r.candidates.last?.bytes, 100, "未复核的候选保持上一轮的值")
+    }
+
+    // MARK: - 取消延迟（AC-20：≤ 5 s）
+
+    /// 单目录上万条目时，取消检查必须**按条目间隔**生效，而不是等目录枚举完。
+    ///
+    /// 旧实现只在进入目录前检查 → 一个来源单目录数万条目 → 实测取消延迟 ~6.8 s。
+    func testAbortIsCheckedPerEntryNotPerDirectory() throws {
+        let fs = MemoryFS()
+        let root = "/root/.cache/uv"
+        var items: [(name: String, isDirectory: Bool?)] = []
+        for i in 0..<5000 {
+            let name = "f\(i)"
+            items.append((name, false))
+            fs.attrs["\(root)/\(name)"] = (Date(), 1, false)
+        }
+        fs.dirs[root] = items
+
+        let counter = Counter()
+        let abort = ScanEngine.AbortCheck {
+            counter.bump()
+            // 第 1 次 = 目录级检查；第 2 次 = 条目级（filesScanned == progressEvery）
+            return counter.value >= 2 ? .userCancelled : nil
+        }
+        let engine = makeEngine(fs)
+        let r = try engine.scan(
+            root: root, mode: .full, abortCheck: abort, progressEvery: 100
+        )
+
+        XCTAssertEqual(r.aborted, .userCancelled)
+        XCTAssertEqual(r.filesScanned, 100, "取消在第一个条目间隔处生效，不等 5000 条枚举完")
+        // 未枚举完的目录不得记为「已展开」，否则续扫会跳过剩余 4900 条。
+        XCTAssertFalse(
+            r.checkpoint?.expandedDirs.contains(root) ?? true,
+            "中止的目录不能记 expanded —— 续扫必须重新枚举"
+        )
+    }
 }

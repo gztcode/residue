@@ -499,7 +499,7 @@ check_all ✅ / verify_r2 ✅（PRD v5.5 / R2 v1.8）
 ### 状态（2026-11-21）
 
 ```
-swift test       564 全绿（合并 main 后：基线 555 + 本单 4 + main 侧 N7 5）
+swift test       571 全绿（#7 合并后 564 + CR-041 本单 7）
 verify_codes     11/11
 verify_a9        80/80
 --verify-wiring  117/117
