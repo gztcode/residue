@@ -260,6 +260,12 @@ public struct StateHeader: Codable, Sendable, Equatable {
     /// 各段的字节数（供审计；不参与加载校验）。
     public var bytes: ByteCounts
 
+    /// **回收站占用**（CR-042）—— 本产品移入废纸篓、尚未恢复的条目累计。
+    ///
+    /// `nil` = 旧载体没有这个键 / 从没记录过 ⇒ 界面显示「未知」（**不是 0**）。
+    /// 可选属性由合成 `Decodable` 的 `decodeIfPresent` 兜住，旧载体不会因此判损坏。
+    public var trashUsage: TrashUsage?
+
     public init(
         schemaVersion: Int = StateFileCodec.currentSchemaVersion,
         appVersion: String = "",
@@ -273,7 +279,8 @@ public struct StateHeader: Codable, Sendable, Equatable {
         sources: [SourceHeaderEntry] = [],
         settlement: SettlementHeader = SettlementHeader(),
         previousRound: PreviousRoundRecord? = nil,
-        bytes: ByteCounts = ByteCounts()
+        bytes: ByteCounts = ByteCounts(),
+        trashUsage: TrashUsage? = nil
     ) {
         self.schemaVersion = schemaVersion
         self.appVersion = appVersion
@@ -288,6 +295,7 @@ public struct StateHeader: Codable, Sendable, Equatable {
         self.settlement = settlement
         self.previousRound = previousRound
         self.bytes = bytes
+        self.trashUsage = trashUsage
     }
 }
 

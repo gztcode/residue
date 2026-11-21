@@ -91,6 +91,14 @@ public struct PageModel: Sendable {
     /// 原首屏只有各来源各自数额的卡，**没有「一共占了多少」** —— 用户要自己心算。
     /// 而「我到底能被腾出多少空间」正是这个产品最该先回答的问题。
     public var totalFootprintBytes: SemanticSlot = .metric(0, unit: .bytes)
+
+    /// ① 页：**回收站占用字节**（CR-042）。
+    ///
+    /// 口径 = 本产品移入废纸篓、尚未恢复的条目累计（**不是系统废纸篓总量**）。
+    /// 缺省是 `.unavailable` 而不是 `.metric(0)`：没有记录 ≠ 回收站是空的。
+    public var trashUsageBytes: SemanticSlot = .unavailable(reason: UICopy.trashUsageUnknown)
+    /// ① 页：**回收站占用条目数**（CR-042）。
+    public var trashUsageItems: SemanticSlot = .unavailable(reason: UICopy.trashUsageUnknown)
     /// ① 页：**是否还没有任何扫描数据**（决定显示空态还是数据）。
     ///
     /// 原先 `overviewBlocks` 恒为全部来源块数（`Source.allCases.map`）→ 空态分支
@@ -151,10 +159,12 @@ public struct PageModel: Sendable {
                     "Nothing to delete this time (deferred by limits, or candidates no longer exist)."
                 )
             }
+            // CR-042：本产品只 rename 到废纸篓，**磁盘并没有腾出来** ——
+            // 摘要必须把「已移入废纸篓」与「已释放」分开，否则用户以为清理完就好了。
             var parts = [
                 L.pick(
-                    "已移入废纸篓 \(deletedCount) 条，共 \(MetricUnit.formatBytes(Int(deletedBytes)))",
-                    "Moved \(deletedCount) item(s) to Trash, \(MetricUnit.formatBytes(Int(deletedBytes))) total"
+                    "已移入废纸篓 \(deletedCount) 条，共 \(MetricUnit.formatBytes(Int(deletedBytes)))（回收站仍占用，尚未释放磁盘空间）",
+                    "Moved \(deletedCount) item(s) to Trash, \(MetricUnit.formatBytes(Int(deletedBytes))) total (still in Trash — disk space not freed yet)"
                 )
             ]
             if deferredCount > 0 {
