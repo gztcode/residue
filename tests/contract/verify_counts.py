@@ -16,9 +16,13 @@
 
 ## 覆盖范围（如实标注）
 
-能实测的：单测数 / verify_a9 / verify_codes / PRD 基线 / R2 基线。
-测不了的：`--verify-wiring`（需编译产物）、`verify_a5`（需先打包 .app）——
-这两项输出为「未覆盖」，不猜、不假装通过。
+能实测的：单测数 / verify_a9 / verify_codes / PRD 基线 / R2 基线 / verify_a5。
+测不了的：`--verify-wiring`（需编译产物，且本脚本不跑 11 秒的重 IO）——
+该项输出为「未覆盖」，不猜、不假装通过。
+
+`verify_a5` 需要先有 `build/Residue.app`（CI 里 `make_app.sh` 在它之前跑）：
+- 有产物 → 实测并核对；
+- 没产物 → 「未覆盖」（不是失败，也不是假装通过）。
 
 用法：`python3 tests/contract/verify_counts.py`（任意 cwd）
 """
@@ -37,8 +41,9 @@ WORKFLOWS = sorted(glob.glob(os.path.join(ROOT, '.github', 'workflows', '*.yml')
 FAIL, OK, SKIP = [], [], []
 
 
-def run(cmd, cwd, timeout=120):
-    return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+def run(cmd, cwd, timeout=120, env=None):
+    return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True,
+                          timeout=timeout, env=env)
 
 
 # ── 实测 ──────────────────────────────────────────────────────────
@@ -62,16 +67,61 @@ def actual_codes():
     return int(m.group(1)) if m else None
 
 
+# check_all.sh 会调 verify_doc_claims.py，而后者测 PRD 基线时又要回调 check_all.sh。
+# 不带这个护栏就会无限递归，故调用时**必须**给子进程带上。
+_PRD = {}
+
+
+def _prd_run():
+    if 'result' not in _PRD:
+        env = dict(os.environ, RESIDUE_SKIP_DOC_CLAIMS='1')
+        p = run([os.path.join(ROOT, 'tests', 'contract', 'check_all.sh')], ROOT,
+                timeout=600, env=env)
+        parts, section = {}, None
+        for line in p.stdout.splitlines():
+            m = re.match(r'^---\s+(\S+)\s+---$', line.strip())
+            if m:
+                section = m.group(1)
+                continue
+            m = re.search(r'通过 (\d+) 项', line)
+            if m and section:
+                parts[section] = parts.get(section, 0) + int(m.group(1))
+        _PRD['result'] = (p.returncode, parts)
+    return _PRD['result']
+
+
+def actual_prd_parts():
+    """PRD 基线各段的实测项数 → {段名: 项数}（段名 = check_all.sh 里的脚本名）。"""
+    return _prd_run()[1]
+
+
 def actual_prd():
-    p = run([os.path.join(ROOT, 'tests', 'contract', 'check_all.sh')], ROOT)
-    vals = [int(x) for x in re.findall(r'通过 (\d+) 项', p.stdout)]
-    return sum(vals) if vals else None
+    """PRD 基线总项数（各段之和）。基线挂了返回 None —— 实测没拿到数字，不猜。"""
+    rc, parts = _prd_run()
+    if rc != 0 or not parts:
+        return None
+    return sum(parts.values())
 
 
 def actual_r2():
     p = run([sys.executable, os.path.join(HERE, 'verify_r2.py')], ROOT)
     m = re.search(r'结构 (\d+) \+ 落地 (\d+) \+ 归零 (\d+) \+ 一致 (\d+) \+ 自洽 (\d+)', p.stdout)
     return sum(int(g) for g in m.groups()) if m else None
+
+
+def actual_a5():
+    """产物结构校验实测 → (通过项数, 未覆盖项数)。
+
+    没有 `build/Residue.app` 时返回 None（**未覆盖**，不猜）。
+    脚本跑挂了抛异常（**实测失败**，判红 —— 不能把失败当成「没打包」）。
+    """
+    if not os.path.isdir(os.path.join(APP, 'build', 'Residue.app')):
+        return None
+    p = run([os.path.join(APP, 'scripts', 'verify_a5.sh')], APP, timeout=900)
+    m = re.search(r'通过 (\d+) 项 / 失败 (\d+) 项 / 未覆盖 (\d+) 项', p.stdout)
+    if not m:
+        raise RuntimeError('verify_a5.sh 没输出「通过 N 项 / 失败 N 项 / 未覆盖 N 项」')
+    return int(m.group(1)), int(m.group(3))
 
 
 # ── 声明（从 workflow 注释与发布说明里提取）──────────────────────────
@@ -114,12 +164,27 @@ def main():
         'r2': actual_r2(),
     }
 
+    a5, a5_error = None, None
+    try:
+        a5 = actual_a5()
+    except Exception as e:
+        a5_error = str(e)
+
     # 中文键统一成内部名，便于查表
     for kind, path, lineno, claimed in scan_claims():
-        if kind in ('wiring', 'a5'):
-            SKIP.append(f'{path}:{lineno}  {kind} 声明 {claimed}（需编译/打包，本脚本不实测）')
+        if kind == 'wiring':
+            SKIP.append(f'{path}:{lineno}  {kind} 声明 {claimed}（需编译产物，本脚本不实测）')
             continue
-        real = actual.get(kind)
+        if kind == 'a5':
+            if a5_error:
+                FAIL.append(f'{path}:{lineno}  a5 实测失败：{a5_error}')
+                continue
+            if a5 is None:
+                SKIP.append(f'{path}:{lineno}  a5 声明 {claimed}（没有 build/Residue.app，未打包不实测）')
+                continue
+            real = a5[0]
+        else:
+            real = actual.get(kind)
         if real is None:
             FAIL.append(f'{path}:{lineno}  {kind} 声明 {claimed}，但实测没拿到数字（脚本可能挂了）')
         elif real != claimed:

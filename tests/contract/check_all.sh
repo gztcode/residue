@@ -29,7 +29,7 @@ fail=0
 # 这些脚本内部用相对文件名（glob 'Residue-PRD-v*.md' 等），
 # 故在 docs/contract/ 下执行；脚本本身用绝对路径调用。
 cd "$CONTRACT"
-for s in verify18.py verify_claims.py verify_single_def.py verify_cr022.py; do
+for s in verify18.py verify_claims.py verify_single_def.py verify_cr022.py verify_doc_claims.py; do
   echo ""
   echo "--- $s ---"
   if [ -f "$HERE/$s" ]; then
