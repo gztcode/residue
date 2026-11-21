@@ -123,7 +123,12 @@ public struct ExecutionOutcome: Sendable {
 }
 
 /// 删除执行器。
-public struct TrashExecutor {
+///
+/// `Sendable`：全部存储属性都是 `let`，唯一的非 Sendable 成员
+/// `fileManager` 已由作者断言为 `nonisolated(unsafe)`（`FileManager` 的
+/// 单文件操作本身线程安全）。执行必须能进 `Task.detached` ——
+/// 十万级候选的 `moveItem` 是重 I/O，放主 actor 会卡住界面（CLAUDE.md §七-8）。
+public struct TrashExecutor: Sendable {
     public let trashDirectory: URL
     nonisolated(unsafe) public let fileManager: FileManager
 

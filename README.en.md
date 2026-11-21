@@ -166,7 +166,7 @@ rm -rf ~/Library/Application\ Support/Residue
 |---|---|---|
 | 1 | **Apple Silicon only** | Won't run on Intel Macs |
 | 2 | **Cross-uid fds are not enumerable** | Only your own user's processes are visible; others are shown as "can't tell" |
-| 3 | **Incremental scans don't find deep new candidates** | Newly installed packages enter the list on the next full scan (daily by default) |
+| 3 | **Incremental scans don't find deep new candidates** | An incremental scan only re-checks the attributes of already-registered candidates (vanished or rebuilt ones are dropped); it does not walk the tree. Newly installed packages enter the list on the next full scan (every 7 days by default) |
 | 4 | **Seven sources only** | Four in the decision domain (`uv` / `npm(npx)` / `brew` / `cargo`) + three report-only (`pipx` / `pnpm` / `bun`) |
 | 5 | **The observation period cannot be skipped** | 14 days is the core of the design, not an option |
 | 6 | **A full scan itself takes ~10+ seconds** | Measured 2026-11-09 on Apple Silicon with ~220k cached items → ~12 s, growing linearly with cache size. Scans run on a background thread; the UI stays usable, shows live progress, and can be cancelled |
@@ -188,7 +188,7 @@ The UI ships with **简体中文 / English**, follows the system language, and c
 
 ```bash
 cd ResidueApp
-swift test                                  # 564 unit tests (Core, zero UI deps)
+swift test                                  # 571 unit tests (Core, zero UI deps)
 ./scripts/verify_a9.sh                      # page structure + no-arithmetic-in-UI + wiring (80)
 python3 scripts/verify_codes.py             # error-code table ↔ docs (11)
 swift run --disable-sandbox ResidueApp --verify-wiring /tmp/w   # real IO round-trip (117)

@@ -494,14 +494,17 @@ public struct ScanEngine: Sendable {
     /// - 参数 `deadline`：超时时刻（`nil` = 不限时）。
     /// - 参数 `takeSnapshot`：**只有 `full` 扫描能取快照**（R2 §7.3：增量不取快照，
     ///   否则 `T` 会由部分候选集确定 → 偏小且**静默**）。
+    /// - 参数 `registered`：**已登记候选**（增量模式的输入，R2 §7.3 ①）。
+    ///   `full` 模式**不用它**。
     /// - Parameters:
     ///   - progress: 进度回调（**每 `progressEvery` 个条目调一次**）。
-    ///   - progressEvery: 回调间隔（条目数）。默认 2000 —— 
+    ///   - progressEvery: 回调间隔（条目数）。默认 2000 ——
     ///     11 万条目 → 约 56 次回调，足够让界面「动起来」，又不至于刷屏。
     public func scan(
         root: String,
         mode: Mode,
         checkpoint: Checkpoint? = nil,
+        registered: [Candidate] = [],
         abortCheck: AbortCheck = AbortCheck(),
         deadline: Date? = nil,
         now: Date = Date(),
@@ -514,6 +517,22 @@ public struct ScanEngine: Sendable {
             // 存在性检查失败 = 确实不存在（`pathExists` 为 false 只可能是 ENOENT
             // 或路径链上有非目录；后者在本产品的来源根上不会出现）
             throw ScanError.pathNotFound(root)
+        }
+
+        // ---- 增量：**只复核已登记候选**（R2 §7.3 ①）----
+        //
+        // 「增量」此前只是**名义上的**：`mode` 没有任何分支，增量日照样把所有
+        // 子树重走一遍（实测与全量同为 ~13 s），判据上也没有任何收益。
+        //
+        // `registered` 为空 ⇒ 没有可比对的基线（`AppModel.candidates` 是内存态、
+        // 不落盘 —— `state.residue` 不得含文件名清单）→ 回落到下面的全量遍历。
+        // 模式仍保持 `incremental`（不取快照），只是这一轮的工作量与全量相同。
+        if mode == .incremental, !registered.isEmpty {
+            return rescanRegistered(
+                root: root, registered: registered, mode: mode,
+                abortCheck: abortCheck, deadline: deadline, startedAt: startedAt,
+                progress: progress, progressEvery: progressEvery
+            )
         }
 
         var cp = checkpoint ?? Checkpoint()
@@ -549,10 +568,18 @@ public struct ScanEngine: Sendable {
         }
 
         // 广度优先遍历（**用栈**，避免深递归爆栈）。
+        //
+        // 中止检查**两级**：进入每个目录前一次（`readdir` 本身不可中断），
+        // 以及目录内**每 `progressEvery` 个条目**一次。
+        //
+        // 只有目录级检查时，取消要等**当前目录整个枚举完**才生效。实测一个
+        // 来源单目录可含数万条目 → 取消延迟 ~6.8 s，超过 AC-20 的 5 s。
+        // 条目级检查把延迟压到「最多 `progressEvery` 个条目的处理时间」。
+        let every = max(1, progressEvery)
         var stack = [root]
-        while let dir = stack.popLast() {
-            if let reason = abortCheck.shouldAbort() { aborted = reason; break }
-            if let deadline, Date() >= deadline { aborted = .timeout; break }
+        scanLoop: while let dir = stack.popLast() {
+            if let reason = abortCheck.shouldAbort() { aborted = reason; break scanLoop }
+            if let deadline, Date() >= deadline { aborted = .timeout; break scanLoop }
 
             let entries: [(name: String, isDirectory: Bool?)]
             do {
@@ -600,17 +627,24 @@ public struct ScanEngine: Sendable {
                 filesScanned += 1
                 seen.insert(full)
 
-                // ---- 进度回调（**按间隔，不每条都调**）----
+                // ---- 进度回调 + 条目级中止检查（**按间隔，不是每条**）----
                 //
-                // 每条都调 = 11 万次跨 actor 跳转，**比扫描本身还贵**。
+                // 每条都回调 = 11 万次跨 actor 跳转，**比扫描本身还贵**；
                 // 按 2000 条一次 → 11 万条目约 56 次，足够让界面「动起来」。
-                if let progress, filesScanned % max(1, progressEvery) == 0 {
-                    progress(Progress(
-                        source: root,
-                        filesScanned: filesScanned,
-                        candidatesFound: candidates.count,
-                        elapsed: Date().timeIntervalSince(startedAt)
-                    ))
+                //
+                // 取消 / 超时与进度共用同一个间隔：取消的延迟上界因此是
+                // 「`progressEvery` 个条目的处理时间」（~0.1 s），不是「一个目录」。
+                if filesScanned % every == 0 {
+                    if let reason = abortCheck.shouldAbort() { aborted = reason; break }
+                    if let deadline, Date() >= deadline { aborted = .timeout; break }
+                    if let progress {
+                        progress(Progress(
+                            source: root,
+                            filesScanned: filesScanned,
+                            candidatesFound: candidates.count,
+                            elapsed: Date().timeIntervalSince(startedAt)
+                        ))
+                    }
                 }
 
                 // 命中来源模式 → 收集为候选。
@@ -637,6 +671,9 @@ public struct ScanEngine: Sendable {
 
                 cp.markCompleted(dir: dir, name: entry.name)
             }
+
+            // 条目循环因中止退出 ⇒ 本目录**没有枚举完**，不得记「已展开」。
+            if aborted != nil { break scanLoop }
 
             // 本目录的条目已全部枚举完毕 → 标记已展开（续扫时不再重复展开）。
             cp.markExpanded(dir: dir)
@@ -690,6 +727,102 @@ public struct ScanEngine: Sendable {
             startedAt: startedAt, finishedAt: Date(), mode: mode,
             filesScanned: filesScanned, candidates: candidates, unknownCount: unknownCount,
             aborted: nil, breakpointSaved: false, snapshotTaken: snapshot,
+            checkpoint: nil
+        )
+    }
+
+    /// 增量扫描：**只复核已登记候选**（R2 §7.3 ①）。
+    ///
+    /// 不遍历子树、不产新候选 —— 逐条重取已登记候选的属性：
+    ///
+    /// | 情况 | 处理 |
+    /// |---|---|
+    /// | 路径已不存在 | 丢弃（本轮不再是候选） |
+    /// | `birthtime` 变了 | 丢弃（同名重建 ≠ 观察期观察的那个文件） |
+    /// | 整块粒度来源（`pnpm store` / `bun cache`） | 原样保留 |
+    /// | 其余 | 用新属性重建候选（`birthtime` 不变） |
+    ///
+    /// **整块来源为什么不能重取字节**：它们的 `bytes` 是整根的**聚合值**
+    /// （扫描时逐叶子累加，收敛成一条 `path == root` 的候选）。
+    /// 对根目录 `lstat` 只会拿到目录自身的 `st_size`（通常 96 B 之类），
+    /// 重取等于把「这个来源占 3 GB」改写成「占 96 B」—— 静默失真。
+    ///
+    /// **不取快照**：增量只看得到已登记候选这一子集，
+    /// 由子集确定的 `T` 偏小且**静默**（R2 §7.3 / 不变量④）。
+    private func rescanRegistered(
+        root: String,
+        registered: [Candidate],
+        mode: Mode,
+        abortCheck: AbortCheck,
+        deadline: Date?,
+        startedAt: Date,
+        progress: ProgressHandler?,
+        progressEvery: Int
+    ) -> ScanResult {
+        let every = max(1, progressEvery)
+        var candidates: [Candidate] = []
+        candidates.reserveCapacity(registered.count)
+        var filesScanned = 0
+        var aborted: AbortReason?
+
+        // 中止时从哪一条开始「未复核 ⇒ 原样保留」。取消 / 超时不是「候选消失」
+        // 的证据：丢掉未复核的候选会让界面清单在取消后静默缩水，下一次清理
+        // 也就漏掉它们（要等下一轮全量才回来）。
+        var keepFrom: Int?
+
+        scanLoop: for (i, old) in registered.enumerated() {
+            if let reason = abortCheck.shouldAbort() { aborted = reason; keepFrom = i; break scanLoop }
+            if let deadline, Date() >= deadline { aborted = .timeout; keepFrom = i; break scanLoop }
+
+            filesScanned += 1
+
+            // 与全量遍历共用同一个间隔 ⇒ 取消延迟上界一致（AC-20 的 5 s）
+            if filesScanned % every == 0 {
+                if let reason = abortCheck.shouldAbort() { aborted = reason; keepFrom = i; break scanLoop }
+                if let deadline, Date() >= deadline { aborted = .timeout; keepFrom = i; break scanLoop }
+                if let progress {
+                    progress(Progress(
+                        source: root,
+                        filesScanned: filesScanned,
+                        candidatesFound: candidates.count,
+                        elapsed: Date().timeIntervalSince(startedAt)
+                    ))
+                }
+            }
+
+            guard fileSystem.exists(at: old.path) else { continue }
+
+            if let source = Source(rawValue: old.source),
+               source.candidateGranularity == .wholeBlock {
+                candidates.append(old)
+                continue
+            }
+
+            // `attributes` 失败（权限 / 竞态）按「看不见」处理：丢弃，不猜
+            guard let attr = try? fileSystem.attributes(at: old.path),
+                  attr.birthtime == old.birthtime else { continue }
+
+            candidates.append(
+                Candidate(
+                    path: old.path,
+                    birthtime: attr.birthtime,
+                    bytes: attr.size,
+                    isDirectory: attr.isDirectory,
+                    source: old.source
+                )
+            )
+        }
+
+        // 中止 ⇒ 未复核的候选原样带回（见 `keepFrom` 的理由）。
+        if let keepFrom {
+            candidates.append(contentsOf: registered[keepFrom...])
+        }
+
+        // 中止 ⇒ 不返回部分结果当完整结果（`aborted` 非 nil，上层不会结算）。
+        return ScanResult(
+            startedAt: startedAt, finishedAt: Date(), mode: mode,
+            filesScanned: filesScanned, candidates: candidates, unknownCount: 0,
+            aborted: aborted, breakpointSaved: false, snapshotTaken: false,
             checkpoint: nil
         )
     }

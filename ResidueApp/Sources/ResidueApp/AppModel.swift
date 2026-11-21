@@ -32,6 +32,13 @@ final class AppModel {
     /// 是否正在扫描。
     var isScanning = false
 
+    /// 是否正在执行清理批次。
+    ///
+    /// 执行搬进 `Task.detached` 后出现了 `await` 挂起点 —— 主 actor 的天然串行
+    /// 不再能防重入：两个批次并发跑会对同一候选各发一次 `moveItem`
+    /// （前一次成功、后一次失败，`execution.jsonl` 里留下互相矛盾的记录）。
+    private var isExecuting = false
+
     /// 最近一次扫描的中止原因（`nil` = 正常完成）。
     var lastAbort: String?
 
@@ -517,6 +524,8 @@ final class AppModel {
             return
         }
         guard !isScanning else { return }   // **防重复点击**（后台化后更容易被点到）
+        // 执行批次跑着时不动候选清单（执行搬离主 actor 后有了挂起点，见 `isExecuting`）
+        guard !isExecuting else { return }
         isScanning = true
         // ★ 起手就标「在跑」⇒ 页头按钮进「扫描中…」态、界面不空白（§3.8）。
         //   此时分母未知（`totalSources == 0`）⇒ 圆环只画轨道不画弧。
@@ -528,6 +537,18 @@ final class AppModel {
         let probe = self.probe            // `UpstreamRunner` 是 `Sendable` 值
         let rootsOverride = self.sourceRootsOverride
         let excludePIDs: Set<pid_t> = [getpid()]
+
+        // ---- 增量输入：**已登记候选**（R2 §7.3 ①）----
+        //
+        // 增量只复核这些候选的属性，不遍历子树 ⇒ 才真正比全量便宜。
+        // 基线是**内存里的上一轮结果**（`state.residue` 不得含文件名清单）——
+        // 因此进程重启后的第一次增量拿到空基线，引擎会回落到全量遍历
+        // （模式仍是 `incremental`：不取快照、不结算）。
+        //
+        // 不按 `candidate.source` 分组：一个路径可命中多个来源（`source` 为逗号
+        // 连接），按 `source` 分组会让这类候选落不进任何一次扫描 → 增量日静默
+        // 从清单消失。分到哪个根**按路径归属**判（与遍历同一判据，见下）。
+        let registeredCandidates: [ScanEngine.Candidate] = (mode == .incremental) ? candidates : []
 
         // ---- 取消令牌（**主 actor 持有**，后台任务读它）----
         let cancelBox = CancelBox()
@@ -553,7 +574,7 @@ final class AppModel {
             errorMessage = describe(.e106, detail: reason)
             resumeCheckpoints = [:]
         }
-        // 断点只在 `full` 模式下有意义：增量扫描本就只查已知候选，
+        // 断点只在 `full` 模式下有意义：增量扫描只复核已登记候选、不遍历子树，
         // 拿全量断点去续会让「增量」静默变成「不扫」。
         let usableCheckpoints = (mode == .full) ? resumeCheckpoints : [:]
         // **非全量扫描不得沿用旧断点** —— 那份断点描述的是上次被中断的全量扫描，
@@ -603,7 +624,8 @@ final class AppModel {
                 // **留存来源根**：执行期越界判定（AC-19）用它，
                 // 不用执行时重新解析的那份（可能已变）。
                 job.roots[sourceName] = root
-                // **取消检查**：每条来源一次（来源只有 3 个，开销可忽略）
+                // **来源级取消检查**：每条来源一次（只有 7 个来源，开销可忽略）。
+                // 来源**内部**的取消由引擎按条目间隔检查（见下面的 `abortCheck`）。
                 if cancelBox.isCancelled { break }
                 guard FileManager.default.fileExists(atPath: root) else {
                     // ★ 根不存在 = 这个来源已经扫完了（结果是「没有」）⇒ 分子照样推进（§3.6 (c)）
@@ -616,17 +638,27 @@ final class AppModel {
                 do {
                     // ★ 不可变快照：`progress:` 闭包是 `@Sendable`，捕获 `var` 编译期报错（§3.7）
                     let base = acc
+                    // 增量：把已登记候选**按路径归属**分给本根（与遍历同一判据：在根下
+                    // 才算这个根扫得到）。不按 `candidate.source` 分 —— 一个路径可命中
+                    // 多个来源，按来源分会漏掉那些候选。空 ⇒ 引擎回落到全量遍历。
+                    let rootPrefix = root.hasSuffix("/") ? root : root + "/"
+                    let registeredForRoot = registeredCandidates.filter {
+                        $0.path == root || $0.path.hasPrefix(rootPrefix)
+                    }
                     let result = try engine.scan(
                         root: root,
                         mode: mode,
                         // 续扫：该来源上次中断时的断点（没有则全量新扫）
                         checkpoint: usableCheckpoints[sourceName],
+                        registered: registeredForRoot,
                         // ---- 中止检查（AC-20：取消 5 s 内停 I/O）----
                         //
-                        // ⚠️ **必须在引擎内部逐目录检查**，不能只在外层
+                        // ⚠️ **必须在引擎内部按条目间隔检查**，不能只在外层
                         // `for (sourceName, root)` 循环里查一次：一个来源 11 万条目
                         // 的遍历中途不回头，取消要等它**整条扫完**才生效
                         // （实测单来源 ~6.7 s）→ 用户点了取消，界面还在扫。
+                        // 引擎每 `progressEvery`（2000）个条目查一次 ⇒ 取消延迟上界
+                        // 是这 2000 条的处理时间（~0.1 s），远在 5 s 之内。
                         // 契约要的是「取消动作后 5 秒内无新增扫描 I/O」。
                         abortCheck: ScanEngine.AbortCheck {
                             cancelBox.isCancelled ? .userCancelled : nil
@@ -963,6 +995,11 @@ final class AppModel {
             return
         }
         guard !isScanning else { return }
+        // **防重入**：执行已搬离主 actor（下面 `Task.detached`），
+        // 主 actor 的串行不再覆盖整段 —— 必须显式挡住并发的第二个批次。
+        guard !isExecuting else { return }
+        isExecuting = true
+        defer { isExecuting = false }
 
         let now = Date()
         // 「首次」= 本机**首次产生实际删除动作**（AC-15 的阶段分界）
@@ -987,6 +1024,11 @@ final class AppModel {
         let secondCheckSnapshot = await Task.detached(priority: .userInitiated) {
             L0Probe.snapshot(excludePIDs: excludePIDs, now: now)
         }.value
+
+        // 后台执行要用的只读快照（主 actor 的值不能跨进 detached 闭包）
+        let executor = self.executor
+        let itemCap = preferences.itemCap
+        let capacityCapBytes = preferences.capacityCapBytes
 
         for source in Source.allCases {
             // **域外只报告三类恒为仅报告**（`pipx` run / pnpm store / bun cache）：不在判定域 → 永不参与自动删除（AC-04 ②）
@@ -1141,21 +1183,28 @@ final class AppModel {
             // 原实现这一支只写 `T×20%`，把用户设置的上限丢了 ——
             // 于是「把上限调小」这个动作在第二次执行时**静默失效**。
             let cap = TrashExecutor.capacityCap(
-                userCapBytes: preferences.capacityCapBytes,
+                userCapBytes: capacityCapBytes,
                 absoluteCapBytes: Self.firstRunAbsoluteCapBytes,
                 sourceTotalBytes: sourceTotalBytes(for: source),
                 tier: isFirstRun ? .firstRun : .steady
             )
 
-            let outcome = executor.execute(
-                candidates: ids,
-                source: source,
-                capacityCap: cap,
-                countCap: preferences.itemCap,
-                // **`t1` 预检值随候选缓存到执行点**（IF-08）
-                preflightBytes: preflight,
-                now: now
-            )
+            // ---- 真正动文件（**主 actor 之外**）----
+            //
+            // `moveItem` 是重 I/O。原先它同步跑在主 actor 上：十万级候选的
+            // rename 期间界面完全不动，连「取消」都点不到（CLAUDE.md §七-8）。
+            // 与扫描同一模式 —— 只有「结果汇总 / 计数器 / 落盘」留在主 actor。
+            let outcome = await Task.detached(priority: .userInitiated) {
+                executor.execute(
+                    candidates: ids,
+                    source: source,
+                    capacityCap: cap,
+                    countCap: itemCap,
+                    // **`t1` 预检值随候选缓存到执行点**（IF-08）
+                    preflightBytes: preflight,
+                    now: now
+                )
+            }.value
             newRecords.append(contentsOf: outcome.records)
             totalSkipped += outcome.skippedByCap
             // **失败不再丢弃**：原先 `outcome.failures` 被直接扔掉，
