@@ -64,8 +64,10 @@ final class AppModel {
     // ---- IO 组件 ----
     private let loginItem = LoginItemManager()
     private var scheduler: ScheduledRunner?
+    /// 回收站占用缓存（CR-042）—— 执行器记账，`AppModel` 负责写进载体。
+    private let trashUsageRecorder: TrashUsageRecorder
     /// 废纸篓执行器（AC-04 / AC-15 的执行机构）。
-    private let executor = TrashExecutor()
+    private let executor: TrashExecutor
 
     /// 上次扫描的模式（`T` 快照只能由 `full` 取，见 M3）。
     private(set) var lastScanMode: ScanEngine.Mode = .full
@@ -197,6 +199,10 @@ final class AppModel {
         )
         self.preferencesStore = preferencesStore
             ?? PreferencesStore(directory: stateFile.directory)
+        // 执行器与记账缓存必须共用同一个实例（CR-042），否则记了账没人读。
+        let recorder = TrashUsageRecorder()
+        self.trashUsageRecorder = recorder
+        self.executor = TrashExecutor(usageRecorder: recorder)
         loadAndProject()
 
         // **首启必须落盘**：若载体还不存在，立刻写出初始态。
@@ -321,6 +327,14 @@ final class AppModel {
             contents = c
         }
         applyObservationResetIfNeeded()
+        // **必须在 `rebuild()` 之前 seed**（CR-042）：`buildInput` 取的是
+        // `trashUsageRecorder.usage`，先投影后 seed 会让首帧恒显示「未知（尚无记录）」
+        // —— 即使载体里记着值。这个指标就是「打开 App 想看一眼」用的，首帧错等于白做。
+        //
+        // 放在重置之后：应用版本变更会清掉载体里的账（`clearCarrierForObservationReset`），
+        // 先 seed 再重置等于把旧版本的账播回来。
+        // `nil`（旧载体 / 首启）⇒ 保持未知，不造 0。
+        trashUsageRecorder.seed(contents.header.trashUsage)
         loadExecutions()
         rebuild()
     }
@@ -490,7 +504,8 @@ final class AppModel {
             whitelist: preferences.whitelist,
             // 扫描中不显示**上一次**的统计 —— 那节的标题写着「本次扫描」，
             // 拿旧数据顶上就是撒谎（守不变量③：未知就说未知，不拿近似值糊）。
-            sourceScanStats: isScanning ? [] : lastSourceScanStats
+            sourceScanStats: isScanning ? [] : lastSourceScanStats,
+            trashUsage: trashUsageRecorder.usage
         )
         pageModel = PageModelBuilder.build(input)
         // **运行期反馈必须跨 rebuild 存活**（它不是载体投影，但用户在等这个答复）
@@ -550,6 +565,8 @@ final class AppModel {
         let probe = self.probe            // `UpstreamRunner` 是 `Sendable` 值
         let rootsOverride = self.sourceRootsOverride
         let excludePIDs: Set<pid_t> = [getpid()]
+        // 回收站占用快照（CR-042）：主 actor 上取一次，随扫描结果带出。
+        let trashUsageSnapshot = trashUsageRecorder.usage
 
         // ---- 增量输入：**已登记候选**（R2 §7.3 ①）----
         //
@@ -691,7 +708,9 @@ final class AppModel {
                                 deltaCandidates: p.candidatesFound,
                                 elapsed: Date().timeIntervalSince(started)
                             ))
-                        }
+                        },
+                        // 回收站占用随快照带出（CR-042；`nil` = 未知）
+                        trashUsage: trashUsageSnapshot
                     )
                     job.results.append((sourceName, result))
                     // 纯度量：与判定无关，只记「这个来源花了多久、扫了多少条目」。
@@ -817,6 +836,8 @@ final class AppModel {
         )
         contents.header = outcome.header
         contents.payloads = outcome.payloads
+        // 回收站占用写回现有载体（CR-042；与执行记录同一份 `state.residue`）。
+        contents.header.trashUsage = trashUsageRecorder.usage
 
         // **`pNowCount` 与 `b` 是两个不同的量，曾经被混成一个变量**
         //
@@ -1264,6 +1285,8 @@ final class AppModel {
         )
 
         lastExecutionAt = now
+        // 回收站占用写回现有载体（CR-042）—— 成功移入的条目已由执行器记账。
+        contents.header.trashUsage = trashUsageRecorder.usage
         persist()
         rebuild()
     }
@@ -1290,6 +1313,9 @@ final class AppModel {
             } else {
                 executions.append(restored)
             }
+            // 恢复后条目不在废纸篓 → 占用跟着减（CR-042）；写回载体再重建。
+            contents.header.trashUsage = trashUsageRecorder.usage
+            persist()
             rebuild()
         } catch let e as TrashExecutor.RestoreError {
             errorMessage = describe(e.diagnostic)

@@ -205,11 +205,18 @@ public struct ScanEngine: Sendable {
         /// 调用方**拿不到断点内容** → 续扫无从谈起 → AC-20 的「可续扫」成为空话。
         public var checkpoint: Checkpoint?
 
+        /// **回收站占用快照**（CR-042）—— 扫描时的缓存值，原样带出。
+        ///
+        /// `nil` = 没有记录（旧载体 / 首启 / 从没执行过清理），
+        /// 界面显示「未知」。**不得**用 0 当缺省（不变量③）。
+        public var trashUsage: TrashUsage?
+
         public init(
             startedAt: Date, finishedAt: Date, mode: Mode,
             filesScanned: Int, candidates: [Candidate], unknownCount: Int,
             aborted: AbortReason?, breakpointSaved: Bool, snapshotTaken: Bool,
-            checkpoint: Checkpoint? = nil
+            checkpoint: Checkpoint? = nil,
+            trashUsage: TrashUsage? = nil
         ) {
             self.startedAt = startedAt
             self.finishedAt = finishedAt
@@ -221,6 +228,7 @@ public struct ScanEngine: Sendable {
             self.breakpointSaved = breakpointSaved
             self.snapshotTaken = snapshotTaken
             self.checkpoint = checkpoint
+            self.trashUsage = trashUsage
         }
     }
 
@@ -510,7 +518,8 @@ public struct ScanEngine: Sendable {
         now: Date = Date(),
         takeSnapshot: Bool? = nil,
         progress: ProgressHandler? = nil,
-        progressEvery: Int = 2000
+        progressEvery: Int = 2000,
+        trashUsage: TrashUsage? = nil
     ) throws -> ScanResult {
         let startedAt = now
         guard fileSystem.exists(at: root) else {
@@ -531,7 +540,8 @@ public struct ScanEngine: Sendable {
             return rescanRegistered(
                 root: root, registered: registered, mode: mode,
                 abortCheck: abortCheck, deadline: deadline, startedAt: startedAt,
-                progress: progress, progressEvery: progressEvery
+                progress: progress, progressEvery: progressEvery,
+                trashUsage: trashUsage
             )
         }
 
@@ -695,7 +705,8 @@ public struct ScanEngine: Sendable {
                 filesScanned: filesScanned, candidates: candidates, unknownCount: unknownCount,
                 aborted: reason, breakpointSaved: true,
                 snapshotTaken: false,
-                checkpoint: cp
+                checkpoint: cp,
+                trashUsage: trashUsage
             )
         }
 
@@ -727,7 +738,8 @@ public struct ScanEngine: Sendable {
             startedAt: startedAt, finishedAt: Date(), mode: mode,
             filesScanned: filesScanned, candidates: candidates, unknownCount: unknownCount,
             aborted: nil, breakpointSaved: false, snapshotTaken: snapshot,
-            checkpoint: nil
+            checkpoint: nil,
+            trashUsage: trashUsage
         )
     }
 
@@ -757,7 +769,8 @@ public struct ScanEngine: Sendable {
         deadline: Date?,
         startedAt: Date,
         progress: ProgressHandler?,
-        progressEvery: Int
+        progressEvery: Int,
+        trashUsage: TrashUsage?
     ) -> ScanResult {
         let every = max(1, progressEvery)
         var candidates: [Candidate] = []
@@ -823,7 +836,8 @@ public struct ScanEngine: Sendable {
             startedAt: startedAt, finishedAt: Date(), mode: mode,
             filesScanned: filesScanned, candidates: candidates, unknownCount: 0,
             aborted: aborted, breakpointSaved: false, snapshotTaken: false,
-            checkpoint: nil
+            checkpoint: nil,
+            trashUsage: trashUsage
         )
     }
 

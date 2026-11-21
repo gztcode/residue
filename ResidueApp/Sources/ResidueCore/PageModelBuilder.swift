@@ -56,6 +56,8 @@ public enum PageModelBuilder {
         /// 空数组 = 本次没有逐来源统计（未扫过 / 只读态）⇒ ⑦ 页该节不渲染。
         /// **纯度量**：这些值不参与任何判定，删掉它 `reportRows` 逐字不变。
         public var sourceScanStats: [SourceScanStat]
+        /// **回收站占用**（CR-042；`nil` = 没有记录 → 界面显示「未知」，不是 0）。
+        public var trashUsage: TrashUsage?
 
         /// AC-15 的顺延条目数（本次因上限而未执行的条数）。
         ///
@@ -92,7 +94,8 @@ public enum PageModelBuilder {
             capacityCapBytes: Int64 = 5_000_000_000,
             itemCap: Int = 200,
             whitelist: [String] = [],
-            sourceScanStats: [SourceScanStat] = []
+            sourceScanStats: [SourceScanStat] = [],
+            trashUsage: TrashUsage? = nil
         ) {
             self.contents = contents
             self.candidates = candidates
@@ -113,6 +116,7 @@ public enum PageModelBuilder {
             self.itemCap = itemCap
             self.whitelist = whitelist
             self.sourceScanStats = sourceScanStats
+            self.trashUsage = trashUsage
         }
     }
 
@@ -193,6 +197,14 @@ var model = PageModel()
         // **总量**：全部来源占用之和（算术在 Core，界面不参与）。
         let totalBytes = bytesBySource.values.reduce(Int64(0), +)
         model.totalFootprintBytes = .metric(Int(totalBytes), unit: .bytes)
+
+        // ---------- ① 回收站占用（CR-042） ----------
+        // 没有记录 ⇒ 保持 `.unavailable`（`PageModel` 的缺省），**不写 0**：
+        // 「没记录过」与「回收站是空的」是两件事（不变量③）。
+        if let usage = input.trashUsage {
+            model.trashUsageBytes = .metric(Int(usage.bytes), unit: .bytes)
+            model.trashUsageItems = .metric(usage.items, unit: .items)
+        }
 
         // **空态判定**：没扫过（无候选）→ 首屏必须回答「现在该做什么」，
         // 而不是摆七张 0 B 的卡。`hasScanned` 取自载体（有 `lastScanAt` 即扫过）。

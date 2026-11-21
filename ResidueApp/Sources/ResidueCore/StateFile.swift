@@ -404,6 +404,13 @@ public struct StateFile: Sendable {
         } else {
             // 应用版本变更 ⇒ `a` 与载荷一并清零（载荷段整体不存在 ⇒「无段」= 无数据）。
             header.resetObservationCredentials(clearingMissCount: true)
+            // 回收站占用账也随版本清零：它是「本产品移入、尚未恢复」的累计账，
+            // 跨版本无法核对（旧版本移入的条目新版本没有记录），留着就是旧账。
+            //
+            // ⚠️ 不放进 `resetObservationCredentials` —— 那个函数还被
+            // `StateFileMigration` 的 schema 升级复用，迁移不该清用户的账。
+            // 判定域指纹变更（`preservingMissCount: true`）也不清：条目仍在废纸篓。
+            header.trashUsage = nil
             try save(header: header, payloads: [:])
         }
     }
