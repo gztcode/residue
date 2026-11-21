@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 看清 `uv` / `npm(npx)` / `pipx` 在本机留下的缓存，只读统计 → **14 天影子观察期**证明自己判得准 → 才允许动手，且动手只做**原子 rename 到废纸篓**。
 
-代码在 `ResidueApp/`；`docs/` 下 144 份 `.md` 是**契约文档**，不是笔记 —— 见 §五。根目录只留 `README.md` / `ARCHITECTURE.md` / `CLAUDE.md` 三份导航文件。
+代码在 `ResidueApp/`；`docs/` 下 145 份 `.md` 是**契约文档**，不是笔记 —— 见 §五。根目录只留 `README.md` / `ARCHITECTURE.md` / `CLAUDE.md` 三份导航文件。
 
 ## 二、常用命令
 
@@ -130,7 +130,7 @@ AppModel（@MainActor，编排层）
 
 ## 五、文档是验收依据，不是背景介绍
 
-`docs/` 下 144 份 `.md` 分四类，各占一个目录：
+`docs/` 下 145 份 `.md` 分四类，各占一个目录：
 
 | 目录 | 类别 | 例子 | 约束 |
 |---|---|---|---|

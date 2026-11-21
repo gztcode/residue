@@ -146,7 +146,7 @@ cp.markExpanded(dir: dir)
 | `testIncrementalAbortKeepsUnrescannedCandidates` | 复核中途取消 ⇒ 已复核的更新字节、**未复核的原样保留**（取消不是候选消失的证据） |
 | `testAbortIsCheckedPerEntryNotPerDirectory` | 单目录 5000 条、`progressEvery: 100`、第 2 次询问即取消 ⇒ `filesScanned == 100`、`aborted == .userCancelled`，且该目录**不在** `expandedDirs` |
 
-**单测总数**：555（HEAD 基线）→ **562**（`swift test` 实测，0 failures）⇒ 已同步 `.github/workflows/ci.yml:5`、`.github/workflows/release.yml:211`、`README.md:194`、`ARCHITECTURE.md:34 / 122 / 136`、`CLAUDE.md:20`。
+**单测总数**：合并 `origin/main`（含 #6 / #7）后 **571**（`swift test` 实测，0 failures；其中本单新增 7 个）⇒ 已同步 `.github/workflows/ci.yml:5`、`.github/workflows/release.yml:211`、`README.md:195`、`README.en.md:191`、`ARCHITECTURE.md:34 / 122 / 136`、`CLAUDE.md:20`、`docs/ledger/Residue-Phase3-闸门台账.md:502`。
 
 ---
 
@@ -155,10 +155,10 @@ cp.markExpanded(dir: dir)
 | 命令 | 预期 | 实测 |
 |---|---|---|
 | `swift build` | 成功 | ✅ Build complete |
-| `swift test` | 0 failures | ✅ **562 tests / 0 failures** |
+| `swift test` | 0 failures | ✅ **571 tests / 0 failures** |
 | `python3 scripts/verify_codes.py` | 11 / 0 | ✅ |
 | `./scripts/verify_a9.sh` | 80 / 0 | ✅ |
-| `swift run --disable-sandbox ResidueApp --verify-wiring /tmp/wiring` | 111 / 0 | ✅ |
+| `swift run --disable-sandbox ResidueApp --verify-wiring /tmp/wiring` | 117 / 0 | ✅ |
 | `./tests/contract/check_all.sh` | 191 + 47 | ✅ |
 | `python3 tests/contract/verify_r2.py` | 123 | ✅ |
 | `python3 tests/contract/verify_counts.py` | 全部一致 | ✅ |
@@ -167,10 +167,10 @@ cp.markExpanded(dir: dir)
 
 ## 八、导航项数同步
 
-新增本单 ⇒ `docs/` 下 `.md` 由 143 份变 144 份；`docs/changes/` 由 64 份 / 26 个单号变 65 份 / 27 个单号。
+合并 #6 / #7 后基线为 `docs/` 144 份（`docs/changes/` 65 份 / 27 个单号）；新增本单 ⇒ **145 份**（**66 份 / 28 个单号**）。
 
 | 文件 | 旧 | 新 |
 |---|---|---|
-| `CLAUDE.md:11` | 143 份 | 144 份 |
-| `CLAUDE.md:127` | 143 份 | 144 份 |
-| `ARCHITECTURE.md:87` | 64 份文件 / 26 个单号 | 65 份文件 / 27 个单号 |
+| `CLAUDE.md:11` | 144 份 | 145 份 |
+| `CLAUDE.md:133` | 144 份 | 145 份 |
+| `ARCHITECTURE.md:87` | 65 份文件 / 27 个单号 | 66 份文件 / 28 个单号 |
