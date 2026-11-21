@@ -124,6 +124,11 @@ final class AppModel {
         /// （没有「未扫完的部分」，续扫无从谈起，也不该续）。
         /// 收尾时整份落 `state/checkpoints.json`，供下次启动续扫。
         var abortedCheckpoints: [String: ScanEngine.Checkpoint] = [:]
+        /// **逐来源扫描耗时**（CR-043）：在 `engine.scan(...)` 调用点前后各取一次时刻。
+        ///
+        /// ⚠️ 不能用 `result.finishedAt − result.startedAt`：`startedAt` 由调用方以
+        /// `now:` 传入（整轮起始）⇒ 相减是「累计偏移」，不是该来源的耗时。
+        var sourceStats: [(source: String, items: Int, durationMs: Int)] = []
     }
 
     /// **当前扫描的进度**（供界面显示「在动」）。
@@ -163,6 +168,11 @@ final class AppModel {
     private(set) var lastScanDiagnostics = ScanLogRecord.Diagnostics()
     /// 本次扫描的上游命令调用记录（AC-19 的界面落点数据源）。
     private var lastUpstreamCommands: [UpstreamCommand] = []
+    /// **最近一次完成扫描的逐来源统计**（CR-043 ⑦ 页「本次扫描 · 各来源」）。
+    ///
+    /// 只存在内存：重启后为上次的值（未扫描前该节不显示），
+    /// 持久化走 `scan.jsonl` 的 `sourceStats`（诊断用）。
+    private var lastSourceScanStats: [SourceScanStat] = []
 
     /// **本轮扫描用的来源根**（`source.rawValue` → 根路径）。
     ///
@@ -477,7 +487,10 @@ final class AppModel {
             executionMode: preferences.executionMode,
             capacityCapBytes: preferences.capacityCapBytes,
             itemCap: preferences.itemCap,
-            whitelist: preferences.whitelist
+            whitelist: preferences.whitelist,
+            // 扫描中不显示**上一次**的统计 —— 那节的标题写着「本次扫描」，
+            // 拿旧数据顶上就是撒谎（守不变量③：未知就说未知，不拿近似值糊）。
+            sourceScanStats: isScanning ? [] : lastSourceScanStats
         )
         pageModel = PageModelBuilder.build(input)
         // **运行期反馈必须跨 rebuild 存活**（它不是载体投影，但用户在等这个答复）
@@ -645,6 +658,9 @@ final class AppModel {
                     let registeredForRoot = registeredCandidates.filter {
                         $0.path == root || $0.path.hasPrefix(rootPrefix)
                     }
+                    // ★ 逐来源耗时**只在这里测得到**（CR-043）：`ScanResult.startedAt`
+                    //   是整轮起点，相减得到的是累计偏移，不是本来源耗时。
+                    let scanBegan = Date()
                     let result = try engine.scan(
                         root: root,
                         mode: mode,
@@ -678,6 +694,12 @@ final class AppModel {
                         }
                     )
                     job.results.append((sourceName, result))
+                    // 纯度量：与判定无关，只记「这个来源花了多久、扫了多少条目」。
+                    job.sourceStats.append((
+                        source: sourceName,
+                        items: result.filesScanned,
+                        durationMs: SourceScanStats.milliseconds(from: scanBegan, to: Date())
+                    ))
                     // ★ (c) 点：**分子推进**（圆环走一格）+ 该来源的最终数落进合计
                     //   ⇒ 小来源（< progressEvery = 2000 条）也会推进（修缺陷 #8）
                     cancelBox.report(acc.completing(
@@ -871,6 +893,9 @@ final class AppModel {
             )
         }
 
+        // ---- 逐来源扫描统计（CR-043：纯度量，不参与任何判定）----
+        lastSourceScanStats = SourceScanStats.make(job.sourceStats)
+
         // ---- 扫描日志（AC-19 唯一可判载体）----
         let record = ScanLogRecord(
             at: started,
@@ -883,7 +908,8 @@ final class AppModel {
             breakpointSaved: breakpointSaved,
             unknownCount: unknownCount,
             upstreamCommands: job.upstream,
-            diagnostics: lastScanDiagnostics
+            diagnostics: lastScanDiagnostics,
+            sourceStats: lastSourceScanStats
         )
         do {
             try writer.appendScan(record)

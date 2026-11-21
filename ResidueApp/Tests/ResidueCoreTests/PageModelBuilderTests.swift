@@ -1117,4 +1117,85 @@ final class PageModelBuilderTests: XCTestCase {
         XCTAssertTrue(stored.contains("scanProgress"), "加载态的真值载体应是 `scanProgress`")
     }
 
+    // MARK: - 逐来源扫描统计（CR-043）
+
+    /// **纯度量改动不得影响任何判定**（CR-043 的核心自证）。
+    ///
+    /// 同一份载体 + 同一批候选，构建两次模型：一次不带逐来源统计，
+    /// 一次带上。除 `sourceScanRows` 外**所有槽位必须逐字相同**——
+    /// 尤其是 `reportRows`（里面是各来源的 `K` / `T` / `a` / `b`）。
+    ///
+    /// 这条断言比「跑完测试没崩」强：它是「加统计前后扫描结论一致」的机器证据。
+    func testSourceScanStatsDoNotChangeAnyJudgment() {
+        let candidates = [
+            makeCandidate(path: "/home/u/.npm/_npx/a/index.js", bytes: 100, source: .npmNpx),
+            makeCandidate(path: "/home/u/.npm/_npx/b/index.js", bytes: 250, source: .npmNpx),
+            makeCandidate(path: "/home/u/.cache/uv/c", bytes: 400, source: .uvCache),
+        ]
+        let plain = PageModelBuilder.build(PageModelBuilder.Input(
+            contents: makeContents(makeHeader()),
+            candidates: candidates
+        ))
+        let measured = PageModelBuilder.build(PageModelBuilder.Input(
+            contents: makeContents(makeHeader()),
+            candidates: candidates,
+            sourceScanStats: [
+                SourceScanStat(source: Source.npmNpx.rawValue, items: 106_983, durationMs: 6_790),
+                SourceScanStat(source: Source.uvCache.rawValue, items: 115_875, durationMs: 6_440),
+            ]
+        ))
+
+        // 判定侧：⑤ 页矩阵（K / T / a / b 都在 cells 里）逐槽相同
+        XCTAssertEqual(plain.reportRows.map(\.cells), measured.reportRows.map(\.cells))
+        XCTAssertEqual(plain.pageLevelSlot, measured.pageLevelSlot)
+        XCTAssertEqual(plain.reportProduced, measured.reportProduced)
+        // ① 页总量与门槛
+        XCTAssertEqual(plain.overviewBlocks.map(\.title), measured.overviewBlocks.map(\.title))
+        XCTAssertEqual(plain.overviewBlocks.map(\.slot), measured.overviewBlocks.map(\.slot))
+        XCTAssertEqual(plain.totalFootprintBytes, measured.totalFootprintBytes)
+        XCTAssertEqual(plain.remainingDays, measured.remainingDays)
+        XCTAssertEqual(plain.canLightUp, measured.canLightUp)
+        // ⑥ 页确认清理
+        XCTAssertEqual(plain.confirmItemCount, measured.confirmItemCount)
+        XCTAssertEqual(plain.confirmBytes, measured.confirmBytes)
+        XCTAssertEqual(plain.deferredCountSlot, measured.deferredCountSlot)
+
+        // 唯一的差别就是这一节：没统计 ⇒ 不渲染（不编造 0 行）
+        XCTAssertTrue(plain.sourceScanRows.isEmpty)
+        XCTAssertEqual(measured.sourceScanRows.count, 2)
+    }
+
+    /// `_npx` 那一行的项数 / 候选体积 / 耗时都是**它自己的**，且顺序不重排。
+    func testSourceScanRowsCarryOwnItemsBytesAndDuration() {
+        let candidates = [
+            makeCandidate(path: "/home/u/.npm/_npx/a/index.js", bytes: 100, source: .npmNpx),
+            makeCandidate(path: "/home/u/.npm/_npx/b/index.js", bytes: 250, source: .npmNpx),
+            makeCandidate(path: "/home/u/.cache/uv/c", bytes: 400, source: .uvCache),
+        ]
+        // 顺序取自 `SourceScanStats.make`（耗时降序）：`_npx` 更慢 ⇒ 排第一
+        let stats = SourceScanStats.make([
+            (source: Source.uvCache.rawValue, items: 115_875, durationMs: 6_440),
+            (source: Source.npmNpx.rawValue, items: 106_983, durationMs: 6_790),
+        ])
+        let m = PageModelBuilder.build(PageModelBuilder.Input(
+            contents: makeContents(makeHeader()),
+            candidates: candidates,
+            sourceScanStats: stats
+        ))
+
+        XCTAssertEqual(
+            m.sourceScanRows.map(\.sourceID), stats.map(\.source),
+            "builder 不得重排（顺序的唯一实现处是 `SourceScanStats.make`）"
+        )
+        let npx = m.sourceScanRows[0]
+        XCTAssertEqual(npx.source, .text(Source.npmNpx.displayName))
+        XCTAssertEqual(npx.items, .metric(106_983, unit: .items))
+        XCTAssertEqual(
+            npx.bytes, .metric(350, unit: .bytes),
+            "候选体积 = 该来源候选字节之和（复用 bytesBySource，不另算一套）"
+        )
+        XCTAssertEqual(
+            npx.duration, .text(UICopy.scanSourceDuration(milliseconds: 6_790))
+        )
+    }
 }

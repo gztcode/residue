@@ -306,6 +306,25 @@ extension PageModel {
                                invoked: .metric(1, unit: .times),
                                executed: .metric(0, unit: .times)),
         ]
+        // 本次扫描 · 各来源（CR-043）—— 数字取台账 2026-11-09 实测量级
+        m.sourceScanRows = [
+            ("npmNpx", 106_983, 4_200_000_000, 6_790),
+            ("uvCache", 115_875, 5_600_000_000, 6_440),
+            ("homebrewDownloads", 3_214, 1_100_000_000, 710),
+            ("cargoRegistryCache", 4_010, 890_000_000, 220),
+            ("pipxRun", 1_842, 620_000_000, 350),
+            ("pnpmStore", 980, 210_000_000, 90),
+            ("bunCache", 512, 44_000_000, 30),
+        ].map { raw, items, bytes, ms in
+            SourceScanRow(
+                sourceID: raw,
+                source: .text(Source(rawValue: raw)?.displayName ?? raw),
+                items: .metric(items, unit: .items),
+                bytes: .metric(bytes, unit: .bytes),
+                duration: .text(UICopy.scanSourceDuration(milliseconds: ms))
+            )
+        }
+
         m.deferredCountSlot = .metric(0, unit: .items)
 
         m.evidenceRows = [
