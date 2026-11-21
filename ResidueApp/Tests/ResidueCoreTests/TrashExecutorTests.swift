@@ -20,7 +20,25 @@ final class TrashExecutorTests: XCTestCase {
     }
 
     override func tearDownWithError() throws {
+        // **先还读权限**：本组用例会造出 mode 000 的目录（不可读候选），
+        // 不还原的话 `removeItem` 删不掉 —— tearDown 失败会盖掉真正的断言失败。
+        restoreReadPermissions(under: root)
         try? FileManager.default.removeItem(at: root)
+    }
+
+    /// 把目录树里的读权限还回来（mode 000 → 0755）。
+    ///
+    /// 跑两遍：第一遍能看见并还原**目录本身**，
+    /// 目录可读之后第二遍才能进得去、把里面的东西也还原。
+    private func restoreReadPermissions(under url: URL) {
+        let fm = FileManager.default
+        for _ in 0..<2 {
+            guard let en = try? fm.enumerator(at: url, includingPropertiesForKeys: nil) else { break }
+            for case let child as URL in en {
+                try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: child.path)
+            }
+        }
+        try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
     }
 
     private func makeFile(_ name: String, bytes: Int = 1024) throws -> CandidateID {
@@ -230,6 +248,34 @@ final class TrashExecutorTests: XCTestCase {
         try Data(repeating: 0x5A, count: bytes).write(to: dir.appendingPathComponent("payload.bin"))
         let attrs = try FileManager.default.attributesOfItem(atPath: dir.path)
         let bt = (attrs[.creationDate] as? Date) ?? Date(timeIntervalSince1970: 0)
+        return (dir, CandidateID(path: dir.path, birthtime: bt))
+    }
+
+    /// **造一个「读不全」的目录候选**（`chmod 000` 的子目录）。
+    ///
+    /// ## 为什么这样造
+    ///
+    /// 契约（IF-07）要求：递归量**读不动 / 权限不足** → 该候选不得进入删除候选集。
+    /// 要复现它，就必须造出一个**能删、但量不准**的条目：
+    /// - 候选目录本身保持可读 → `attributesOfItem` 拿得到类型、`rename` 也照样能跑；
+    /// - 目录里放一个 `chmod 000` 的子目录 → 递归列举它时 `contentsOfDirectory` 失败
+    ///   → `unreadable = 1`。
+    ///
+    /// 造在**子目录**上而不是候选目录自身：候选自身 mode 000 时
+    /// `attributesOfItem` 拿不到类型 → 会被当成普通文件，测的就不是目录递归这条路了。
+    private func makeUnreadableDirCandidate(
+        _ name: String,
+        bytes: Int
+    ) throws -> (url: URL, id: CandidateID) {
+        let dir = cacheDir.appendingPathComponent(name, isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let sub = dir.appendingPathComponent("locked", isDirectory: true)
+        try FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
+        try Data(repeating: 0x5A, count: bytes).write(to: sub.appendingPathComponent("payload.bin"))
+        let attrs = try FileManager.default.attributesOfItem(atPath: dir.path)
+        let bt = (attrs[.creationDate] as? Date) ?? Date(timeIntervalSince1970: 0)
+        // 关掉子目录的读权限：读不动它，但**不影响**它被 rename（rename 只看父目录写权限）
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: sub.path)
         return (dir, CandidateID(path: dir.path, birthtime: bt))
     }
 
@@ -689,4 +735,124 @@ final class TrashExecutorTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: c.url.path), "第三条未被触碰")
     }
 
+    // ======================================================================
+    // MARK: - 体积不可得即不删（E-207 · P1-2）
+    //
+    // 契约（IF-07）：「递归量**读不动 / 超时 / 权限不足** → `E-207`，
+    // **该候选不入删除候选集**」。
+    //
+    // ## 原实现为什么是缺陷
+    //
+    // `recursiveLogicalBytesResult` 老实统计了 `unreadable`，
+    // 但 `measureLogicalBytes` 只返回 `.bytes` → `execute` 只看得到一个
+    // **偏小的**字节数 → 条目照删、照记账。
+    //
+    // 方向上确实是安全的（低估 ⇒ 删得更少），
+    // 但契约要的两件事都没做：**显式拦截** 与 **如实披露**。
+    // 且「容量上限是硬上限」这条判据本就建立在可能被低估的 `t1` 上 —— 与契约原文矛盾。
+    //
+    // `E-207` 在 `DiagnosticCode` 里**有码、有文案、有归类**，
+    // 却全仓库**没有任何构造点** —— 一个永远到不了用户面前的死码。
+    // ======================================================================
+
+    /// **体积不可得的候选不得被删**，且必须留下带 `E-207` 的记录。
+    func testVolumeUnavailableCandidateIsSkippedAndRecordedWithE207() throws {
+        let bad = try makeUnreadableDirCandidate("unreadable", bytes: 4096)
+        let outcome = executor.execute(
+            candidates: [bad.id],
+            source: .uvCache,
+            capacityCap: .max,
+            countCap: 10,
+            // 生产路径永远带缓存的 `t1`（IF-08）—— 这里照生产来
+            preflightBytes: [bad.id: Int64(4096)]
+        )
+
+        // ① 条目必须仍在原位（没被删）
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: bad.url.path),
+            "体积不可得的候选必须留在原位（不得进废纸篓）"
+        )
+        // ② 废纸篓里不能有残留
+        let trashEntries = (try? FileManager.default.contentsOfDirectory(atPath: trashDir.path)) ?? []
+        XCTAssertTrue(
+            trashEntries.isEmpty,
+            "体积不可得的候选不得留在废纸篓里（实为 \(trashEntries)）"
+        )
+
+        // ③ 必须有一条带 `E-207` 的记录（错误码可达性）
+        XCTAssertEqual(outcome.records.count, 1, "必须写一条执行记录（如实披露）")
+        let rec = outcome.records[0]
+        XCTAssertEqual(
+            rec.action, ExecutionAction.blockedSizeUnknown,
+            "动作必须是 blocked_size_unknown（不是 rename_to_trash）"
+        )
+        XCTAssertEqual(
+            rec.blockedReason, DiagnosticCode.e207.summary,
+            "原因串必须是 E-207 的文案"
+        )
+        XCTAssertNil(rec.restorePath, "条目没进废纸篓 → 恢复位置作废")
+        XCTAssertEqual(rec.originalPath, bad.id.path)
+
+        // ④ 不计入实际删除量、也不算失败
+        XCTAssertEqual(outcome.deletedBytes, 0, "被拦下的条目不计入实际删除量")
+        XCTAssertTrue(outcome.failures.isEmpty, "这是「拦下」不是「失败」")
+    }
+
+    /// **`moveToTrash` 自己也不许把体积不可得的条目留在废纸篓里**。
+    ///
+    /// 「公开原语自身不留 stranded 条目」——
+    /// 否则任何绕过 `execute` 的调用方都会拿到一个「已删但体积不明」的条目。
+    func testMoveToTrashReturnsVolumeUnavailableRecordWithoutStrandingItem() throws {
+        let bad = try makeUnreadableDirCandidate("unreadable_direct", bytes: 4096)
+        let rec = try executor.moveToTrash(bad.id, source: .uvCache, previewBytes: 4096)
+
+        XCTAssertEqual(
+            rec.action, ExecutionAction.blockedSizeUnknown,
+            "动作必须是 blocked_size_unknown"
+        )
+        XCTAssertEqual(rec.blockedReason, DiagnosticCode.e207.summary, "原因串必须是 E-207 的文案")
+        XCTAssertNil(rec.restorePath, "条目已移回原位 → 恢复位置作废")
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: bad.id.path),
+            "条目必须回到原位"
+        )
+        let trashEntries = (try? FileManager.default.contentsOfDirectory(atPath: trashDir.path)) ?? []
+        XCTAssertTrue(trashEntries.isEmpty, "废纸篓不得有残留（实为 \(trashEntries)）")
+    }
+
+    /// **体积不可得只排除该候选，不得停掉本轮其余删除**。
+    ///
+    /// 契约原文是「**该候选**不入删除候选集」——
+    /// 不是「本轮停止」（那是 `t2` 超上限才有的待遇，IF-07 两者措辞不同）。
+    func testVolumeUnavailableDoesNotStopRemainingDeletions() throws {
+        let bad = try makeUnreadableDirCandidate("unreadable_first", bytes: 4096)
+        let good = try makeFile("good.bin", bytes: 2048)
+
+        let outcome = executor.execute(
+            candidates: [bad.id, good],
+            source: .uvCache,
+            capacityCap: .max,
+            countCap: 10,
+            preflightBytes: [bad.id: Int64(4096), good: Int64(2048)]
+        )
+
+        XCTAssertEqual(outcome.records.count, 2)
+        XCTAssertEqual(
+            outcome.records[0].action, ExecutionAction.blockedSizeUnknown,
+            "第一条体积不可得 → 拦下"
+        )
+        XCTAssertEqual(
+            outcome.records[1].action, .renameToTrash,
+            "其余候选照删（体积不可得只排除该候选，不停轮）"
+        )
+        XCTAssertEqual(outcome.deletedBytes, 2048, "只算真删掉的")
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: bad.id.path),
+            "坏候选留在原位"
+        )
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: good.path),
+            "好候选已进废纸篓"
+        )
+    }
 }

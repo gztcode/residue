@@ -270,4 +270,57 @@ final class DiagnosticCodeTests: XCTestCase {
             "原路径被占不是并发冲突——重试不会好，是用户要在两个东西里选一个"
         )
     }
+
+    // MARK: - 六、错误码可达性（防死码）
+
+    /// **`E-207` 必须有**可达的**产出点。**
+    ///
+    /// ## 为什么这一组不能省
+    ///
+    /// `verify_codes.py` 的 F 项只钉住「每个码在测试里被**字面量**断言过」——
+    /// **钉不住「它真的会被产出」**。
+    /// 于是「有码、有文案、有归类，却全仓库没有任何构造点」的死码能一直绿着：
+    /// `E-207`（体积不可得，未删除）就是这样活了很久 —— R2 §6.3.5 把这件事
+    /// 登记成了「上线前必做项」，但没人做。
+    ///
+    /// 这条走**真实路径**：造一个读不全的目录候选 → `TrashExecutor.execute`
+    /// → 断言真有一条记录带着 `E-207` 的文案。
+    /// 走真实路径而不是「直接 new 一个码」，是为了防住「码能构造但产不出来」。
+    func testE207HasAProducingPath() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("residue-e207-\(UUID().uuidString)", isDirectory: true)
+        let cache = root.appendingPathComponent("cache", isDirectory: true)
+        let trash = root.appendingPathComponent("trash", isDirectory: true)
+        // 候选目录（可读 → 能被 rename）与其下**读不动**的子目录
+        let candidate = cache.appendingPathComponent("candidate", isDirectory: true)
+        let locked = candidate.appendingPathComponent("locked", isDirectory: true)
+        try FileManager.default.createDirectory(at: cache, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: trash, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: locked, withIntermediateDirectories: true)
+        try Data(repeating: 0x5A, count: 4096)
+            .write(to: locked.appendingPathComponent("payload.bin"))
+        defer {
+            // 先把权限还回来，否则 removeItem 删不掉那个子目录
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: locked.path)
+            try? FileManager.default.removeItem(at: root)
+        }
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: locked.path)
+
+        let attrs = try FileManager.default.attributesOfItem(atPath: candidate.path)
+        let birthtime = (attrs[.creationDate] as? Date) ?? Date(timeIntervalSince1970: 0)
+        let id = CandidateID(path: candidate.path, birthtime: birthtime)
+
+        let outcome = TrashExecutor(trashDirectory: trash).execute(
+            candidates: [id],
+            source: .uvCache,
+            capacityCap: .max,
+            countCap: 10,
+            preflightBytes: [id: Int64(4096)]
+        )
+
+        XCTAssertTrue(
+            outcome.records.contains { $0.blockedReason == DiagnosticCode.e207.summary },
+            "E-207 必须有可达的产出点（若全仓库无构造点 → 它是死码，永远到不了用户面前）"
+        )
+    }
 }

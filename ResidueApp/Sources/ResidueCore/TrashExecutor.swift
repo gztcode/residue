@@ -155,11 +155,39 @@ public struct TrashExecutor {
         let isDir = (attrs[.type] as? FileAttributeType) == .typeDirectory
         // **目录用递归逻辑字节**（IF-07）：目录的 `st_size` 只有 ~96 B，
         // 拿它当字节数会让 AC-15 的容量上限判定恒真。
-        // **`t1` 预检值**：优先用调用方缓存的那份（契约要求），
-        // 没有才现算（口径与 `logicalBytes(of:)` 一致）。
-        let (preview, bytesKind): (Int64, ExecutionRecord.BytesKind) = isDir
-            ? (previewBytes ?? recursiveLogicalBytes(atPath: id.path), .dirRecursive)
-            : ((previewBytes ?? (attrs[.size] as? NSNumber)?.int64Value ?? 0), .file)
+        //
+        // **体积不可得 ⇒ 不删（E-207）**：目录递归时只要有条目读不动，
+        // 得到的字节数就是**偏小的**，拿它去撞容量上限等于让硬上限建立在猜测上。
+        // 契约原文（IF-07）：「递归量读不动 / 超时 / 权限不足 → `E-207`，
+        // **该候选不入删除候选集**」。
+        //
+        // 注意：**即使调用方给了缓存的 `t1`，也必须实测一次** ——
+        // `preflightBytes` 只携带字节数，不携带「读没读全」，
+        // 直接用缓存值会绕过这道判定（缺陷正是这样活下来的）。
+        let inspection = isDir
+            ? recursiveLogicalBytesResult(atPath: id.path)
+            : (bytes: (attrs[.size] as? NSNumber)?.int64Value ?? 0, unreadable: 0)
+        let bytesKind: ExecutionRecord.BytesKind = isDir ? .dirRecursive : .file
+        let preview = previewBytes ?? inspection.bytes
+
+        if inspection.unreadable > 0 {
+            // 未移动任何东西 → `restorePath` 为 nil、`bytesMeasuredAt` 为 nil。
+            // `bytes` 只是读到的部分（**偏小、不可信**），留着供排查；
+            // 它不进 `deletedBytes`，因为这条根本没删。
+            return ExecutionRecord(
+                id: id,
+                source: source,
+                action: .blockedSizeUnknown,
+                originalPath: id.path,
+                restorePath: nil,
+                executedAt: now,
+                bytes: inspection.bytes,
+                bytesKind: bytesKind,
+                blockedReason: DiagnosticCode.e207.summary,
+                bytesPreview: preview,
+                bytesMeasuredAt: nil
+            )
+        }
 
         let base = src.lastPathComponent
         let suffix = UUID().uuidString.prefix(8)
@@ -469,6 +497,15 @@ public struct TrashExecutor {
                     // **`t1` 传预检时算出的那一份**（IF-08：不是执行时刻实时值）
                     previewBytes: size
                 )
+
+                // ---- 体积不可得（E-207）：**只排除这一条**，不删、不记账、不停止本轮 ----
+                //
+                // 契约（IF-07）说的是「**该候选**不入删除候选集」——
+                // 与下面 `t2` 超限的「本轮停止」是两回事，措辞不同，不得混用。
+                if rec.action == .blockedSizeUnknown {
+                    outcome.records.append(rec)
+                    continue
+                }
 
                 // ---- `t2` 实测超限 → **立即移回原位**（IF-07「超出则撤销」）----
                 //
