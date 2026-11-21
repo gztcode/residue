@@ -478,6 +478,46 @@ check_all ✅ / verify_r2 ✅（PRD v5.5 / R2 v1.8）
 
 ---
 
+## 四之七、2026-11-21（`unreadable` 未走 `E-207` → 已关闭）
+
+> 关闭的是「四之五 · 仍未关闭」表里那一行：**`unreadable` 未按契约走 `E-207`**。
+> 该行是当时的真实状态，**不改写历史**；本节登记它的关闭方式。
+
+### 缺陷
+
+`recursiveLogicalBytesResult` 一直返回 `(bytes, unreadable)`，但 `execute` 丢弃了 `unreadable` ——
+目录里有读不动的条目时，只用「读到的部分」计价并照常删除。
+后果是**硬上限建立在低估上**，且 `E-207` / `blocked_size_unknown` 有定义、**无产出点**（死码）。
+
+### 改法（CR-039）
+
+- `moveToTrash` 在 `moveItem` **之前**判 `unreadable > 0` → 返回 `blockedSizeUnknown` 记录（`blockedReason` = E-207 摘要）；
+- `execute` 收到该类记录时**只排除这一条**、不累加 `deletedBytes`、不停止本轮；
+- 即使调用方给了缓存 `t1`，目录候选仍**重测一次** —— 缓存只带字节数、不带「读没读全」，缺陷正是这样活下来的；
+- `t2` 实测超限回滚、`moveItem`-only 不变量**均未改动**。
+
+### 状态（2026-11-21）
+
+```
+swift test       564 全绿（合并 main 后：基线 555 + 本单 4 + main 侧 N7 5）
+verify_codes     11/11
+verify_a9        80/80
+--verify-wiring  117/117
+check_all ✅ / verify_r2 ✅（PRD v5.6 / R2 v1.10）
+```
+
+### 仍未关闭（更新）
+
+| 项 | 卡在 |
+|---|---|
+| A-10 签名链 | **Developer ID 身份 + 干净机**（外部资源） |
+| ~~`unreadable` 未按契约走 `E-207`~~ | **已关闭（2026-11-21 · CR-039）** |
+| E-207 的「超时」路径 | 契约提到「读不动 / 超时 / 权限不足」，实现无超时参数；**仍未覆盖，如实登记** |
+| 回收站容量计入 `T` | 需 `TrashExecutor` × `ScanEngine` 缓存协作（架构层） |
+| DAC v2.0 第 2 轮 / M-1·M-4·M-5·M-6·M-7 | 需产品裁定或架构数据 |
+
+---
+
 ## 五、下一步建议（**只报选项，不做决定**）
 
 | 选项 | 内容 | 代价 | 收益 |

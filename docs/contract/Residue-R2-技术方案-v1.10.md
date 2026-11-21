@@ -518,11 +518,11 @@ Residue.app（单进程，登录项 SMAppService.mainApp，菜单栏常驻）
 
 **两个原因串值域封闭**（IF-08）：预检阶段拦截 → `blockedReason = "预检超上限"`；rename 后实测超限而移回原位 → `blockedReason = "实测超上限，已移回原位"`。**同一动作值 `blocked_cap`、不同原因串。**
 
-#### 6.3.5 实现层的三条限制（如实登记，未修）
+#### 6.3.5 实现层的三条限制（如实登记；第 3 条已由 CR-039 关闭）
 
 1. **`t1` 的缓存点目前是扫描期**（`Candidate.bytes`），而契约理想上是「首检时刻」——两者在当前实现里是同一次扫描，**语义上已对齐**，但若将来引入「扫描后、二检前」的独立预检点，需重新对齐（**已登记，不阻塞**）。
 2. **回收站容量**：`recursiveLogicalBytes` 会把**已存在于回收站**的候选也算进 `T` → `T` 偏大、比例档偏松。**已登记，未修**（需 `TrashExecutor` 与 `ScanEngine` 的缓存协作，属架构层）。
-3. **`unreadable` 计数目前不参与判定**：`recursiveLogicalBytesResult` 会统计读不动的条目，但 `execute` 未据此走 `E-207`（体积不可得 → 不删）。**契约要求「宁可少删，不可让上限失效」** —— 当前实现是**低估**（读不到的部分不计入），方向上是安全的，但**未按契约显式拦截**。**已登记为上线前必做项。**
+3. **`unreadable` 计数原不参与判定**（**〔v1.10 · CR-039〕已按契约落地**）：`recursiveLogicalBytesResult` 会统计读不动的条目，而 `execute` 原先只取 `bytes`、丢弃 `unreadable` → 未走 `E-207`（体积不可得 → 不删）。**契约要求「宁可少删，不可让上限失效」** —— 旧实现是**低估**（读不到的部分不计入），方向上是安全的，但**未按契约显式拦截**。**〔v1.10 · CR-039〕已落地**：`moveToTrash` 在 `moveItem` **之前**判 `unreadable > 0`，命中即返回 `blockedSizeUnknown` 记录（`blockedReason` = `E-207` 摘要「体积不可得，未删除」，`restorePath` 与 `bytesMeasuredAt` 均为 `nil`），`execute` **只排除该候选、不停止本轮**（与 `t2` 超限的「本轮停止」措辞不同）。**未覆盖项如实登记**：契约提到的「超时」路径仍未实现（`recursiveLogicalBytesResult` 无超时参数）。
 
 ### 6.2b 脱敏的两处实现缺陷与一条如实限制（v1.7 新增）
 
