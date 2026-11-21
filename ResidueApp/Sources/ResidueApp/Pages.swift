@@ -92,6 +92,26 @@ struct OverviewPage: View {
                             OverviewBlockCard(block: block)
                         }
                     }
+                    // ---- 回收站占用（CR-042）----
+                    //
+                    // **必须与「可释放量」分开显示**：本产品只 rename 到废纸篓，
+                    // 条目仍占磁盘。把它混进「可释放」会让用户以为空间已经腾出来了。
+                    // 没有记录时槽位是 `.unavailable`（「未知」），不是 0。
+                    Card {
+                        VStack(alignment: .leading, spacing: Tokens.Spacing.xs) {
+                            SectionTitle(text: UICopy.trashUsageTitle)
+                            HStack(alignment: .firstTextBaseline, spacing: Tokens.Spacing.l) {
+                                SemanticSlotView(slot: model.trashUsageBytes)
+                                    .font(Tokens.Typography.pageTitle)
+                                SemanticSlotView(slot: model.trashUsageItems)
+                                    .font(Tokens.Typography.secondary)
+                                    .foregroundStyle(Tokens.Color.textSecondary)
+                            }
+                            Text(UICopy.trashUsageFootnote)
+                                .font(Tokens.Typography.secondary)
+                                .foregroundStyle(Tokens.Color.textSecondary)
+                        }
+                    }
                 }
 
                 // ---- L1 / L2 / 可删除量（AC-02）----

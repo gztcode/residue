@@ -80,6 +80,20 @@ final class ExecutionNoticeTests: XCTestCase {
         )
     }
 
+    /// CR-042：删了东西 ≠ 磁盘腾出来了 —— 摘要必须说明条目还在废纸篓里。
+    ///
+    /// 本产品只做 rename，用户看到「已移入废纸篓」很容易读成「已释放」。
+    func testDeletedSummarySaysSpaceNotFreedYet() {
+        let text = make(deleted: 5, bytes: 1_500_000).summary
+        XCTAssertTrue(text.contains("回收站"), "必须点明条目仍在回收站：\(text)")
+        XCTAssertTrue(text.contains("未") || text.contains("尚未"), "必须说明尚未释放：\(text)")
+
+        L.current = .en
+        let en = make(deleted: 5, bytes: 1_500_000).summary
+        XCTAssertTrue(en.contains("Trash"), "英文也要点明仍在回收站：\(en)")
+        XCTAssertTrue(en.contains("not freed"), "英文也要说明尚未释放：\(en)")
+    }
+
     /// 有顺延 / 拦下 / 失败时，各自都要出现在摘要里（不吞信息）。
     func testAllCountsAppearInSummary() {
         let text = make(deleted: 2, bytes: 1000, deferred: 3, failed: 1, blocked: 4).summary

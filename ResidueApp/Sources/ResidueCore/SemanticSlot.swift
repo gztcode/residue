@@ -429,6 +429,26 @@ public enum UICopy {
     /// 若显示「本轮未结算」会被读成「等一会儿就有」。
     public static var readOnlyNoSettlement: String { L.pick("只读，不结算", "Read-only, not settled") }
 
+    /// ① 页「回收站占用」在**没有记录**时的文案（CR-042）。
+    ///
+    /// 旧载体 / 首启 / 从没执行过清理时，我们**不知道**废纸篓里有多少，
+    /// 必须显示这一串而不是 `0` —— 守不变量③（`nil ≠ 0`）。
+    public static var trashUsageUnknown: String { L.pick("未知（尚无记录）", "Unknown (no record yet)") }
+
+    /// ① 页「回收站占用」卡片标题（CR-042）。
+    public static var trashUsageTitle: String { L.pick("回收站占用", "Trash usage") }
+
+    /// ① 页「回收站占用」卡片的说明：**这些条目仍占磁盘**（CR-042）。
+    ///
+    /// 必须把「已移入废纸篓」与「已释放」区分开，否则用户会以为
+    /// 清理完磁盘就腾出来了 —— 本产品只做 rename，从不真正删除。
+    public static var trashUsageFootnote: String {
+        L.pick(
+            "本产品移入废纸篓、尚未恢复的条目。它们仍占用磁盘，清空废纸篓后才真正释放。",
+            "Items this app moved to Trash and hasn’t restored. They still occupy disk space until you empty Trash."
+        )
+    }
+
     /// **版本降级**只读的成因文案（`E-301`）。
     public static var versionDegradedReadOnly: String {
         L.pick(

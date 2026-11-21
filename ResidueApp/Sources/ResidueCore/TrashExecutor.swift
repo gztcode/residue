@@ -131,9 +131,16 @@ public struct ExecutionOutcome: Sendable {
 public struct TrashExecutor: Sendable {
     public let trashDirectory: URL
     nonisolated(unsafe) public let fileManager: FileManager
+    /// 回收站占用的记账缓存（CR-042；`nil` = 不记账，供只读/测试调用点使用）。
+    public let usageRecorder: TrashUsageRecorder?
 
-    public init(trashDirectory: URL? = nil, fileManager: FileManager = .default) {
+    public init(
+        trashDirectory: URL? = nil,
+        fileManager: FileManager = .default,
+        usageRecorder: TrashUsageRecorder? = nil
+    ) {
         self.fileManager = fileManager
+        self.usageRecorder = usageRecorder
         self.trashDirectory = trashDirectory
             ?? FileManager.default.homeDirectoryForCurrentUser
                 .appendingPathComponent(".Trash", isDirectory: true)
@@ -213,6 +220,9 @@ public struct TrashExecutor: Sendable {
         // （另一个进程正在往里写、或用户自己放了东西进去）。
         // **这正是要实测的理由** —— 用估算值对账等于拿自己的假设验自己。
         let (measuredBytes, measuredKind) = measureLogicalBytes(at: dest)
+
+        // 成功移入 → 记入回收站占用（CR-042：条目仍占着磁盘，不是「已释放」）。
+        usageRecorder?.recordMoved(bytes: measuredBytes, now: now)
 
         return ExecutionRecord(
             id: id,
@@ -367,6 +377,9 @@ public struct TrashExecutor: Sendable {
             at: to.deletingLastPathComponent(), withIntermediateDirectories: true
         )
         try fileManager.moveItem(at: from, to: to)
+
+        // 条目已不在废纸篓 → 占用跟着减（CR-042）。
+        usageRecorder?.recordRestored(bytes: record.bytes, now: now)
 
         // **恢复动作回写为 `restored_by_user`**（K2 建议 S1）：
         // 不回写则「恢复过几次」不可追，也就无法判断「同一误删反复恢复」。
@@ -536,6 +549,9 @@ public struct TrashExecutor: Sendable {
                             at: URL(fileURLWithPath: rec.restorePath!),
                             to: URL(fileURLWithPath: rec.originalPath)
                         )
+                        // 回滚成功 = 条目回到原位、不在废纸篓 → 占用跟着减（CR-042）。
+                        // 回滚失败走 catch，条目仍在废纸篓里，**不减**。
+                        usageRecorder?.recordRestored(bytes: rec.bytes, now: now)
                         outcome.records.append(
                             ExecutionRecord(
                                 id: rec.id,
