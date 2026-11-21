@@ -172,6 +172,7 @@ rm -rf ~/Library/Application\ Support/Residue
 | 6 | **A full scan itself takes ~10+ seconds** | Measured 2026-11-09 on Apple Silicon with ~220k cached items → ~12 s, growing linearly with cache size. Scans run on a background thread; the UI stays usable, shows live progress, and can be cancelled |
 | 7 | **Un-notarized builds need a one-time manual approval** | See Case B above |
 | 8 | **The observation-period state file grows to hundreds of MB** | `~/Library/Application Support/Residue/state.residue` grows with the candidate count (measured 2026-11-21: ~197k candidates → 43.2 MB, about 229 B per candidate; PRD v5.6 extrapolates to ~640 MB at 3M candidates). A full copy also sits in `state.residue.bak` (the rollback point), so disk usage can double. **"Clear collected data and logs" deliberately leaves the main file alone** — clearing it would wipe the misjudgment record `a` — but it does remove that backup copy. To reclaim the space for good, delete the whole data directory (step 5 of Uninstall above) |
+| 9 | **`~/.npm/_npx` only grows, and eats over half the scan time** | Every `npx` run leaves a temporary install behind and npm never reclaims it (measured 2026-11-09: 106,983 items / 6.79 s out of a 12.21 s full scan). It is **npm's cache, not something Residue collected**: Residue measures it and **never deletes it for you**. The Evidence page's "This scan · by source" section lists its item count, candidate bytes and duration as its own row, slowest first — so you can see at a glance where the time goes. To reclaim the space, run `rm -rf ~/.npm/_npx` yourself in a terminal (npx will re-download what it needs next time) |
 
 ---
 
@@ -188,7 +189,7 @@ The UI ships with **简体中文 / English**, follows the system language, and c
 
 ```bash
 cd ResidueApp
-swift test                                  # 575 unit tests (Core, zero UI deps)
+swift test                                  # 584 unit tests (Core, zero UI deps)
 ./scripts/verify_a9.sh                      # page structure + no-arithmetic-in-UI + wiring (80)
 python3 scripts/verify_codes.py             # error-code table ↔ docs (11)
 swift run --disable-sandbox ResidueApp --verify-wiring /tmp/w   # real IO round-trip (117)

@@ -48,6 +48,10 @@ public struct ScanLogRecord: Codable, Sendable, Equatable {
     public var upstreamCommands: [UpstreamCommand]
     /// 诊断回显（「删错了」类事故的唯一支持通道）。
     public var diagnostics: Diagnostics
+    /// **逐来源扫描统计**（CR-043）：项数 / 耗时，按耗时降序。
+    ///
+    /// 纯度量回显 —— 不参与任何判定，缺省空数组（旧记录/旧构造点不受影响）。
+    public var sourceStats: [SourceScanStat]
 
     /// `scan.jsonl` 的 `diagnostics` 段（§5.4）。
     ///
@@ -125,7 +129,8 @@ public struct ScanLogRecord: Codable, Sendable, Equatable {
         breakpointSaved: Bool = false,
         unknownCount: Int = 0,
         upstreamCommands: [UpstreamCommand] = [],
-        diagnostics: Diagnostics = Diagnostics()
+        diagnostics: Diagnostics = Diagnostics(),
+        sourceStats: [SourceScanStat] = []
     ) {
         self.at = at
         self.mode = mode
@@ -138,6 +143,7 @@ public struct ScanLogRecord: Codable, Sendable, Equatable {
         self.unknownCount = unknownCount
         self.upstreamCommands = upstreamCommands
         self.diagnostics = diagnostics
+        self.sourceStats = sourceStats
     }
 }
 

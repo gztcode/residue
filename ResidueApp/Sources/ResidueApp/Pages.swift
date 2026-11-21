@@ -1041,6 +1041,62 @@ struct EvidencePage: View {
                 .padding(.horizontal, Tokens.Spacing.m)
                 .padding(.vertical, Tokens.Spacing.xs)
             }
+
+            // **本次扫描 · 各来源**（CR-043 / 台账 P2-1）
+            //
+            // 全量扫描 12 s 里 `~/.npm/_npx` 与 `~/.cache/uv` 各占 6 s 左右 ——
+            // 不逐来源摊开，用户只会看到「扫得慢」，看不出「慢在哪、且它在长」。
+            //
+            // ⚠️ 视图层零算术：项数 / 体积 / 耗时**全部**是 Core 算好并格式化的
+            // `SemanticSlot`，这里只摆位置（不变量①；`verify_a9.sh` 第二节会拦）。
+            if !model.sourceScanRows.isEmpty {
+                VStack(alignment: .leading, spacing: Tokens.Spacing.xxs) {
+                    Text(L.pick(
+                        "本次扫描 · 各来源（耗时从长到短）",
+                        "This scan · by source (slowest first)"
+                    ))
+                    .font(Tokens.Typography.title)
+                    .foregroundStyle(Tokens.Color.textPrimary)
+                    HStack(spacing: Tokens.Spacing.xs) {
+                        Text(L.pick("来源", "Source")).font(Tokens.Typography.secondary)
+                            .foregroundStyle(Tokens.Color.textSecondary)
+                        Spacer(minLength: Tokens.Spacing.s)
+                        Text(L.pick("项数", "Items")).font(Tokens.Typography.secondary)
+                            .foregroundStyle(Tokens.Color.textSecondary)
+                            .frame(width: 76, alignment: .trailing)
+                        Text(L.pick("候选体积", "Candidate bytes")).font(Tokens.Typography.secondary)
+                            .foregroundStyle(Tokens.Color.textSecondary)
+                            .frame(width: 76, alignment: .trailing)
+                        Text(L.pick("耗时", "Time")).font(Tokens.Typography.secondary)
+                            .foregroundStyle(Tokens.Color.textSecondary)
+                            .frame(width: 64, alignment: .trailing)
+                    }
+                    ForEach(model.sourceScanRows) { row in
+                        HStack(spacing: Tokens.Spacing.xs) {
+                            SemanticSlotView(slot: row.source)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Spacer(minLength: Tokens.Spacing.s)
+                            SemanticSlotView(slot: row.items, muted: true)
+                                .frame(width: 76, alignment: .trailing)
+                            SemanticSlotView(slot: row.bytes)
+                                .frame(width: 76, alignment: .trailing)
+                            SemanticSlotView(slot: row.duration)
+                                .frame(width: 64, alignment: .trailing)
+                        }
+                        .frame(minHeight: 24)
+                    }
+                    // **只增不减 + 手动清理**：产品不代删，但必须说清「你可以自己删」。
+                    Text(UICopy.npxCacheNote)
+                        .font(Tokens.Typography.secondary)
+                        .foregroundStyle(Tokens.Color.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, Tokens.Spacing.xxs)
+                }
+                .padding(.horizontal, Tokens.Spacing.m)
+                .padding(.top, Tokens.Spacing.s)
+                .padding(.bottom, Tokens.Spacing.xs)
+            }
         }
     }
 

@@ -51,6 +51,11 @@ public enum PageModelBuilder {
         public var itemCap: Int
         /// 白名单（AC-03：加入后该路径不再出现在新候选清单中）。
         public var whitelist: [String]
+        /// **上一次扫描的逐来源统计**（CR-043 ⑦ 页「本次扫描 · 各来源」）。
+        ///
+        /// 空数组 = 本次没有逐来源统计（未扫过 / 只读态）⇒ ⑦ 页该节不渲染。
+        /// **纯度量**：这些值不参与任何判定，删掉它 `reportRows` 逐字不变。
+        public var sourceScanStats: [SourceScanStat]
 
         /// AC-15 的顺延条目数（本次因上限而未执行的条数）。
         ///
@@ -86,7 +91,8 @@ public enum PageModelBuilder {
             executionMode: ExecutionMode = .reportOnly,
             capacityCapBytes: Int64 = 5_000_000_000,
             itemCap: Int = 200,
-            whitelist: [String] = []
+            whitelist: [String] = [],
+            sourceScanStats: [SourceScanStat] = []
         ) {
             self.contents = contents
             self.candidates = candidates
@@ -106,6 +112,7 @@ public enum PageModelBuilder {
             self.capacityCapBytes = capacityCapBytes
             self.itemCap = itemCap
             self.whitelist = whitelist
+            self.sourceScanStats = sourceScanStats
         }
     }
 
@@ -454,6 +461,28 @@ var model = PageModel()
                 command: key,
                 invoked: .metric(invoked[key] ?? 0, unit: .times),
                 executed: .metric(executed[key] ?? 0, unit: .times)
+            )
+        }
+
+        // ---------- ⑦ 本次扫描 · 各来源（CR-043，台账 P2-1） ----------
+        // 「扫描慢主要慢在哪里」必须在界面上答得出来：逐来源的项数 / 体积 / 耗时。
+        //
+        // ⚠️ **纯度量**：这一段只读 `input.sourceScanStats`（调用点测到的耗时）
+        // 与上面已经算好的 `bytesBySource`，**不参与任何判定**。
+        // 顺序由 `SourceScanStats.make` 定（耗时降序），这里不重排。
+        model.sourceScanRows = input.sourceScanStats.map { stat in
+            let source = Source(rawValue: stat.source)
+            return SourceScanRow(
+                sourceID: stat.source,
+                source: .text(source?.displayName ?? stat.source),
+                items: .metric(stat.items, unit: .items),
+                // 未知来源**不敢归集**体积：给 0 会被读成「这个来源没有可回收量」。
+                bytes: source.map { SemanticSlot.metric(Int(bytesBySource[$0] ?? 0), unit: .bytes) }
+                    ?? .unavailable(reason: L.pick(
+                        "来源未知，无法归集体积",
+                        "Unknown source; cannot attribute bytes"
+                    )),
+                duration: .text(UICopy.scanSourceDuration(milliseconds: stat.durationMs))
             )
         }
 

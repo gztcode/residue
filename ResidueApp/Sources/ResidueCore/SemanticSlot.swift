@@ -382,6 +382,39 @@ public enum UICopy {
         L.pick("已完成 \(done)/\(total) 个来源", "\(done)/\(total) sources completed")
     }
 
+    /// ⑦ 页「本次扫描 · 各来源」的耗时格（CR-043）。
+    ///
+    /// ## 为什么是字符串而不是 `.metric`
+    ///
+    /// `MetricUnit` 只有 `.bytes` / `.items` / `.times` / `.days` / `.none` ——
+    /// **没有秒/毫秒**。用 `.metric(6, unit: .none)` 会把 6.79 s 截成 6，
+    /// 而这张表的全部意义就是「谁占了大头」：截断后 `uv` 与 `_npx`
+    /// 会显示成同一个数。所以耗时在 Core 侧格式化成串，视图只渲染。
+    ///
+    /// 两位小数是必需的：实测 `uv` 6.44 s / `_npx` 6.79 s，
+    /// 一位小数会显示成 6.4 / 6.8，仍可辨；两位则与台账口径逐字一致。
+    public static func scanSourceDuration(milliseconds: Int) -> String {
+        let seconds = Double(milliseconds) / 1000
+        return L.pick(
+            String(format: "%.2f 秒", seconds),
+            String(format: "%.2f s", seconds)
+        )
+    }
+
+    /// ⑦ 页「本次扫描 · 各来源」下方的口径说明（CR-043）。
+    ///
+    /// ## 为什么要把「产品不代删」写进界面
+    ///
+    /// `~/.npm/_npx` 是 `npx` 自己的缓存，删它会让下次 `npx` 重新下载。
+    /// 这一点**必须由用户自己决定** —— 产品只度量、不代劳；
+    /// 若界面只说「这里最大」而不说「我们不删」，用户会去找一个不存在的按钮。
+    public static var npxCacheNote: String {
+        L.pick(
+            "`~/.npm/_npx` 只增不减（每次 npx 运行都留一份临时安装），扫描慢主要慢在这里。它是 npm 自己的缓存，Residue 只统计、不代为删除；想回收可在终端执行 `rm -rf ~/.npm/_npx`（下次 npx 会重新下载）。",
+            "`~/.npm/_npx` only grows (every npx run leaves a temporary install behind), and it is where most scan time goes. It is npm's own cache: Residue measures it but never deletes it for you. To reclaim it, run `rm -rf ~/.npm/_npx` in a terminal (npx will re-download next time)."
+        )
+    }
+
     /// ① 页扫描进度横条在**分母未知**时的首段（CR-037 §3.3）。
     ///
     /// ⚠️ **不得**写成「已完成 0/0 个来源」—— 「0/0」会被读成

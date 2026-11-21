@@ -299,6 +299,12 @@ public struct PageModel: Sendable {
     /// 原设计没有这块，AC-19 的全称命题在界面上不可见（R1.5 B-15）。
     public var upstreamCommands: [UpstreamCommandRow] = []
 
+    /// ⑦ 页：**本次扫描各来源的项数 / 体积 / 耗时**（CR-043，台账 P2-1）。
+    ///
+    /// 只在上一次扫描有逐来源统计时非空（本次没扫过 ⇒ 空，**不编造 0**）。
+    /// 顺序由 `SourceScanStats.make` 定（耗时降序），界面不再排序。
+    public var sourceScanRows: [SourceScanRow] = []
+
     /// ⑥ 页：**顺延条目数**（AC-15：顺延条目数 = 候选总数 − 实际删除条目数）。
     public var deferredCountSlot: SemanticSlot = .metric(0, unit: .items)
 
@@ -327,6 +333,45 @@ public struct UpstreamCommandRow: Identifiable, Sendable {
         self.command = command
         self.invoked = invoked
         self.executed = executed
+    }
+}
+
+// MARK: - 逐来源扫描统计（CR-043）
+
+/// 「本次扫描 · 各来源」一行（**全部是已算好的槽位**，界面零算术）。
+///
+/// ## 为什么「体积」是候选体积而不是目录体积
+///
+/// 来源根下的**全部**字节（含不可回收的部分）需要为每个来源另做一次
+/// 全量累加 —— 那是第二套逐来源求和（不变量②），而且与 ① 页的数字对不上。
+/// 这里直接复用 `PageModelBuilder` 既有的 `bytesBySource`（**候选**字节），
+/// 列名如实写「候选体积」：它是「这个来源里有多少是 Residue 认定的可回收量」。
+public struct SourceScanRow: Identifiable, Sendable {
+    /// 稳定身份 = 来源 rawValue。
+    public var id: String { sourceID }
+    /// 来源 rawValue（仅供 `id`；界面显示 `source`）。
+    public let sourceID: String
+    /// 来源展示名。
+    public let source: SemanticSlot
+    /// 该来源扫到的叶子条目数。
+    public let items: SemanticSlot
+    /// 该来源的**候选**体积。
+    public let bytes: SemanticSlot
+    /// 该来源的扫描耗时（Core 侧格式化成串 —— `MetricUnit` 没有秒单位）。
+    public let duration: SemanticSlot
+
+    public init(
+        sourceID: String,
+        source: SemanticSlot,
+        items: SemanticSlot,
+        bytes: SemanticSlot,
+        duration: SemanticSlot
+    ) {
+        self.sourceID = sourceID
+        self.source = source
+        self.items = items
+        self.bytes = bytes
+        self.duration = duration
     }
 }
 

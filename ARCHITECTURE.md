@@ -31,7 +31,7 @@ ResidueApp/
 ├── Sources/
 │   ├── ResidueCore/           纯逻辑，可单测（无 UI 依赖）
 │   └── ResidueApp/            SwiftUI 界面 + IO 编排
-├── Tests/ResidueCoreTests/    575 个单测
+├── Tests/ResidueCoreTests/    584 个单测
 ├── scripts/
 │   ├── make_app.sh            打包 .app（含签名/公证/钉票的完整分支）
 │   ├── verify_a9.sh           80 项：页面结构 + 空实现检测 + 数据层接线
@@ -84,7 +84,7 @@ ResidueApp/
 
 ### ③ 变更单 → `docs/changes/`（`CR-*`，**冻结后的唯一修改入口**）
 
-68 份文件 / 30 个单号。每张都写了：改什么、为什么、影响面、工时、谁批。
+69 份文件 / 31 个单号。每张都写了：改什么、为什么、影响面、工时、谁批。
 
 值得单独看的几张：
 
@@ -119,7 +119,7 @@ ResidueApp/
 ```bash
 cd ResidueApp
 
-swift build && swift test          # 编译 + 575 单测
+swift build && swift test          # 编译 + 584 单测
 
 ./scripts/verify_codes.py          # 错误码表（11 项）
 ./scripts/verify_a9.sh             # 页面结构 + 空实现（80 项）
@@ -133,7 +133,7 @@ cd .. && ./tests/contract/check_all.sh && python3 tests/contract/verify_r2.py
 #         PRD 191 + 47 项 + R2 123 项（脚本从自身位置推导仓库根，可在任意 cwd 调用）
 ```
 
-`--verify-wiring` 是这里最重要的一条：它**真的走一遍**「首启落盘 → 扫描 → 门槛链 → 导出脱敏 → 清除 → 定时任务」，靠文件系统事实而不是读代码判断。575 个单测永远替代不了它——单测验的是各模块自身契约，**没人验「模块之间接对了没有」**。
+`--verify-wiring` 是这里最重要的一条：它**真的走一遍**「首启落盘 → 扫描 → 门槛链 → 导出脱敏 → 清除 → 定时任务」，靠文件系统事实而不是读代码判断。584 个单测永远替代不了它——单测验的是各模块自身契约，**没人验「模块之间接对了没有」**。
 
 ---
 
