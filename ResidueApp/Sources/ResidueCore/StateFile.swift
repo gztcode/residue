@@ -38,11 +38,21 @@ public struct StateFile: Sendable {
     public let backupURL: URL
     /// 临时文件（写中）。
     public let tempURL: URL
+    /// 损坏现场留档（E-302 / E-304 把主文件移成它）。
+    ///
+    /// ⚠️ 它可能是 `a` 的**唯一幸存副本**（主载体被移走后）——
+    /// 「一键清除」对它有条件（见 `AppModel.clearLogs`）。
+    public let corruptURL: URL
     /// 迁移进度游标（`<stateDir>/state/migrating.json`）。
     ///
     /// R2 v1.9 §10.3 —— `step` 只在特定时刻被**原子写入 + `fsync`**，
     /// 它本身就是断电/崩溃后的恢复判据（**不按 CRC 二分**）。
     public let migrationProgressURL: URL
+    /// 采集日志（`<stateDir>/state/journal.jsonl`）。
+    ///
+    /// R2 v1.10 §10.3 —— N7「一键清除」范围里点名了它（含候选路径）。
+    /// **当前实现无人写入**（契约点名在先，实现待补），但清除范围仍按契约列。
+    public let journalURL: URL
     /// 可用字节查询的**注入点**（`nil` = 用卷的真实剩余容量）。
     ///
     /// 空间预检必须能被测：没有注入点，`E-305` 那条分支就只能靠
@@ -58,9 +68,13 @@ public struct StateFile: Sendable {
         self.fileURL = dir.appendingPathComponent("state.residue")
         self.backupURL = dir.appendingPathComponent("state.residue.bak")
         self.tempURL = dir.appendingPathComponent("state.residue.tmp")
+        self.corruptURL = dir.appendingPathComponent("state.residue.corrupt")
         self.migrationProgressURL = dir
             .appendingPathComponent("state", isDirectory: true)
             .appendingPathComponent("migrating.json")
+        self.journalURL = dir
+            .appendingPathComponent("state", isDirectory: true)
+            .appendingPathComponent("journal.jsonl")
         self.availableBytesProvider = availableBytesProvider
     }
 
@@ -121,7 +135,6 @@ public struct StateFile: Sendable {
         //     出现一个空载体，`a` 被静默清零，`.corrupt` 之外再无痕迹。
         //     那正是「静默重建」（不变量④）。恢复出口是用户显式动作。
         guard fm.fileExists(atPath: fileURL.path) else {
-            let corruptURL = directory.appendingPathComponent("state.residue.corrupt")
             if fm.fileExists(atPath: corruptURL.path) {
                 return LoadResult(
                     readOnly: true,
@@ -151,14 +164,12 @@ public struct StateFile: Sendable {
                 //   ⚠️ E-304 **不因「无可用 `.bak`」而降级成 E-302**——
                 //   E-302 是「损坏且无可用 `.bak`」，与段校验失败是**两种不同触发**；
                 //   混用会让 E-304 继承 E-302 的「重置」出口（v1.3 的旧病）。
-                let corruptURL = directory.appendingPathComponent("state.residue.corrupt")
                 try? fm.removeItem(at: corruptURL)
                 try? fm.moveItem(at: fileURL, to: corruptURL)
                 return LoadResult(readOnly: true, error: .segmentValidationFailed(detail: detail))
 
             case .corruptNoBackup(let detail):
                 // **E-302**（损坏且无可用 `.bak`）→ 只读；**不自动重置**
-                let corruptURL = directory.appendingPathComponent("state.residue.corrupt")
                 try? fm.removeItem(at: corruptURL)
                 try? fm.moveItem(at: fileURL, to: corruptURL)
                 return LoadResult(readOnly: true, error: .corruptNoBackup(detail: detail))
@@ -175,7 +186,6 @@ public struct StateFile: Sendable {
             // 也没有被留档；下一次启动会再次走进同一分支，永远无法恢复。
             //
             // 与 E-302 / E-304 同一处置：移成 `.corrupt`（保留现场）→ 只读。
-            let corruptURL = directory.appendingPathComponent("state.residue.corrupt")
             try? fm.removeItem(at: corruptURL)
             try? fm.moveItem(at: fileURL, to: corruptURL)
             return LoadResult(readOnly: true, error: .corruptNoBackup(detail: String(describing: error)))

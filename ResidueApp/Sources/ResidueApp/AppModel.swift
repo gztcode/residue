@@ -1298,16 +1298,16 @@ final class AppModel {
 
     /// 一键清除采集物与日志。
     ///
-    /// **不含 `a` 的载体**（`state.residue`）——CR-022 偏差 3。
-    /// 所以这里只删 `records/` 与 `state/` 下的运行期态，**不碰 state.residue**。
+    /// **不含 `a` 的载体**（`state.residue`）——PRD v5.6 偏差 3 / R2 v1.10 §10.3（S-10）。
+    /// 清除范围由 `N7ClearScope` 定义（唯一实现处）：`records/` + 运行期态 + 备份。
     func clearLogs() {
         guard !readOnly else { return }
-        let fm = FileManager.default
-        let recordsDir = writer.directory
-        if fm.fileExists(atPath: recordsDir.path) {
-            try? fm.removeItem(at: recordsDir)
-        }
         // **不删 state.residue**：清了就等于「一键洗掉 L0 误判记录」（S2 可被绕过）
+        N7ClearScope.clear(
+            stateFile: stateFile,
+            checkpoints: checkpoints,
+            recordsDirectory: writer.directory
+        )
         executions = []
         rebuild()
     }

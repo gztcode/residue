@@ -1,0 +1,12 @@
+{
+  "issue": 101,
+  "reproduced": true,
+  "category": "行为缺陷",
+  "injection_suspected": false,
+  "reason": "自测样本：能写出一条在 main 上会红的测试。",
+  "test_file": "ResidueApp/Tests/ResidueCoreTests/DummyTests.swift",
+  "test_name": "testDummyIsHeldDirectory",
+  "failure_output": "XCTAssertEqual failed: (\"1\") is not equal to (\"2\")",
+  "root_cause_hint": "ResidueApp/Sources/ResidueCore/Dummy.swift:1",
+  "needs_human": ""
+}

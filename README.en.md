@@ -169,8 +169,9 @@ rm -rf ~/Library/Application\ Support/Residue
 | 3 | **Incremental scans don't find deep new candidates** | Newly installed packages enter the list on the next full scan (daily by default) |
 | 4 | **Seven sources only** | Four in the decision domain (`uv` / `npm(npx)` / `brew` / `cargo`) + three report-only (`pipx` / `pnpm` / `bun`) |
 | 5 | **The observation period cannot be skipped** | 14 days is the core of the design, not an option |
-| 6 | **A full scan itself takes ~10+ seconds** | ~12 s for ~220k items. Scans run on a background thread; the UI stays usable, shows live progress, and can be cancelled |
+| 6 | **A full scan itself takes ~10+ seconds** | Measured 2026-11-09 on Apple Silicon with ~220k cached items → ~12 s, growing linearly with cache size. Scans run on a background thread; the UI stays usable, shows live progress, and can be cancelled |
 | 7 | **Un-notarized builds need a one-time manual approval** | See Case B above |
+| 8 | **The observation-period state file grows to hundreds of MB** | `~/Library/Application Support/Residue/state.residue` grows with the candidate count (measured 2026-11-21: ~197k candidates → 43.2 MB, about 229 B per candidate; PRD v5.6 extrapolates to ~640 MB at 3M candidates). A full copy also sits in `state.residue.bak` (the rollback point), so disk usage can double. **"Clear collected data and logs" deliberately leaves the main file alone** — clearing it would wipe the misjudgment record `a` — but it does remove that backup copy. To reclaim the space for good, delete the whole data directory (step 5 of Uninstall above) |
 
 ---
 
@@ -187,10 +188,10 @@ The UI ships with **简体中文 / English**, follows the system language, and c
 
 ```bash
 cd ResidueApp
-swift test                                  # 445 unit tests (Core, zero UI deps)
+swift test                                  # 560 unit tests (Core, zero UI deps)
 ./scripts/verify_a9.sh                      # page structure + no-arithmetic-in-UI + wiring (80)
 python3 scripts/verify_codes.py             # error-code table ↔ docs (11)
-swift run --disable-sandbox ResidueApp --verify-wiring /tmp/w   # real IO round-trip (79)
+swift run --disable-sandbox ResidueApp --verify-wiring /tmp/w   # real IO round-trip (117)
 ./scripts/make_app.sh && ./scripts/verify_a5.sh                 # artifact structure (42)
 ```
 

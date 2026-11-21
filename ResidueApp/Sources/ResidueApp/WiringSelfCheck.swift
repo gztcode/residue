@@ -92,13 +92,41 @@ enum WiringSelfCheck {
         check(model.pageModel.overviewBlocks[0].slot.displayText != "0 B",
               "① 页 uv cache 区块非零（聚合了 12 KB）")
 
-        print("\n--- 4. 清除不碰 a 的载体（CR-022 偏差 3）---")
+        print("\n--- 4. 清除不碰 a 的载体（PRD 偏差 3 / R2 §10.3）---")
         let before = ((try? Data(contentsOf: stateFile.fileURL))?.count) ?? 0
+
+        // 造出契约点名的**运行期态与备份**。
+        // ⚠️ 这些文件当前实现**不写**（契约点名在先，实现待补），
+        //    但「一键清除」的范围按契约必须覆盖它们（R2 §10.3 · 评审阻塞项 10）。
+        //    这里手工造出来，验证清除动作真能清掉 —— 不靠读代码判断。
+        let checkpointFile = CheckpointStore(
+            directory: stateFile.directory.appendingPathComponent("state", isDirectory: true)
+        ).fileURL
+        let runtimeState: [URL] = [
+            stateFile.journalURL,
+            checkpointFile,
+            stateFile.migrationProgressURL,
+            stateFile.backupURL,
+            stateFile.tempURL,
+            stateFile.corruptURL
+        ]
+        for url in runtimeState {
+            try? FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try? Data("{}".utf8).write(to: url)
+        }
+
         model.clearLogs()
         let after = ((try? Data(contentsOf: stateFile.fileURL))?.count) ?? 0
         check(before == after, "一键清除后 state.residue 体积不变（a 的载体未被清）")
         check(!FileManager.default.fileExists(atPath: scanLog.path),
               "一键清除后 records/ 被清（采集物与日志）")
+        for url in runtimeState {
+            check(!FileManager.default.fileExists(atPath: url.path),
+                  "一键清除后 \(url.lastPathComponent) 被清（N7 范围 · R2 §10.3）")
+        }
 
         print("\n--- 4a. 门槛链是否接通（T / H / b 必须非 null）---")
         // **这是本产品能不能工作的分界**：

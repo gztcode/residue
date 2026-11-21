@@ -1,0 +1,16 @@
+{
+  "issue": 101,
+  "reproduced": true,
+  "fixed": true,
+  "blocked": "",
+  "files_changed": [
+    "ResidueApp/Sources/ResidueCore/Dummy.swift"
+  ],
+  "tests_changed": [
+    "ResidueApp/Tests/ResidueCoreTests/DummyTests.swift"
+  ],
+  "verification": {
+    "swift_test": "2 tests, 0 failures"
+  },
+  "summary": "自测样本：让正在被使用的目录不再出现在可清理列表里。"
+}
