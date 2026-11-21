@@ -129,10 +129,11 @@ jobs:
         run: ./scripts/make_app.sh
 
       - name: Verify .app structure
-        # 42 项：bundle 结构 / Info.plist / entitlements / 逐 Mach-O 签名 /
+        # 43 项：bundle 结构 / Info.plist / entitlements / 逐 Mach-O 签名 /
         #        dmg 载体 + 拖拽布局 / C1 真身份时间戳 / C9 钉票顺序 / README 信任面
-        # 注：本机与 CI 都无 Developer ID → 会有 3 项**如实标「未覆盖」**，
-        #     不算通过也不算失败。这是设计，不是疏漏。
+        # 注：本机与 CI 都无 Developer ID → 会有 6 项**如实标「未覆盖」**，
+        #     不算通过也不算失败。这是设计，不是疏漏；
+        #     「存在性」类断言已降级为未覆盖，清单见 ARCHITECTURE.md「已知覆盖缺口」。
         working-directory: ResidueApp
         run: ./scripts/verify_a5.sh
 
@@ -150,6 +151,13 @@ jobs:
         # 这些数字曾一次性漂移 6 处且无人发现 —— 现在对上不齐就红。
         # 注意：报红时**改注释**，不要改实测值去迁就注释。
         run: python3 tests/contract/verify_counts.py
+
+      - name: Verify documented claims
+        # README / ARCHITECTURE / CLAUDE.md / 台账里「值得守的声明」↔ 实测值。
+        # 清单在 tests/contract/fixtures/doc_claims.json；check_all.sh 也会串跑一遍，
+        # 这里单独成步是为了失败时一眼定位到「哪份文档的哪句声明漂了」。
+        # 注意：报红时**改文档**（连带清单里的 declared），不要改实测值迁就文档。
+        run: python3 tests/contract/verify_doc_claims.py
 
       # ── 自动化脚本自测 ──────────────────────────────────────
       - name: Self-test the issue automation gates

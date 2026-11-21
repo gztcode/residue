@@ -196,7 +196,7 @@ swift test                                  # 571 个单测（Core 层，零 UI 
 ./scripts/verify_a9.sh                      # 页面结构 + 界面禁算术 + 数据层接线（80 项）
 python3 scripts/verify_codes.py             # 错误码表 ↔ 文档一致性（11 项）
 swift run --disable-sandbox ResidueApp --verify-wiring /tmp/w   # 真 IO 往返（117 项）
-./scripts/make_app.sh && ./scripts/verify_a5.sh                 # 产物结构（42 项）
+./scripts/make_app.sh && ./scripts/verify_a5.sh                 # 产物结构（43 项）· 6 项如实标未覆盖
 ```
 
 外加两套文档基线：PRD 238 项、R2 123 项。CI 每次构建都会全部重跑，并校验

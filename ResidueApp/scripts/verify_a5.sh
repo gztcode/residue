@@ -162,6 +162,21 @@ else
   ok "无 com.apple.security.*（非沙盒、零外发）"
 fi
 
+# 签名标识符 ↔ plist 标识符：两者必须指向**同一个 App**。
+#
+# ⚠️ 这是**行为正确**类断言，不是「API 存在」：
+#   系统认的是**代码签名里的 Identifier**，用户在 Finder / 登录项 / TCC 面板
+#   看到的是 **plist 的 CFBundleIdentifier**。两者不一致时，
+#   系统授权的是 A、用户操作的是 B —— 「完整磁盘访问权限」授给了另一个身份。
+#   验「两个都存在」毫无意义，必须验**它们相等**。
+SIG_ID="$(codesign -d --verbose=2 "$APP" 2>&1 | awk -F= '/^Identifier=/{print $2; exit}')"
+PLIST_ID="$(plist_get CFBundleIdentifier "$PLIST")"
+if [ -n "$SIG_ID" ] && [ "$SIG_ID" = "$PLIST_ID" ]; then
+  ok "签名 Identifier 与 plist CFBundleIdentifier 一致（${SIG_ID}）"
+else
+  bad "签名 Identifier='${SIG_ID}' 与 plist CFBundleIdentifier='${PLIST_ID}' 不一致 → 系统授权的身份与用户看到的 App 不是同一个"
+fi
+
 # ---------------------------------------------------------------------------
 echo ""
 echo "--- 四、测试注入点剥离（§10.1 第 10 条）---"
@@ -172,6 +187,29 @@ if [ "$HITS" -eq 0 ]; then
   ok "无 RESIDUE_TEST_ 注入点（§9.5 未进发布版）"
 else
   bad "发现 $HITS 处 RESIDUE_TEST_ 痕迹"
+fi
+
+# DEBUG 编译的自检入口**必须整段不在 release 二进制里**。
+#
+# 上面查的是 `RESIDUE_TEST_` 这类运行时注入点；这里查的是**编译期整段剥离**：
+# `--verify-wiring` / `--render-pages` 两个入口都写在 `#if DEBUG` 内
+# （见 `ResidueApp.swift` init），release 不编译 → 二进制里连字符串都不该有。
+#
+# ⚠️ 这是**行为正确**类断言：「grep 到 0 处」恰好就是它的行为 ——
+#   判据与被验对象同为「产物里有没有这个入口」，不是靠符号存在性推断。
+#   验「入口函数定义了」毫无意义 —— 它**就该**在源码里存在。
+DEBUG_HITS=0
+for flag in "--verify-wiring" "--render-pages"; do
+  N="$(strings "$BIN" | grep -cF -- "$flag" || true)"
+  if [ "${N:-0}" -ne 0 ]; then
+    DEBUG_HITS=$((DEBUG_HITS+1))
+    echo "      泄漏: ${flag}"
+  fi
+done
+if [ "$DEBUG_HITS" -eq 0 ]; then
+  ok "release 二进制无 DEBUG 自检入口（--verify-wiring / --render-pages 均已剥离）"
+else
+  bad "release 二进制泄漏 $DEBUG_HITS 个 DEBUG 自检入口（发布版可被触发自检）"
 fi
 
 # ---------------------------------------------------------------------------
@@ -212,9 +250,29 @@ if [ -f "$DMG" ]; then
       else
         bad "dmg 内 .app 签名损坏（打包方式破坏了签名）"
       fi
-      # 拖拽安装的前提：Applications 快捷方式必须在根上
+      # 分发载体必须与源产物**同源**：dmg 里的可执行文件要与 build/Residue.app 里
+      # 逐字节一致。只验「dmg 里有个 .app」是不够的 ——
+      # 打包时复制到**旧版本**同样能通过上面三条，但用户拿到的是过期产物。
+      SRC_SHA="$(shasum -a 256 "$BIN" 2>/dev/null | awk '{print $1}')"
+      DMG_SHA="$(shasum -a 256 "$MNT/Residue.app/Contents/MacOS/Residue" 2>/dev/null | awk '{print $1}')"
+      if [ -n "$SRC_SHA" ] && [ "$SRC_SHA" = "$DMG_SHA" ]; then
+        ok "dmg 内可执行文件与源产物逐字节一致（SHA-256 ${SRC_SHA:0:12}…）"
+      else
+        bad "dmg 内可执行文件与源产物不一致（源 ${SRC_SHA:0:12}… vs dmg ${DMG_SHA:0:12}…）→ dmg 里是旧版本"
+      fi
+      # 拖拽安装的前提：Applications 快捷方式必须在根上，**且指向 /Applications**
+      #
+      # ⚠️ 分成两条断言：存在性与指向。
+      #   「dmg 里有个快捷方式」是**打包契约本身**（不是「API 存在」代理行为）；
+      #   「它指向 /Applications」才是**行为** —— 指向别处时用户拖拽会拖到错地方。
       if [ -L "$MNT/Applications" ]; then
         ok "dmg 含 /Applications 快捷方式（可直接拖拽安装）"
+        LINK_TARGET="$(readlink "$MNT/Applications" 2>/dev/null)"
+        if [ "$LINK_TARGET" = "/Applications" ]; then
+          ok "dmg 内 Applications 快捷方式指向 /Applications（拖拽安装真的可用）"
+        else
+          bad "dmg 内 Applications 快捷方式指向 '${LINK_TARGET}'，应为 /Applications → 拖拽会把 App 拖到别处"
+        fi
       else
         bad "dmg 缺 Applications 快捷方式（用户需手动找「应用程序」）"
       fi
@@ -409,6 +467,23 @@ echo "--- 八、README 的并发承诺必须与实现一致（CR-030）---"
 # README 是**唯一信任面**（CR-003 裁决：无官网）。
 # 它现在承诺「扫描在后台线程跑 / 实时显示进度 / 可取消」——
 # 这三条**每一条都要能在实现里指出来**，否则就是文档骗人。
+#
+# ⚠️ **本节三条断言已从「通过」降级为「未覆盖」（P2-4 口径修正）**：
+#   它们验的是「源码里有没有某个符号」，而**符号存在 ≠ 行为正确**。
+#   源码里有 `Task.detached` 就能通过本节，但扫描**是不是真的在后台跑**、
+#   进度**是不是真的在刷新**、取消**是不是真的停得下来**，
+#   这三条本节一条都验不到。
+#
+#   「把『是否存在』当『行为正确』」是本脚本此前最大的口径缺陷：
+#   42 项里有 3 项是这种**看起来有覆盖、实则没覆盖**的断言，
+#   会让人误以为产物侧的并发承诺已被验证过。
+#
+#   这三条的真实行为由 `--verify-wiring`（WiringSelfCheck 并发三项）覆盖：
+#   ① 断言「扫描线程不是主线程」 ② 断言「进度真的被汇报」
+#   ③ 断言「取消后扫描提前停了」。**所以降级不是放弃检查，是把检查挪到能验行为的地方。**
+#
+#   下方仍然保留这些 grep：**README 删掉了承诺时必须报错**（承诺与实现脱节 = 文档骗人）。
+#   但它们**不再计入通过项**。
 
 README2="../README.md"
 if [ -f "$README2" ]; then
@@ -425,7 +500,7 @@ if [ -f "$README2" ]; then
     LIVE_DETACHED=$(grep -v '^[[:space:]]*//' "Sources/ResidueApp/AppModel.swift" 2>/dev/null \
                     | grep -cF 'Task.detached' || true)
     if [ "${LIVE_DETACHED:-0}" -gt 0 ]; then
-      ok "README 承诺「后台线程」→ 实现确有 Task.detached（活的代码行）"
+      skip "存在性断言（实现里确有 Task.detached）—— **符号存在 ≠ 扫描真在后台跑**；该行为由 --verify-wiring 并发①覆盖"
     else
       bad "README 说后台线程，实现里没有活的 Task.detached（**文档骗人**）"
     fi
@@ -441,7 +516,7 @@ if [ -f "$README2" ]; then
     if grep -qF 'progressEvery' "Sources/ResidueCore/ScanEngine.swift" 2>/dev/null \
        && grep -qF 'ScanProgressStrip(' "Sources/ResidueApp/Pages.swift" 2>/dev/null \
        && grep -qF 'progress.displayText' "Sources/ResidueApp/Components.swift" 2>/dev/null; then
-      ok "README 承诺「实时显示已扫描 N 项」→ 引擎有进度回调且界面有显示"
+      skip "存在性断言（引擎有进度回调且界面有显示）—— **符号存在 ≠ 进度真在刷新**；该行为由 --verify-wiring 并发②覆盖"
     else
       bad "README 承诺实时进度，实现里找不到进度回调或界面显示（**文档骗人**）"
     fi
@@ -451,7 +526,7 @@ if [ -f "$README2" ]; then
     # 承诺 ③：可取消 → 实现里必须有取消令牌 + 取消入口
     if grep -qF 'CancelBox' "Sources/ResidueApp/ScanInfrastructure.swift" 2>/dev/null \
        && grep -qF 'app.cancelScan()' "Sources/ResidueApp/RootView.swift" 2>/dev/null; then
-      ok "README 承诺「随时取消」→ 实现有取消令牌与取消按钮"
+      skip "存在性断言（实现有取消令牌与取消按钮）—— **符号存在 ≠ 取消真生效**；该行为由 --verify-wiring 并发③覆盖"
     else
       bad "README 承诺可取消，实现里找不到取消机制（**文档骗人**）"
     fi
@@ -459,6 +534,8 @@ if [ -f "$README2" ]; then
 
   # **诚实性**：README 必须承认「扫描本身仍要十几秒」
   # —— 只说「不卡」而不说「仍然慢」，那是**避重就轻**。
+  # 这一条**不是存在性断言**：被验对象就是 README 本身，
+  # 「这句话在不在」正是它的行为 → 仍计为通过。
   if grep -q "扫描本身要十几秒" "$README2" 2>/dev/null; then
     ok "README 如实写明「扫描本身仍要十几秒」（不避重就轻）"
   else

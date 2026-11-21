@@ -192,7 +192,7 @@ swift test                                  # 571 unit tests (Core, zero UI deps
 ./scripts/verify_a9.sh                      # page structure + no-arithmetic-in-UI + wiring (80)
 python3 scripts/verify_codes.py             # error-code table ↔ docs (11)
 swift run --disable-sandbox ResidueApp --verify-wiring /tmp/w   # real IO round-trip (117)
-./scripts/make_app.sh && ./scripts/verify_a5.sh                 # artifact structure (42)
+./scripts/make_app.sh && ./scripts/verify_a5.sh                 # artifact structure (43) · 6 honestly uncovered
 ```
 
 Plus two document baselines: PRD 238 and R2 123 checks. CI re-runs everything on every build,

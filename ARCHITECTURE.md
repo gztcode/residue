@@ -35,7 +35,7 @@ ResidueApp/
 ├── scripts/
 │   ├── make_app.sh            打包 .app（含签名/公证/钉票的完整分支）
 │   ├── verify_a9.sh           80 项：页面结构 + 空实现检测 + 数据层接线
-│   ├── verify_a5.sh           42 项：产物结构 + dmg 载体 + C1/C9 发布链路顺序 + README 信任面
+│   ├── verify_a5.sh           43 项：产物结构 + dmg 载体 + C1/C9 发布链路顺序 + README 信任面
 │   └── verify_codes.py        11 项：错误码表 ↔ 文档一致性
 ├── Resources/                 Info.plist 模板 / entitlements / 图标
 └── design-renders/            16 张渲染产物（设计走查的证据基础）
@@ -124,7 +124,7 @@ swift build && swift test          # 编译 + 571 单测
 ./scripts/verify_codes.py          # 错误码表（11 项）
 ./scripts/verify_a9.sh             # 页面结构 + 空实现（80 项）
 ./scripts/make_app.sh              # 产出 .app
-./scripts/verify_a5.sh             # 产物结构（42 项，3 项因无签名身份如实标未覆盖）
+./scripts/verify_a5.sh             # 产物结构（43 项，6 项如实标未覆盖）
 
 swift run ResidueApp --verify-wiring /tmp/w      # 接线自检（117 项，真 IO）
 swift run ResidueApp --render-pages /tmp/pages   # 重新渲染 16 张设计稿
@@ -147,6 +147,22 @@ cd .. && ./tests/contract/check_all.sh && python3 tests/contract/verify_r2.py
 | **仅 Apple Silicon** | 只出 arm64。Intel Mac 跑不了 |
 | **GUI 未做交互验证** | 构建环境无显示会话（`screencapture` 拿到全黑图），滚动/焦点/键盘可达性都没验过 |
 | **未在 macOS 14/15 实机跑过** | 构建机是 27.0.1。最低支持 14.0，但没在 14.x 上装过 |
-| **部分字段有定义无载体** | `K` / `J` / `doneCount` / `fSetBits` 等依赖「观察期结束扫描」与位槽表，尚未接线（`CR-026` §六 逐条登记） |
+| **产物侧行为类断言覆盖有限** | `verify_a5.sh` 里凡「源码/产物中存在某 API」类断言已降级为**未覆盖**（不计通过）；它们验不到行为，真实行为由 `--verify-wiring` 覆盖。清单见下方「已知覆盖缺口」 |
 
 逐条详细登记在 `Residue-Phase3-闸门台账.md` 的「仍未关闭」节。
+
+### 已知覆盖缺口（Known coverage gaps）
+
+`verify_a5.sh` 共 43 项通过 / 6 项如实标「未覆盖」。这 6 项**不是通过**，也不假装通过：
+
+| # | 未覆盖断言 | 为什么验不了 | 真实行为由谁覆盖 |
+|---|---|---|---|
+| 1 | `stapler staple` 成功 | 本机与 CI 都无 Developer ID → 无法公证 → 无法钉票 | A-10 发布准入（需外部资源） |
+| 2 | `SMAppService.register` 在 `.app` 下不抛签名错 | ad-hoc 下必抛 `kSMErrorInvalidSignature`，需真身份 | A-10 第 7 步（真身份 + GUI） |
+| 3 | TCC 面板能认到 App | 需 GUI 会话人工打开「完全磁盘访问权限」确认 | A-10 装机步骤 |
+| 4 | README 承诺「扫描在后台线程」 | 源码里有 `Task.detached` ≠ 扫描真在后台跑 | `--verify-wiring` 并发① |
+| 5 | README 承诺「实时显示已扫描 N 项」 | 源码有进度回调 ≠ 进度真在刷新 | `--verify-wiring` 并发② |
+| 6 | README 承诺「随时取消」 | 有取消令牌与按钮 ≠ 取消真生效 | `--verify-wiring` 并发③ |
+
+第 4–6 项此前是「通过」，因为验的是**符号存在**。它们已降级为「未覆盖」——
+**额度留给行为断言，而不是用存在性冒充正确性**。README 删掉承诺时仍会判红（文档骗人）。

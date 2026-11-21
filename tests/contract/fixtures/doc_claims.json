@@ -1,0 +1,373 @@
+{
+  "_说明": [
+    "本文件是「值得守的文档声明」清单。由 tests/contract/verify_doc_claims.py 消费。",
+    "每条 = 一处文档里的数字声明 + 一个可复算的实测来源。脚本核对三件事：",
+    "  ① 文档里那句话还在吗（pattern 零命中 = 声明缺失，判红 —— 清单不得静默失效）；",
+    "  ② 文档声明值 == 实测值（容差 tolerance）；",
+    "  ③ 文档声明值 == 登记值 declared（登记值陈旧也判红，并给出该写的新值）。",
+    "",
+    "锚点说明：pattern 是**权威锚点**，line_hint 只是给人看的定位提示。",
+    "不按行号断言 —— 别人插一行注释就会让行号漂移，锚死行号会制造假红/假绿",
+    "（与 verify_counts.py 同一口径）。",
+    "",
+    "收录边界：只登记**描述当前状态**的数字。",
+    "  · 台账里的历史快照（如「A-5 校验 20 项 / 共 171 项」）不登记 ——",
+    "    登记它等于要求历史永远不变，那是把历史记录当现状，是噪音。",
+    "  · 正文里随口出现的数字（页码、条目序号、版本号）不登记。",
+    "  · 「16 张设计稿」不登记 —— design-renders/ 目录里有一张初始提交遗留、",
+    "    被三份冻结契约文档按名引用的旧图，目录张数与渲染器产出张数是两个口径，",
+    "    登记哪一个都是替人做主。漂移已登记在 ARCHITECTURE.md 的 Known coverage gaps。"
+  ],
+  "claims": [
+    {
+      "path": "README.md",
+      "line_hint": 194,
+      "pattern": "(\\d+) 个单测",
+      "group": 1,
+      "declared": 571,
+      "metric": "unit_tests",
+      "tolerance": 0,
+      "note": "开发命令清单里的单测数"
+    },
+    {
+      "path": "README.md",
+      "line_hint": 195,
+      "pattern": "verify_a9\\.sh\\s+#[^\\n]*（(\\d+) 项）",
+      "group": 1,
+      "declared": 80,
+      "metric": "a9_items",
+      "tolerance": 0,
+      "note": "开发命令清单里的页面结构校验项数"
+    },
+    {
+      "path": "README.md",
+      "line_hint": 196,
+      "pattern": "verify_codes\\.py\\s+#[^\\n]*（(\\d+) 项）",
+      "group": 1,
+      "declared": 11,
+      "metric": "codes_items",
+      "tolerance": 0,
+      "note": "开发命令清单里的错误码表校验项数"
+    },
+    {
+      "path": "README.md",
+      "line_hint": 197,
+      "pattern": "verify-wiring[^\\n]*（(\\d+) 项）",
+      "group": 1,
+      "declared": 117,
+      "metric": "wiring_items",
+      "tolerance": 0,
+      "note": "开发命令清单里的接线自检项数"
+    },
+    {
+      "path": "README.md",
+      "line_hint": 198,
+      "pattern": "verify_a5\\.sh\\s+#[^\\n]*（(\\d+) 项）",
+      "group": 1,
+      "declared": 43,
+      "metric": "a5_items",
+      "tolerance": 0,
+      "note": "开发命令清单里的产物结构校验项数"
+    },
+    {
+      "path": "README.md",
+      "line_hint": 201,
+      "pattern": "PRD (\\d+) 项、R2 (\\d+) 项",
+      "group": 1,
+      "declared": 238,
+      "metric": "prd_items",
+      "tolerance": 0,
+      "note": "PRD 基线总项数（191 + 47）"
+    },
+    {
+      "path": "README.md",
+      "line_hint": 201,
+      "pattern": "PRD (\\d+) 项、R2 (\\d+) 项",
+      "group": 2,
+      "declared": 123,
+      "metric": "r2_items",
+      "tolerance": 0,
+      "note": "R2 基线总项数"
+    },
+    {
+      "path": "README.en.md",
+      "line_hint": 190,
+      "pattern": "(\\d+) unit tests",
+      "group": 1,
+      "declared": 571,
+      "metric": "unit_tests",
+      "tolerance": 0,
+      "note": "英文版的单测数"
+    },
+    {
+      "path": "README.en.md",
+      "line_hint": 191,
+      "pattern": "verify_a9\\.sh\\s+#[^\\n]*\\((\\d+)\\)",
+      "group": 1,
+      "declared": 80,
+      "metric": "a9_items",
+      "tolerance": 0,
+      "note": "英文版的页面结构校验项数"
+    },
+    {
+      "path": "README.en.md",
+      "line_hint": 192,
+      "pattern": "verify_codes\\.py\\s+#[^\\n]*\\((\\d+)\\)",
+      "group": 1,
+      "declared": 11,
+      "metric": "codes_items",
+      "tolerance": 0,
+      "note": "英文版的错误码表校验项数"
+    },
+    {
+      "path": "README.en.md",
+      "line_hint": 193,
+      "pattern": "verify-wiring[^\\n]*\\((\\d+)\\)",
+      "group": 1,
+      "declared": 117,
+      "metric": "wiring_items",
+      "tolerance": 0,
+      "note": "英文版的接线自检项数"
+    },
+    {
+      "path": "README.en.md",
+      "line_hint": 194,
+      "pattern": "verify_a5\\.sh\\s+#[^\\n]*\\((\\d+)\\)",
+      "group": 1,
+      "declared": 43,
+      "metric": "a5_items",
+      "tolerance": 0,
+      "note": "英文版的产物结构校验项数"
+    },
+    {
+      "path": "README.en.md",
+      "line_hint": 197,
+      "pattern": "PRD (\\d+) and R2 (\\d+) checks",
+      "group": 1,
+      "declared": 238,
+      "metric": "prd_items",
+      "tolerance": 0,
+      "note": "英文版的 PRD 基线总项数"
+    },
+    {
+      "path": "README.en.md",
+      "line_hint": 197,
+      "pattern": "PRD (\\d+) and R2 (\\d+) checks",
+      "group": 2,
+      "declared": 123,
+      "metric": "r2_items",
+      "tolerance": 0,
+      "note": "英文版的 R2 基线总项数"
+    },
+    {
+      "path": "ARCHITECTURE.md",
+      "line_hint": 34,
+      "pattern": "(\\d+) 个单测",
+      "group": 1,
+      "declared": 571,
+      "metric": "unit_tests",
+      "tolerance": 0,
+      "note": "目录树里的单测数"
+    },
+    {
+      "path": "ARCHITECTURE.md",
+      "line_hint": 122,
+      "pattern": "编译 \\+ (\\d+) 单测",
+      "group": 1,
+      "declared": 571,
+      "metric": "unit_tests",
+      "tolerance": 0,
+      "note": "自跑一遍的命令清单里的单测数"
+    },
+    {
+      "path": "ARCHITECTURE.md",
+      "line_hint": 37,
+      "pattern": "verify_a9\\.sh\\s+(\\d+) 项",
+      "group": 1,
+      "declared": 80,
+      "metric": "a9_items",
+      "tolerance": 0,
+      "note": "目录树里的页面结构校验项数"
+    },
+    {
+      "path": "ARCHITECTURE.md",
+      "line_hint": 38,
+      "pattern": "verify_a5\\.sh\\s+(\\d+) 项",
+      "group": 1,
+      "declared": 43,
+      "metric": "a5_items",
+      "tolerance": 0,
+      "note": "目录树里的产物结构校验项数"
+    },
+    {
+      "path": "ARCHITECTURE.md",
+      "line_hint": 39,
+      "pattern": "verify_codes\\.py\\s+(\\d+) 项",
+      "group": 1,
+      "declared": 11,
+      "metric": "codes_items",
+      "tolerance": 0,
+      "note": "目录树里的错误码表校验项数"
+    },
+    {
+      "path": "ARCHITECTURE.md",
+      "line_hint": 49,
+      "pattern": "DiagnosticCode\\.swift`? \\| (\\d+) 个诊断码",
+      "group": 1,
+      "declared": 24,
+      "metric": "diagnostic_codes",
+      "tolerance": 0,
+      "note": "诊断码个数"
+    },
+    {
+      "path": "ARCHITECTURE.md",
+      "line_hint": 108,
+      "pattern": "\\| `check_all\\.sh` \\| (\\d+) \\+ (\\d+) \\|",
+      "group": 1,
+      "declared": 191,
+      "metric": "prd_structure_items",
+      "tolerance": 0,
+      "note": "PRD 结构落点校验项数"
+    },
+    {
+      "path": "ARCHITECTURE.md",
+      "line_hint": 108,
+      "pattern": "\\| `check_all\\.sh` \\| (\\d+) \\+ (\\d+) \\|",
+      "group": 2,
+      "declared": 47,
+      "metric": "prd_cr022_items",
+      "tolerance": 0,
+      "note": "PRD 的 CR-022 落地校验项数"
+    },
+    {
+      "path": "ARCHITECTURE.md",
+      "line_hint": 109,
+      "pattern": "\\| `verify_r2\\.py` \\| (\\d+) \\|",
+      "group": 1,
+      "declared": 123,
+      "metric": "r2_items",
+      "tolerance": 0,
+      "note": "R2 基线总项数"
+    },
+    {
+      "path": "ARCHITECTURE.md",
+      "line_hint": 124,
+      "pattern": "错误码表（(\\d+) 项）",
+      "group": 1,
+      "declared": 11,
+      "metric": "codes_items",
+      "tolerance": 0,
+      "note": "自跑一遍的命令清单里的错误码表校验项数"
+    },
+    {
+      "path": "ARCHITECTURE.md",
+      "line_hint": 125,
+      "pattern": "空实现（(\\d+) 项）",
+      "group": 1,
+      "declared": 80,
+      "metric": "a9_items",
+      "tolerance": 0,
+      "note": "自跑一遍的命令清单里的页面结构校验项数"
+    },
+    {
+      "path": "ARCHITECTURE.md",
+      "line_hint": 127,
+      "pattern": "产物结构（(\\d+) 项，(\\d+) 项如实标未覆盖）",
+      "group": 1,
+      "declared": 43,
+      "metric": "a5_items",
+      "tolerance": 0,
+      "note": "自跑一遍的命令清单里的产物结构校验项数"
+    },
+    {
+      "path": "ARCHITECTURE.md",
+      "line_hint": 127,
+      "pattern": "产物结构（(\\d+) 项，(\\d+) 项如实标未覆盖）",
+      "group": 2,
+      "declared": 6,
+      "metric": "a5_uncovered",
+      "tolerance": 0,
+      "note": "产物结构校验里如实标未覆盖的项数"
+    },
+    {
+      "path": "ARCHITECTURE.md",
+      "line_hint": 129,
+      "pattern": "接线自检（(\\d+) 项",
+      "group": 1,
+      "declared": 117,
+      "metric": "wiring_items",
+      "tolerance": 0,
+      "note": "自跑一遍的命令清单里的接线自检项数"
+    },
+    {
+      "path": "CLAUDE.md",
+      "line_hint": 11,
+      "pattern": "`docs/` 下 (\\d+) 份",
+      "group": 1,
+      "declared": 145,
+      "metric": "docs_md",
+      "tolerance": 0,
+      "note": "契约文档总份数（本行与 §五 各处都出现，两处都要对）"
+    },
+    {
+      "path": "CLAUDE.md",
+      "line_hint": 20,
+      "pattern": "全部单测（当前 (\\d+) 个）",
+      "group": 1,
+      "declared": 571,
+      "metric": "unit_tests",
+      "tolerance": 0,
+      "note": "常用命令里的单测数"
+    },
+    {
+      "path": "CLAUDE.md",
+      "line_hint": 24,
+      "pattern": "一致性（(\\d+) 项）",
+      "group": 1,
+      "declared": 11,
+      "metric": "codes_items",
+      "tolerance": 0,
+      "note": "常用命令里的错误码表校验项数"
+    },
+    {
+      "path": "CLAUDE.md",
+      "line_hint": 25,
+      "pattern": "空实现（当前 (\\d+) 项）",
+      "group": 1,
+      "declared": 80,
+      "metric": "a9_items",
+      "tolerance": 0,
+      "note": "常用命令里的页面结构校验项数"
+    },
+    {
+      "path": "CLAUDE.md",
+      "line_hint": 26,
+      "pattern": "往返，当前 (\\d+) 项）",
+      "group": 1,
+      "declared": 117,
+      "metric": "wiring_items",
+      "tolerance": 0,
+      "note": "常用命令里的接线自检项数"
+    },
+    {
+      "path": "CLAUDE.md",
+      "line_hint": 79,
+      "pattern": "DiagnosticCode\\.swift`? \\| (\\d+) 个错误码",
+      "group": 1,
+      "declared": 24,
+      "metric": "diagnostic_codes",
+      "tolerance": 0,
+      "note": "诊断码个数"
+    },
+    {
+      "path": "docs/ledger/Residue-Phase3-闸门台账.md",
+      "line_hint": 18,
+      "pattern": "⚠️ (\\d+) 项未覆盖",
+      "group": 1,
+      "declared": 6,
+      "metric": "a5_uncovered",
+      "tolerance": 0,
+      "note": "A-5 闸门行里如实登记的未覆盖项数"
+    }
+  ]
+}

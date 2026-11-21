@@ -14,6 +14,10 @@ DerivedData/
 *.icns.tmp
 Residue.iconset/
 
+# ── Python 字节码缓存（import verify_counts 时自动生成）───────
+__pycache__/
+*.pyc
+
 # ── 开发期临时脚本（不进版本库）──────────────────────────────
 # 这些是构建/补丁过程的中间产物，不是交付物。
 # 正式的校验链（verify*.py / check_all.sh）**不在**此列，它们要进库。
