@@ -304,7 +304,7 @@
       "line_hint": 11,
       "pattern": "`docs/` 下 (\\d+) 份",
       "group": 1,
-      "declared": 146,
+      "declared": 147,
       "metric": "docs_md",
       "tolerance": 0,
       "note": "契约文档总份数（本行与 §五 各处都出现，两处都要对）"

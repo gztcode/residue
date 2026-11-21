@@ -214,14 +214,20 @@ jobs:
           这些是 CI 每次构建都会重跑的，不是一次性声明。
           EOF
 
-          # workflow_dispatch 时可能没有 tag，用 main 作为 target
-          TARGET="${GITHUB_REF_NAME}"
-          if [ "${GITHUB_REF_TYPE}" != "tag" ]; then
-            TARGET="main"
+          # **tag 触发时不能传 --target**：`target_commitish` 只接受分支名或
+          # commit SHA，传 tag 名会被 API 判 422「Release.target_commitish is
+          # invalid」（v0.1.5 的 tag 触发就是这样失败的）。tag 已经存在，
+          # release 直接指向它即可。
+          # 只有 workflow_dispatch（没有 tag）才需要显式给 main。
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            gh release create "v${VERSION}" \
+              --title "Residue v${VERSION}" \
+              --notes-file /tmp/notes.md \
+              "$DMG" out/SHA256SUMS.txt
+          else
+            gh release create "v${VERSION}" \
+              --target "main" \
+              --title "Residue v${VERSION}" \
+              --notes-file /tmp/notes.md \
+              "$DMG" out/SHA256SUMS.txt
           fi
-
-          gh release create "v${VERSION}" \
-            --target "$TARGET" \
-            --title "Residue v${VERSION}" \
-            --notes-file /tmp/notes.md \
-            "$DMG" out/SHA256SUMS.txt
