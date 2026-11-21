@@ -2,7 +2,7 @@
 
 > 状态：待实施
 > 变更类型：**只加度量与呈现，不改 `T` 公式、不改门槛判定、不改 `Source` 枚举**
-> 影响面：`ResidueCore`（新增 `TrashUsage` / `TrashUsageRecorder`；`TrashExecutor` / `StateHeader` / `ScanEngine` / `PageModel` / `PageModelBuilder` / `UICopy`）、`ResidueApp`（`AppModel` / `Pages`）、单测 12 个
+> 影响面：`ResidueCore`（新增 `TrashUsage` / `TrashUsageRecorder`；`TrashExecutor` / `StateHeader` / `ScanEngine` / `PageModel` / `PageModelBuilder` / `UICopy`）、`ResidueApp`（`AppModel` / `Pages`）、单测 15 个
 > 风险等级：P1 —— 不触碰「删除只做 rename 到废纸篓」与「删之前先证明自己判得准」；风险集中在「新字段进二进制载体」与「未知 vs 0」的呈现口径
 
 ---
@@ -53,10 +53,14 @@ public struct TrashUsage: Codable, Sendable, Equatable {
 
 | 时机 | 动作 |
 |---|---|
-| `init` 读回载体后 | `trashUsageRecorder.seed(contents.header.trashUsage)` |
+| `loadAndProject()` 里、`applyObservationResetIfNeeded()` 之后、`rebuild()` **之前** | `trashUsageRecorder.seed(contents.header.trashUsage)` |
 | 扫描收尾 / `executeBatch` / `restore` 之后 | `contents.header.trashUsage = trashUsageRecorder.usage`，随既有 `persist()` 一次落盘 |
 
 `restore` 原先不落盘，本单补上一次 `persist()` —— 否则「恢复后账变小」要等下一次清理才生效。
+
+**启动顺序（本轮修复）**：seed 原先在 `AppModel.init` 里、`loadAndProject()` **之后**调用，而 `loadAndProject()` 内部的 `rebuild()` 已经投影过一次 —— 首帧取的是空记账器，① 页恒显示「未知（尚无记录）」，且 seed 后不再重投影 ⇒ 一直挂到用户手动扫描 / 清理 / 恢复。这个指标就是「打开 App 想看一眼」用的，首帧错等于功能大半废掉。修法：把 seed 移进 `loadAndProject()`，放在 `applyObservationResetIfNeeded()` 之后（版本变更会清账，先 seed 等于把旧账播回来）、`rebuild()` 之前。
+
+**版本变更清账（本轮修复）**：`clearCarrierForObservationReset(preservingMissCount: false)`（应用版本变更分支）新增 `header.trashUsage = nil` —— 旧版本移入的条目新版本无法核对，账不跨版本带出。判定域指纹变更分支**不清**（条目仍在废纸篓）；也不放进 `resetObservationCredentials`（该函数被 `StateFileMigration` 的 schema 升级复用，迁移不该清用户的账）。
 
 ### 2.3 扫描快照带上该字段
 
@@ -109,14 +113,15 @@ public struct TrashUsage: Codable, Sendable, Equatable {
 | `Sources/ResidueCore/SemanticSlot.swift` | L436–450 | `UICopy.trashUsageUnknown` / `Title` / `Footnote` |
 | `Sources/ResidueCore/PageModel.swift` | L99–101 | 两个槽位（缺省 `.unavailable`）+ 执行摘要文案 |
 | `Sources/ResidueCore/PageModelBuilder.swift` | L58 / L97 / L118 / L204–207 | `Input.trashUsage` + 投影 |
-| `Sources/ResidueApp/AppModel.swift` | L68 / L203–209 / L503 / L564 / L708 / L835 / L1284 / L1312 | 记账器接线 + 落盘 |
+| `Sources/ResidueApp/AppModel.swift` | L68 / L203–207 / L316–338 / L508 / L569 / L713 / L840 / L1289 / L1317 | 记账器接线 + 启动顺序 seed + 落盘 |
+| `Sources/ResidueCore/StateFile.swift` | `clearCarrierForObservationReset` 版本变更分支 | 版本变更时 `header.trashUsage = nil` |
 | `Sources/ResidueApp/Pages.swift` | `OverviewPage` | 「回收站占用」卡片 |
-| `Tests/ResidueCoreTests/TrashUsageTests.swift` | 新文件 | 11 个单测 |
+| `Tests/ResidueCoreTests/TrashUsageTests.swift` | 新文件 | 14 个单测（含 3 条启动路径 / 版本清账） |
 | `Tests/ResidueCoreTests/ExecutionNoticeTests.swift` | `testDeletedSummarySaysSpaceNotFreedYet` | 文案守「尚未释放」 |
 
 ---
 
-## 六、单测（12 个）
+## 六、单测（15 个）
 
 | 用例 | 断言 |
 |---|---|
@@ -131,9 +136,12 @@ public struct TrashUsage: Codable, Sendable, Equatable {
 | `testStateHeaderRoundTripPreservesTrashUsage` | codec 往返不丢 |
 | `testOldHeaderWithoutTrashUsageDecodesAsNil` | 旧载体无该键 ⇒ `nil`，不判损坏 |
 | `testUsagePersistsThroughStateFile` | 经现有 `state.residue` 落盘可读回 |
+| `testStartupFirstProjectionUsesPersistedTrashUsage` | 载体带账 ⇒ 启动后**第一次**投影就是该值（复刻 `loadAndProject` 的 load → seed → rebuild 顺序） |
+| `testStartupFirstProjectionWithOldCarrierIsUnknownNotZero` | 旧载体无该键 ⇒ 首次投影是「未知」，不是 0 |
+| `testAppVersionResetClearsTrashUsageButDomainChangeKeepsIt` | 版本变更清账；判定域指纹变更保留账 |
 | `testDeletedSummarySaysSpaceNotFreedYet` | 中英文摘要都点明「仍在回收站 / 尚未释放」 |
 
-**单测总数**：合并 `origin/main`（`b5a1ac3`）后 **596**（`func test` 口径实测，`swift test` 0 failures；其中本单新增 12 个）⇒ 已同步 `.github/workflows/ci.yml:7`、`.github/workflows/release.yml:213`、`README.md:196`、`README.en.md:192`、`ARCHITECTURE.md:36 / 127 / 144`、`CLAUDE.md:22`、`tests/contract/fixtures/doc_claims.json` 的 5 处 `declared`。
+**单测总数**：合并 `origin/main`（`b5a1ac3`）后 **596**，本轮修启动路径再补 3 条 ⇒ **599**（`func test` 口径实测，`swift test` 0 failures；其中本单共新增 15 个）⇒ 已同步 `.github/workflows/ci.yml:5`、`.github/workflows/release.yml:211`、`README.md:196`、`README.en.md:192`、`ARCHITECTURE.md:34 / 122 / 136`、`CLAUDE.md:20`、`tests/contract/fixtures/doc_claims.json` 的 5 处 `declared`。
 
 ---
 
@@ -142,7 +150,7 @@ public struct TrashUsage: Codable, Sendable, Equatable {
 | 命令 | 预期 | 实测 |
 |---|---|---|
 | `swift build` | 成功 | ✅ Build complete |
-| `swift test` | 0 failures | ✅ **596 tests / 0 failures** |
+| `swift test` | 0 failures | ✅ **599 tests / 0 failures** |
 | `python3 scripts/verify_codes.py` | 11 / 0 | ✅ |
 | `./scripts/verify_a9.sh` | 80 / 0 | ✅ |
 | `swift run --disable-sandbox ResidueApp --verify-wiring /tmp/wiring` | 117 / 0 | ✅ |

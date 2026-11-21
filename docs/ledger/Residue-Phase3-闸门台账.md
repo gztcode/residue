@@ -539,7 +539,8 @@ R2 v1.10 §6.3.5 第 2 条（`docs/contract/Residue-R2-技术方案-v1.10.md:524
 - 账写进**现有载体** `StateHeader.trashUsage`（可选字段，旧载体解码为 `nil`，不判损坏），随既有 `persist()` 落盘 —— **不新开存储**；
 - `ScanEngine.scan(...)` 把该值原样带进 `ScanResult.trashUsage` 快照，**不参与判定**；
 - ① 页新增「回收站占用」卡片；`ExecutionNotice.summary` 改为「已移入废纸篓 N 条，共 X（**回收站仍占用，尚未释放磁盘空间**）」，中英文同步；
-- 没有记录时两个槽位是 `.unavailable("未知（尚无记录）")`，**不写 0**（不变量③）。
+- 没有记录时两个槽位是 `.unavailable("未知（尚无记录）")`，**不写 0**（不变量③）；
+- **启动顺序修复（2026-11-21 复核后）**：seed 从 `AppModel.init` 末尾移进 `loadAndProject()`、放在 `rebuild()` 之前 —— 原顺序先投影后 seed ⇒ 首帧恒「未知」，一直挂到用户手动扫描 / 清理 / 恢复；应用版本变更时载体里的账一并清零（判定域指纹变更不清，条目仍在废纸篓）。
 
 ### 现状口径（必须原样理解）
 
@@ -554,7 +555,7 @@ R2 v1.10 §6.3.5 第 2 条（`docs/contract/Residue-R2-技术方案-v1.10.md:524
 ### 状态（2026-11-21）
 
 ```
-swift test       596 全绿（基线 584 + CR-042 本单 12）
+swift test       599 全绿（基线 584 + CR-042 本单 15）
 verify_codes     11/11
 verify_a9        80/80
 --verify-wiring  117/117

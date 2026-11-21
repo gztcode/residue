@@ -205,9 +205,6 @@ final class AppModel {
         self.executor = TrashExecutor(usageRecorder: recorder)
         loadAndProject()
 
-        // 从载体读回回收站占用（`nil` = 旧载体没有这个键 ⇒ 保持未知）。
-        trashUsageRecorder.seed(contents.header.trashUsage)
-
         // **首启必须落盘**：若载体还不存在，立刻写出初始态。
         // 否则「卸载 → 重装 → 判据为初始态」无法与「从来没有写过」区分
         // —— A-10 第 9 条的首演判据就永远不可达（常在线在发布把关里点出过）。
@@ -330,6 +327,14 @@ final class AppModel {
             contents = c
         }
         applyObservationResetIfNeeded()
+        // **必须在 `rebuild()` 之前 seed**（CR-042）：`buildInput` 取的是
+        // `trashUsageRecorder.usage`，先投影后 seed 会让首帧恒显示「未知（尚无记录）」
+        // —— 即使载体里记着值。这个指标就是「打开 App 想看一眼」用的，首帧错等于白做。
+        //
+        // 放在重置之后：应用版本变更会清掉载体里的账（`clearCarrierForObservationReset`），
+        // 先 seed 再重置等于把旧版本的账播回来。
+        // `nil`（旧载体 / 首启）⇒ 保持未知，不造 0。
+        trashUsageRecorder.seed(contents.header.trashUsage)
         loadExecutions()
         rebuild()
     }

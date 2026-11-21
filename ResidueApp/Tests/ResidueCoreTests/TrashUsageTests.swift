@@ -213,4 +213,97 @@ final class TrashUsageTests: XCTestCase {
         let loaded = try XCTUnwrap(stateFile.load().contents)
         XCTAssertEqual(loaded.header.trashUsage, usage)
     }
+
+    // MARK: - 启动路径：首帧投影就要用上载体里的账
+
+    /// 复刻 `AppModel.loadAndProject()` 的顺序：`load()` → `seed()` → 首次 `rebuild()`。
+    ///
+    /// `AppModel` 是主 actor + 真 IO，归接线自检；这里用同一批公开原语把
+    /// **启动后第一次投影**走一遍 —— 顺序错了（先投影后 seed）首帧就是「未知」。
+    private func firstProjectionAfterStartup(
+        _ stateFile: StateFile
+    ) throws -> (model: PageModel, recorder: TrashUsageRecorder) {
+        let loaded = try XCTUnwrap(stateFile.load().contents)
+        let recorder = TrashUsageRecorder()
+        recorder.seed(loaded.header.trashUsage)
+        let model = PageModelBuilder.build(
+            PageModelBuilder.Input(contents: loaded, trashUsage: recorder.usage)
+        )
+        return (model, recorder)
+    }
+
+    /// 载体里记着账 ⇒ 启动后第一次投影就是该值，不是「未知」。
+    ///
+    /// 回归点：`AppModel.init` 曾先 `loadAndProject()`（内含 `rebuild()`）再 `seed`，
+    /// 且 seed 后不重投影 ⇒ 首帧恒「未知」，一直挂到用户手动扫描 / 清理 / 恢复。
+    func testStartupFirstProjectionUsesPersistedTrashUsage() throws {
+        let stateFile = StateFile(directory: root.appendingPathComponent("startup", isDirectory: true))
+        let usage = TrashUsage(
+            bytes: 2048,
+            items: 1,
+            updatedAt: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+        var header = StateHeader()
+        header.trashUsage = usage
+        _ = try stateFile.save(header: header, payloads: [:])
+
+        let (model, recorder) = try firstProjectionAfterStartup(stateFile)
+
+        XCTAssertEqual(recorder.usage, usage, "启动时记账器必须已从载体播种")
+        XCTAssertEqual(model.trashUsageBytes, .metric(2048, unit: .bytes), "首帧必须是载体里的值")
+        XCTAssertEqual(model.trashUsageItems, .metric(1, unit: .items))
+    }
+
+    /// 旧载体（没有该键）⇒ 启动后第一次投影是「未知」，**不是 0**。
+    ///
+    /// 合成 `Codable` 对 `Optional` 用 `encodeIfPresent` ⇒ `trashUsage = nil`
+    /// 写出的 JSON 天然没有这个键，与旧版本写的载体同形。
+    func testStartupFirstProjectionWithOldCarrierIsUnknownNotZero() throws {
+        let stateFile = StateFile(directory: root.appendingPathComponent("old", isDirectory: true))
+        _ = try stateFile.save(header: StateHeader(), payloads: [:])
+
+        let (model, recorder) = try firstProjectionAfterStartup(stateFile)
+
+        XCTAssertNil(recorder.usage, "旧载体没有账 ⇒ 未知")
+        XCTAssertTrue(model.trashUsageBytes.isUnavailable, "旧载体 ⇒ 未知，不是 0")
+        XCTAssertTrue(model.trashUsageItems.isUnavailable)
+        XCTAssertNotEqual(model.trashUsageBytes, .metric(0, unit: .bytes), "未知不得冒充 0")
+    }
+
+    /// 应用版本变更 ⇒ 载体里的账随版本清零（旧账不跨版本带出来）；
+    /// 判定域指纹变更 ⇒ 账保留（条目仍在废纸篓里）。
+    func testAppVersionResetClearsTrashUsageButDomainChangeKeepsIt() throws {
+        let usage = TrashUsage(
+            bytes: 4096,
+            items: 2,
+            updatedAt: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+
+        func seededCarrier(_ name: String) throws -> StateFile {
+            let stateFile = StateFile(directory: root.appendingPathComponent(name, isDirectory: true))
+            var header = StateHeader()
+            header.appVersion = "1.0"
+            header.trashUsage = usage
+            _ = try stateFile.save(header: header, payloads: [:])
+            return stateFile
+        }
+
+        let versionChanged = try seededCarrier("version-reset")
+        try versionChanged.clearCarrierForObservationReset(
+            newAppVersion: "2.0",
+            newDecisionDomainSignature: Source.decisionDomainSignature,
+            preservingMissCount: false
+        )
+        let afterVersion = try XCTUnwrap(versionChanged.load().contents)
+        XCTAssertNil(afterVersion.header.trashUsage, "版本变更 ⇒ 旧账清零，不得带出来")
+
+        let domainChanged = try seededCarrier("domain-reset")
+        try domainChanged.clearCarrierForObservationReset(
+            newAppVersion: "1.0",
+            newDecisionDomainSignature: "changed-domain",
+            preservingMissCount: true
+        )
+        let afterDomain = try XCTUnwrap(domainChanged.load().contents)
+        XCTAssertEqual(afterDomain.header.trashUsage, usage, "判定域变更不清账：条目仍在废纸篓")
+    }
 }
