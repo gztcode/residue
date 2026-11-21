@@ -1,0 +1,12 @@
+{
+  "issue": 101,
+  "reproduced": false,
+  "category": "界面/交互",
+  "injection_suspected": false,
+  "reason": "自测样本：这是交互类问题，本机没有显示会话，写不出会在 main 上变红的测试。",
+  "test_file": "",
+  "test_name": "",
+  "failure_output": "",
+  "root_cause_hint": "",
+  "needs_human": ""
+}

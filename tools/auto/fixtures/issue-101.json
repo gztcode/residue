@@ -1,0 +1,13 @@
+{
+  "title": "【自测样本】扫描 uv 缓存时把正在被进程使用的目录算成可删",
+  "body": "复现步骤：\n\n1. 打开一个 uv 项目，让 `uv` 进程持有 `~/.cache/uv` 下的目录 fd\n2. 在 Residue 里触发扫描\n3. 该目录出现在「可清理」列表里\n\n预期：正在被使用的目录不该出现在可清理列表里。\n\n实际：它出现了。",
+  "labels": [
+    {
+      "id": "MDU6TGFiZWw=",
+      "name": "bug",
+      "description": "行为缺陷",
+      "color": "d73a4a"
+    }
+  ],
+  "comments": []
+}

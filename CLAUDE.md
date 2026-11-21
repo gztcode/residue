@@ -17,13 +17,13 @@ SwiftPM 命令在 `ResidueApp/` 目录下执行（SwiftPM 包根）；文档基�
 ```bash
 swift build                      # 编译
 swift build -c release           # Release 会裁掉 #if DEBUG 的自检入口，必须单独验
-swift test                       # 全部单测（当前 555 个）
+swift test                       # 全部单测（当前 560 个）
 swift test --filter "MetricsTests"                                    # 跑一个测试类
 swift test --filter "ResidueCoreTests.MetricsTests/testThresholdIsMinOf30AndTotal"  # 跑单个用例
 
 python3 scripts/verify_codes.py   # 错误码表 ↔ 文档一致性（11 项）
 ./scripts/verify_a9.sh            # 页面结构 + 界面禁算术 + 数据层接线 + 空实现（当前 80 项）
-swift run --disable-sandbox ResidueApp --verify-wiring /tmp/wiring   # 接线自检（真 IO 往返，当前 111 项）
+swift run --disable-sandbox ResidueApp --verify-wiring /tmp/wiring   # 接线自检（真 IO 往返，当前 117 项）
 swift run --disable-sandbox ResidueApp --render-pages design-renders # 重渲染 16 张设计稿
 ./scripts/make_app.sh             # 产出 build/Residue.app + Residue.app.dmg（无证书时 ad-hoc 签名）
 ./scripts/verify_a5.sh            # 产物结构校验（需先跑 make_app.sh）
@@ -37,6 +37,12 @@ python3 tests/contract/verify_r2.py  # R2 v1.10：结构 30 + 落地 65 + 归零
 ```
 
 `check_all.sh`、`verify_r2.py`，以及 `check_all.sh` 调用的四个脚本（`verify18.py` / `verify_claims.py` / `verify_single_def.py` / `verify_cr022.py`）都**自动发现最新版本号**（不写死），新增版本文档后无需改脚本。历史版校验脚本（`verify3.py`…`verify17.py`）同放此处，保留备查。
+
+**本地 issue 自动化**在 `tools/auto/`（不在 GitHub Actions 上跑，用本机 `claude` CLI）：
+
+```bash
+./tools/auto/poll.sh --self-test   # 离线自测：三条硬门槛不被绕过（退出码 0 = 通过）
+```
 
 跑 GUI：`swift run ResidueApp`（菜单栏常驻，无 Dock 图标）。
 
@@ -143,7 +149,7 @@ AppModel（@MainActor，编排层）
 
 ## 六、CI 验什么 / 不验什么
 
-`.github/workflows/ci.yml`（macOS-15 / arm64）按序跑：编译 → release 编译 → 单测 → 码表 → a9 → 接线自检 → 打包 → a5 → PRD 基线 → R2 基线 → 重渲染设计稿。
+`.github/workflows/ci.yml`（macOS-15 / arm64）按序跑：编译 → release 编译 → 单测 → 码表 → a9 → 接线自检 → 打包 → a5 → PRD 基线 → R2 基线 → 自动化脚本自测 → 重渲染设计稿。
 
 **CI 绿 ≠ 可发布。** 验不了的六项（需外部资源，属 A-10 发布准入）：公证、钉票、`spctl` 通过、干净机装机、GUI 交互/滚动/焦点可达性、回滚演练。
 

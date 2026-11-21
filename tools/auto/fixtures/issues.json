@@ -1,0 +1,30 @@
+[
+  {
+    "number": 101,
+    "labels": [
+      {
+        "id": "MDU6TGFiZWw=",
+        "name": "bug",
+        "description": "行为缺陷",
+        "color": "d73a4a"
+      }
+    ]
+  },
+  {
+    "number": 102,
+    "labels": [
+      {
+        "id": "MDU6TGFiZWw=",
+        "name": "bug",
+        "description": "行为缺陷",
+        "color": "d73a4a"
+      },
+      {
+        "id": "MDU6QXV0by1za2lw",
+        "name": "auto-skip",
+        "description": "自动处理跳过",
+        "color": "ededed"
+      }
+    ]
+  }
+]

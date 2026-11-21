@@ -9,12 +9,16 @@
 #   ./tools/auto/poll.sh --once          处理当前未关闭 issue 后退出
 #   ./tools/auto/poll.sh --loop 1800     每 1800 秒轮询一次
 #   ./tools/auto/poll.sh --issue 42      只处理 #42（调试用）
+#   ./tools/auto/poll.sh --dry-run       同 --once，但**不推送、不开 PR**
+#   ./tools/auto/poll.sh --self-test     离线自测（不碰网络、不碰真实仓库）
 set -uo pipefail
 
-REPO="gztcode/residue"
+# 下面几个都可用环境变量覆盖 —— 自测要在临时目录里跑，不能碰真实仓库与真实凭据。
+REPO="${RESIDUE_AUTO_REPO:-gztcode/residue}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
-REPO_ROOT="$(cd "$HERE/../.." && pwd)"
-STATE="${XDG_STATE_HOME:-$HOME/.local/state}/residue-auto"
+REPO_ROOT="${RESIDUE_AUTO_REPO_ROOT:-$(cd "$HERE/../.." && pwd)}"
+STATE="${RESIDUE_AUTO_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/residue-auto}"
+WT_ROOT="${RESIDUE_AUTO_WORKTREE_ROOT:-/tmp}"
 mkdir -p "$STATE"/{runs,done,logs}
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$STATE/logs/poll.log"; }
@@ -66,8 +70,14 @@ else:
 process_issue() {
   local N="$1"
   local RUN="$STATE/runs/$(date '+%Y%m%d-%H%M%S')-issue-${N}"
-  local WT="/tmp/residue-auto-${N}"
+  local WT="$WT_ROOT/residue-auto-${N}"
   local BR="auto/issue-${N}"
+
+  # ── 三条硬门槛（各自落点见下）─────────────────────────────────
+  #   1. 不处理「无法复现」的 issue → `reproduced != true` 就到此为止（阶段 1 末）
+  #   2. 不改契约文档（`docs/**`） → 按 git 实际改动路径兜底（阶段 2 末，提交前）
+  #   3. 不合并 PR               → 本脚本**没有**合并命令，自测断言它不出现
+  # 「提示词里写了不许」不算护栏 —— 门槛得由脚本本身兜住。
 
   mkdir -p "$RUN"
   log "── issue #${N} 开始 ──"
@@ -130,6 +140,35 @@ process_issue() {
       echo "卡在：$(field "$WT/AUTO_RESULT.json" blocked)"
       echo
       echo "<sub>失败测试已保留在分支 \`$BR\`，可人工接手。</sub>"
+    } > "$RUN/comment.md"
+    gh issue comment "${N}" --repo "$REPO" --body-file "$RUN/comment.md" || true
+    cd "$REPO_ROOT"; git worktree remove --force "$WT" >/dev/null 2>&1
+    touch "$STATE/done/${N}"
+    return 1
+  fi
+
+  # ── 门槛 2：契约文档不许被改（机器不代签变更单）──────────────
+  # `fix.md` 里写了「契约文档不许改」，但**提示词不是护栏** ——
+  # 模型可能不照做。这里按 git 的**实际改动路径**兜底：
+  # 只要碰了 `docs/` 下的任何文件，一律拒绝提交 / 推送 / 开 PR。
+  #
+  # 为什么是整个 `docs/`：
+  #   `docs/contract/` 改契约要变更单 · `docs/changes/` 变更单由人签 ·
+  #   `docs/reviews/` 结论只能由人下 · `docs/ledger/` 是闸门台账 ——
+  # 四类都不由机器改。真要改契约，正确做法是**人写变更单**，机器只实现。
+  local touched forbidden
+  touched="$( { git -C "$WT" diff --name-only HEAD; git -C "$WT" ls-files --others --exclude-standard; } | sort -u )"
+  forbidden="$(printf '%s\n' "$touched" | grep '^docs/' || true)"
+  if [ -n "$forbidden" ]; then
+    log "issue #${N}：改了 docs/ 下的文件 —— 拒绝提交 / 推送 / 开 PR"
+    {
+      echo "## 自动修复被拦下：改了契约文档"
+      echo
+      echo "自动修复碰了这些文件："
+      echo
+      printf '%s\n' "$forbidden" | sed 's/^/- `/; s/$/`/'
+      echo
+      echo "契约文档需要变更单（CR），机器不代签。分支 \`$BR\` 保留在本地仓库，可人工接手。"
     } > "$RUN/comment.md"
     gh issue comment "${N}" --repo "$REPO" --body-file "$RUN/comment.md" || true
     cd "$REPO_ROOT"; git worktree remove --force "$WT" >/dev/null 2>&1
@@ -213,13 +252,28 @@ $summary
 }
 
 main() {
-  local mode="${1:---once}"
+  # `--self-test` 优先于一切：不带任何副作用地跑离线自测。
+  local a
+  for a in "$@"; do
+    if [ "$a" = "--self-test" ]; then exec "$HERE/selftest.sh"; fi
+  done
+
+  # `--dry-run` 是全局开关，可以出现在任何位置（等同于 `AUTO_DRY_RUN=1`）。
+  local rest=()
+  for a in "$@"; do
+    case "$a" in
+      --dry-run) export AUTO_DRY_RUN=1 ;;
+      *) rest+=("$a") ;;
+    esac
+  done
+
+  local mode="${rest[0]:---once}"
   case "$mode" in
     --issue)
-      process_issue "$2"; exit $?
+      process_issue "${rest[1]:-}"; exit $?
       ;;
     --loop)
-      local interval="${2:-1800}"
+      local interval="${rest[1]:-1800}"
       log "轮询模式启动，间隔 ${interval}s"
       while true; do
         one_pass
