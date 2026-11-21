@@ -24,7 +24,9 @@ import Foundation
 // ## 四条硬约束（照抄 §5.1，改动前先读 §5.1）
 //   1. **段序固定**：`sources` 是数组，顺序 = `Source.allCases` 的**声明序**，
 //      **不用 `Dictionary`**（Swift 每进程随机哈希种子 → 段序漂移 → 读方串段）。
-//      读方按 `(sourceIndex, kind)` 索引，**不按位置猜**。
+//      读方按 `(sourceIndex, kind)` 索引，**不按位置猜**。`sourceIndex` 取
+//      `Source.stableIndex`（显式 ABI，**不是**声明序下标这种隐式巧合），
+//      改动由 `SourceABITests` 守着。
 //   2. **段长恒由 `slotCount` 决定，与置位情况无关**：`F` 段长 `= ceil(slotCount/8)`。
 //      加载期断言 `bitmapBytes == (slotCount + 7) / 8`，不等即 `E-304`。
 //   3. **加载期校验三连**：尺寸恒等式 / 越界与重叠 / CRC32 一致。任一失败 → `E-304`，
@@ -106,7 +108,7 @@ public struct SegmentDescriptor: Sendable, Equatable {
     public var length: UInt64
     /// 段种类。
     public var kind: SegmentKind
-    /// 来源序号（`Source.allCases` 的声明序下标）。
+    /// 来源序号（= `Source.stableIndex`，载体 ABI，见 `Source.stableIndex`）。
     public var sourceIndex: UInt8
     /// 保留（写 0）。
     public var reservedU16: UInt16
@@ -630,12 +632,16 @@ public enum StateFileCodec {
 
         // 段序固定：按 `Source.allCases` 声明序遍历，
         // **每来源三段（schema 1）或四段（schema 2）、顺序 F → C_done → Slots → Snapshot**
+        //
+        // ⚠️ 段索引**必须**取 `source.stableIndex`，不能用 `enumerated()` 的序号 ——
+        // 那个序号只是「恰好等于 stableIndex」，是隐式 ABI 而不是显式声明
+        // （见 `Source.stableIndex` 与 `SourceABITests`）。
         var segments: [SegmentDescriptor] = []
         var payloadBytes = Data()
 
-        for (sourceIndex, source) in Source.allCases.enumerated() {
+        for source in Source.allCases {
             guard let p = payloads[source] else { continue }
-            let index = UInt8(sourceIndex)
+            let index = source.stableIndex
 
             // ① F 位图
             let fLen = UInt64(p.bitmap.count)
@@ -912,14 +918,13 @@ public enum StateFileCodec {
         // 用 Unix 纪元，schema 2 用参考纪元（往返逐位无损）。
         let birthtimeBase = BirthtimeBase.forSchema(schemaVersion)
         var payloads: [Source: SourcePayload] = [:]
-        let sourceList = Source.allCases
         for seg in segments {
-            guard Int(seg.sourceIndex) < sourceList.count else {
+            // 只认 `stableIndex` 这一个入口（见 `Source.stableIndex`）。
+            guard let source = Source(stableIndex: seg.sourceIndex) else {
                 throw StateFileError.segmentValidationFailed(
-                    detail: "sourceIndex \(seg.sourceIndex) 越界"
+                    detail: "sourceIndex \(seg.sourceIndex) 越界或未知"
                 )
             }
-            let source = sourceList[Int(seg.sourceIndex)]
             var payload = payloads[source] ?? SourcePayload()
             let start = Int(seg.offset)
             let end = start + Int(seg.length)

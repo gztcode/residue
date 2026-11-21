@@ -97,6 +97,40 @@ public enum Source: String, Codable, Sendable, CaseIterable {
         }
     }
 
+    /// 落盘稳定索引（**载体 ABI**）。
+    ///
+    /// `state.residue` 段表里的 `sourceIndex u8` 就是本值 —— 它是**文件格式的一部分**，
+    /// 不是「恰好等于声明序」的巧合。`Source` 是封闭枚举，任何在中间插入 case 的
+    /// 改动都会让存量载体的段索引整体错位 ⇒ 误判数 `a` 归到错误来源 ⇒
+    /// 不变量④「删之前先证明自己判得准」静默失效。
+    ///
+    /// 规则（由 `SourceABITests` 的冻结表与源码守卫守着，`swift test` 每次必跑）：
+    /// 1. 已发布的值**永不可改**（同 `rawValue`）；
+    /// 2. 新来源只能取**当前最大值 + 1**（只追加到枚举末尾，不插入）；
+    /// 3. 本值必须与 `allCases` 声明序一致 —— 段表读写一律走它，不走 `enumerated()`。
+    public var stableIndex: UInt8 {
+        switch self {
+        case .uvCache: return 0
+        case .npmNpx: return 1
+        case .pipxRun: return 2
+        case .homebrewDownloads: return 3
+        case .cargoRegistryCache: return 4
+        case .pnpmStore: return 5
+        case .bunCache: return 6
+        }
+    }
+
+    /// 由落盘索引还原来源 —— **读载体的唯一入口**。
+    ///
+    /// 返回 `nil` = 文件里出现了本版本不认识的 `sourceIndex`（既可能越界，
+    /// 也可能是未来版本追加的来源）⇒ 调用方必须报 `E-304`，不猜、不部分加载。
+    public init?(stableIndex: UInt8) {
+        guard let source = Self.allCases.first(where: { $0.stableIndex == stableIndex }) else {
+            return nil
+        }
+        self = source
+    }
+
     /// ★ 判定域成员指纹（CR-038）。
     ///
     /// 编码**全部来源及其归属**（不只是判定域成员）⇒ 任何来源集合或归属变化
