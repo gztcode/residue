@@ -24,7 +24,7 @@
       "line_hint": 194,
       "pattern": "(\\d+) 个单测",
       "group": 1,
-      "declared": 555,
+      "declared": 571,
       "metric": "unit_tests",
       "tolerance": 0,
       "note": "开发命令清单里的单测数"
@@ -54,7 +54,7 @@
       "line_hint": 197,
       "pattern": "verify-wiring[^\\n]*（(\\d+) 项）",
       "group": 1,
-      "declared": 111,
+      "declared": 117,
       "metric": "wiring_items",
       "tolerance": 0,
       "note": "开发命令清单里的接线自检项数"
@@ -94,7 +94,7 @@
       "line_hint": 190,
       "pattern": "(\\d+) unit tests",
       "group": 1,
-      "declared": 555,
+      "declared": 571,
       "metric": "unit_tests",
       "tolerance": 0,
       "note": "英文版的单测数"
@@ -124,7 +124,7 @@
       "line_hint": 193,
       "pattern": "verify-wiring[^\\n]*\\((\\d+)\\)",
       "group": 1,
-      "declared": 111,
+      "declared": 117,
       "metric": "wiring_items",
       "tolerance": 0,
       "note": "英文版的接线自检项数"
@@ -164,7 +164,7 @@
       "line_hint": 34,
       "pattern": "(\\d+) 个单测",
       "group": 1,
-      "declared": 555,
+      "declared": 571,
       "metric": "unit_tests",
       "tolerance": 0,
       "note": "目录树里的单测数"
@@ -174,7 +174,7 @@
       "line_hint": 122,
       "pattern": "编译 \\+ (\\d+) 单测",
       "group": 1,
-      "declared": 555,
+      "declared": 571,
       "metric": "unit_tests",
       "tolerance": 0,
       "note": "自跑一遍的命令清单里的单测数"
@@ -294,7 +294,7 @@
       "line_hint": 129,
       "pattern": "接线自检（(\\d+) 项",
       "group": 1,
-      "declared": 111,
+      "declared": 117,
       "metric": "wiring_items",
       "tolerance": 0,
       "note": "自跑一遍的命令清单里的接线自检项数"
@@ -304,7 +304,7 @@
       "line_hint": 11,
       "pattern": "`docs/` 下 (\\d+) 份",
       "group": 1,
-      "declared": 143,
+      "declared": 145,
       "metric": "docs_md",
       "tolerance": 0,
       "note": "契约文档总份数（本行与 §五 各处都出现，两处都要对）"
@@ -314,7 +314,7 @@
       "line_hint": 20,
       "pattern": "全部单测（当前 (\\d+) 个）",
       "group": 1,
-      "declared": 555,
+      "declared": 571,
       "metric": "unit_tests",
       "tolerance": 0,
       "note": "常用命令里的单测数"
@@ -344,7 +344,7 @@
       "line_hint": 26,
       "pattern": "往返，当前 (\\d+) 项）",
       "group": 1,
-      "declared": 111,
+      "declared": 117,
       "metric": "wiring_items",
       "tolerance": 0,
       "note": "常用命令里的接线自检项数"
