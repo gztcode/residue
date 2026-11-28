@@ -61,6 +61,12 @@ final class AppModel {
     /// 位置告警（Translocation / 不在「应用程序」）。
     var locationWarning: String?
 
+    /// 执行记录的**补写提示**（中性提示，不是错误 · CR-045）。
+    ///
+    /// 「上次有 N 条执行记录没写进磁盘，现已补写」这类**已经解决**的事，
+    /// 不该用红色错误横幅；但用户有权知道**恢复入口恢复了**。
+    var executionRecordNotice: String?
+
     // ---- IO 组件 ----
     private let loginItem = LoginItemManager()
     private var scheduler: ScheduledRunner?
@@ -152,6 +158,13 @@ final class AppModel {
     private var lastExecutionNotice: PageModel.ExecutionNotice?
     private let stateFile: StateFile
     private let writer: RecordWriter
+    /// 执行记录的落盘责任方（AC-18 举证链 + 待补写队列 · CR-045）。
+    ///
+    /// ⚠️ **不许直接 `try? writer.append(rec, kind: .execution)`**：
+    /// 文件**已经**在废纸篓里了，写盘失败 = **恢复入口消失**。
+    /// 落盘结果由 `ExecutionRecordStore` 分档（已落盘 / 待补写 / 彻底丢失），
+    /// 本层只做接线与如实上报（不变量②：同一判定只有一个实现处）。
+    private let executionStore: ExecutionRecordStore
     /// 扫描断点（`state/checkpoints.json` · AC-20 断点续扫）。
     private let checkpoints: CheckpointStore
     private let engine = ScanEngine()
@@ -192,6 +205,11 @@ final class AppModel {
     ) {
         self.stateFile = stateFile
         self.writer = writer
+        // 待补写队列落 `state/`（**不计入 M6 计量**，但计入 N7 清除范围 · CR-045）。
+        self.executionStore = ExecutionRecordStore(
+            writer: writer,
+            pendingURL: stateFile.pendingExecutionURL
+        )
         // 断点落 `state/` 子目录（**不计入 N7 计量**，但计入 N7 清除范围），
         // 与 `state/schedule.json` 同级 —— 见 R2 §5.5 / §10.3。
         self.checkpoints = checkpoints ?? CheckpointStore(
@@ -335,7 +353,10 @@ final class AppModel {
         // 先 seed 再重置等于把旧版本的账播回来。
         // `nil`（旧载体 / 首启）⇒ 保持未知，不造 0。
         trashUsageRecorder.seed(contents.header.trashUsage)
-        loadExecutions()
+        // 补写结果并进错误横幅（**不覆盖**状态载体的错误 —— 两条都要看得见）。
+        if let drainError = loadExecutions() {
+            errorMessage = errorMessage.map { "\($0)。\(drainError)" } ?? drainError
+        }
         rebuild()
     }
 
@@ -452,28 +473,61 @@ final class AppModel {
     ///
     /// ## 解码方式
     ///
-    /// `readLines` 返回 `[String: Any]`（已解析的字典，丢了原始行文本）。
-    /// 这里重新序列化成 JSON 再交给 `iso8601` 解码器 —— 与 `RecordWriter.append`
-    /// 的编码策略必须**成对**（`dateEncodingStrategy = .iso8601`），
-    /// 否则解码静默失败、记录全丢（本仓库 Preferences 踩过同一个坑）。
-    private func loadExecutions() {
-        guard let dicts = try? writer.readLines(kind: .execution), !dicts.isEmpty else {
-            executions = []
-            return
+    /// 解码由 `ExecutionRecordStore` 负责（`iso8601` + 与写入端**成对**的策略，
+    /// 否则解码静默失败、记录全丢 —— 本仓库 Preferences 踩过同一个坑）。
+    /// 本层不再自己解析 JSON（同一判定只有一个实现处）。
+    ///
+    /// ## 补写（CR-045）
+    ///
+    /// 读回执行记录（AC-18 的举证链），并把**上次没写进去的**补写回来。
+    ///
+    /// ## 为什么要补写
+    ///
+    /// 文件**已经**在废纸篓里了，而恢复路径 `restorePath` **只有执行记录能提供**
+    /// （`TrashExecutor.restore` 的入口就是 `guard let restorePath else throw .noRestorePath`）。
+    /// 记录写不下去 = **恢复入口消失** —— 所以写失败的记录会进
+    /// `state/pending-execution.jsonl` 待补写队列，这里在启动时补回 `execution.jsonl`。
+    ///
+    /// ⚠️ **补写不成功必须如实说**（不许静默）：那意味着这些条目的恢复入口还没恢复。
+    ///
+    /// - 返回值：错误横幅文案（`nil` = 没有需要报的错）；**不覆盖**已有的错误信息。
+    @discardableResult
+    private func loadExecutions() -> String? {
+        let result = executionStore.loadAndDrain()
+        executions = result.records
+        if result.drain.recoveredCount > 0 {
+            executionRecordNotice = L.pick(
+                "上次有 \(result.drain.recoveredCount) 条执行记录没写进磁盘，现已补写（恢复入口恢复可用）",
+                "\(result.drain.recoveredCount) execution record(s) that could not be written last time are written now (restore entries are available again)"
+            )
         }
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        var loaded: [ExecutionRecord] = []
-        loaded.reserveCapacity(dicts.count)
-        for dict in dicts {
-            guard let data = try? JSONSerialization.data(withJSONObject: dict),
-                  let rec = try? decoder.decode(ExecutionRecord.self, from: data)
-            else { continue }
-            loaded.append(rec)
+        return drainErrorMessage(result.drain)
+    }
+
+    /// 补写结果 → 错误横幅文案（**一条都不许静默**）。
+    private func drainErrorMessage(_ drain: ExecutionRecordStore.DrainResult) -> String? {
+        guard !drain.isClean else { return nil }
+        var parts: [String] = []
+        if drain.remainingCount > 0 {
+            parts.append(L.pick(
+                "有 \(drain.remainingCount) 条执行记录仍没写进磁盘（这些条目的恢复入口暂不可用，下次启动会再试）",
+                "\(drain.remainingCount) execution record(s) are still not on disk (restore entries unavailable for those items; will retry on next launch)"
+            ))
         }
-        // **按执行时刻排序**：文件顺序是 append 顺序，但恢复动作会再追加一条
-        // 同一 candidate 的 `restored_by_user`。排序后界面按时间线读才对。
-        executions = loaded.sorted { $0.executedAt < $1.executedAt }
+        if drain.corruptLineCount > 0 {
+            parts.append(L.pick(
+                "待补写队列里有 \(drain.corruptLineCount) 行读不出来（已原样保留，未丢弃）",
+                "\(drain.corruptLineCount) line(s) in the pending queue could not be parsed (kept as-is, nothing discarded)"
+            ))
+        }
+        if drain.failure == .logUnreadable {
+            parts.append(L.pick(
+                "执行记录文件读不出来，本次没有补写（避免重复写入）",
+                "The execution log could not be read, so nothing was written back (to avoid duplicates)"
+            ))
+        }
+        guard !parts.isEmpty else { return nil }
+        return describe(.e303, detail: parts.joined(separator: "；"))
     }
 
     private func rebuild() {
@@ -1260,13 +1314,15 @@ final class AppModel {
         }
 
         // 写 `execution.jsonl`（AC-18 举证链的数据源）
-        for rec in newRecords {
-            try? writer.append(rec, kind: .execution, now: now)
-        }
+        //
+        // ⚠️ **写盘失败绝不静默**（CR-045）：文件**已经**搬进废纸篓了，
+        // 而 `restorePath` **只有这条记录能提供** ⇒ 记录写不下去 = **恢复入口消失**。
+        // 所以落盘结果必须分档（`persisted` 已落盘 / `queued` 待补写 / `lost` 彻底丢失），
+        // 并如实报给界面 —— 原实现 `try?` 吞掉失败，却照样报「已清理 N 条」。
+        let persistResult = executionStore.persist(newRecords, now: now)
         executions.append(contentsOf: newRecords)
 
         // AC-15：顺延条目数 = 候选总数 − 实际删除条目数
-        let deleted = newRecords.filter { $0.action == .renameToTrash }.count
         deferredCount = Swift.max(0, totalSkipped)
 
         // ---- **结果反馈**：用户点了「执行」，必须得到答复 ----
@@ -1274,21 +1330,71 @@ final class AppModel {
         // 原先执行完只写 `lastExecutionAt` 然后 rebuild —— 界面上什么都不变。
         // 用户不知道删了几条、有没有失败、要不要处理。`outcome.failures`
         // 更是**完全丢弃**（连日志都没有），失败没有任何痕迹。
-        let deletedRecords = newRecords.filter { $0.action == .renameToTrash }
+        //
+        // ⚠️ **「已清理 N 条」只算执行记录已落盘的那些**（CR-045）：
+        // 记录没落盘 ⇒ 那一条的**恢复入口还不存在** —— 混进去就是告诉用户
+        // 「一切正常」，而实际上他删掉的东西恢复不了。
         lastExecutionNotice = PageModel.ExecutionNotice(
-            deletedCount: deletedRecords.count,
-            deletedBytes: deletedRecords.reduce(Int64(0)) { $0 + $1.bytes },
+            deletedCount: persistResult.deleted.persistedCount,
+            deletedBytes: persistResult.deleted.persistedBytes,
+            unloggedCount: persistResult.deleted.queuedCount,
+            unloggedBytes: persistResult.deleted.queuedBytes,
+            lostCount: persistResult.deleted.lostCount,
+            lostBytes: persistResult.deleted.lostBytes,
             deferredCount: deferredCount,
             failedCount: newRecords.filter { $0.action == .failed }.count + totalFailures,
             blockedCount: newRecords.filter { $0.action == .blockedSecondCheck }.count
                 + newRecords.filter { $0.action == .blockedOutOfScope }.count
         )
 
+        // 写盘失败 → **立刻**报（`errorMessage` + 诊断码），不许静默。
+        if let writeError = persistErrorMessage(persistResult) {
+            errorMessage = errorMessage.map { "\($0)。\(writeError)" } ?? writeError
+        }
+
         lastExecutionAt = now
         // 回收站占用写回现有载体（CR-042）—— 成功移入的条目已由执行器记账。
         contents.header.trashUsage = trashUsageRecorder.usage
         persist()
         rebuild()
+    }
+
+    /// 落盘分档 → 错误横幅文案（**写盘失败绝不静默** · CR-045）。
+    ///
+    /// `nil` = 全部落盘（没有任何一条需要用户操心）。
+    ///
+    /// ## 为什么用 `E-303`
+    ///
+    /// 码表里**没有**「执行记录写盘失败」专用码（R2 §6 的 24 个码是封闭的，
+    /// 加码要连带改 R2 §6 + `verify_codes.py` + 契约文档）。
+    /// `E-303` 是**唯一的写盘失败码**（定义：写短写 / `ENOSPC` / `EDQUOT`），
+    /// 与本仓库既有的 `describeWriteError`（写盘失败 → `E-303`）口径一致。
+    /// ⚠️ 它的 summary 写的是「磁盘空间不足」—— 若真实成因是权限或 IO 错误，
+    /// **细节里必须带上真实原因**（下面的 detail），不许让用户照着错误方向排查。
+    private func persistErrorMessage(_ result: ExecutionRecordStore.PersistResult) -> String? {
+        guard !result.isClean else { return nil }
+        var parts: [String] = []
+        if result.deleted.queuedCount > 0 {
+            parts.append(L.pick(
+                "有 \(result.deleted.queuedCount) 条已移入废纸篓的条目，执行记录没写进磁盘（恢复信息已存进待补写队列，下次启动补写）",
+                "\(result.deleted.queuedCount) deleted item(s) have no execution record on disk (restore details are queued and will be written on next launch)"
+            ))
+        }
+        if result.deleted.lostCount > 0 {
+            parts.append(L.pick(
+                "有 \(result.deleted.lostCount) 条已移入废纸篓的条目，执行记录既没写进磁盘也没能进待补写队列（**恢复入口丢失**，只能自行到废纸篓取回）",
+                "\(result.deleted.lostCount) deleted item(s) have neither an execution record on disk nor a queued copy (restore entry lost — take them back from Trash yourself)"
+            ))
+        }
+        let otherUnwritten = result.other.queuedCount + result.other.lostCount
+        if otherUnwritten > 0 {
+            parts.append(L.pick(
+                "另有 \(otherUnwritten) 条非删除记录（拦下 / 失败 / 恢复回写）没写进举证链",
+                "another \(otherUnwritten) non-deletion record(s) (blocked / failed / restore receipt) are missing from the evidence chain"
+            ))
+        }
+        guard !parts.isEmpty else { return nil }
+        return describe(.e303, detail: parts.joined(separator: "；"))
     }
 
     /// 从废纸篓恢复一条记录（AC-13 / U2）。
@@ -1307,7 +1413,14 @@ final class AppModel {
             let restored = try executor.restore(record)
             // **回写 `restored_by_user`**（K2 建议 S1）：不回写则「恢复过几次」
             // 不可追，也就无法判断「同一误删反复恢复」。
-            try? writer.append(restored, kind: .execution, now: Date())
+            //
+            // ⚠️ 回写失败也要说（CR-045）：恢复**已经发生**，但举证链里没有这一行
+            // ⇒ 「这个条目恢复过没有」就再也查不出来了。
+            let persistResult = executionStore.persist([restored], now: Date())
+            if let writeError = persistErrorMessage(persistResult) {
+                // **不覆盖**已有的错误信息（两条都要看得见）。
+                errorMessage = errorMessage.map { "\($0)。\(writeError)" } ?? writeError
+            }
             if let idx = executions.firstIndex(where: { $0.id == record.id }) {
                 executions[idx] = restored
             } else {

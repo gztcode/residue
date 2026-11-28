@@ -390,6 +390,15 @@ Residue.app（单进程，登录项 SMAppService.mainApp，菜单栏常驻）
 - `action ∈ {rename_to_trash, blocked_second_check, blocked_cap, blocked_size_unknown, **blocked_out_of_scope**, failed, **restored_by_user**}`（`blocked_out_of_scope` 对应 `E-204` 的越界 / 符号链接拒绝——**不能复用 `failed`**：`failed` 表示「尝试了但失败」，越界是「按规则拒绝执行」，两者的用例预期不同）——`blocked_*` 也算执行记录（要能解释「为什么没删」）；**`restored_by_user` 是 AC-13 恢复动作的回写**（SRE S1：不回写则「恢复过几次」不可追，也就无法判断「同一误删反复恢复」）。
 - `bytesKind` 必填：目录的 `bytes` 是递归量（IF-07），**不标 kind 会让读者把目录的 96 B 当成真实体积**。
 
+> **〔v1.10 · CR-045〕写入失败不许静默 —— 落盘结果分三档**：
+> - **已落盘**（`persisted`）：写进 `execution.jsonl` ⇒ 恢复入口可用；
+> - **待补写**（`queued`）：`execution.jsonl` 写不进去，但写进了 `state/pending-execution.jsonl` 待补写队列 ⇒ **恢复信息还在**，下次启动补写（补写**幂等**：按「候选 + 动作 + 动作时刻」比对，已补过的不重复补）；
+> - **彻底丢失**（`lost`）：连队列都写不进去 ⇒ **如实登记**，界面必须提示「无法通过应用恢复，请自行到废纸篓取回」。
+>
+> **为什么必须分档**：`TrashExecutor` 在返回前就 `moveItem` —— **删除动作已经发生**，而恢复位置 `restorePath` **只有这条记录能提供**（`restore` 入口即 `guard let restorePath else throw .noRestorePath`）。原实现 `try?` 吞掉写盘失败，界面却照样报「已清理 N 条」⇒ **用户被告知一切正常，恢复入口却没了**。
+>
+> **界面口径**：**「已清理 N 条」只统计 `persisted`**；`queued` / `lost` 各自单独成句。待补写队列落 `state/`（**不计入 M6 计量** —— 它不是可回收垃圾，是尚未写出去的恢复信息），但**计入 N7 清除范围**（含用户路径副本 · 质量 B-07）。
+
 ### 5.4 `scan.jsonl`（**计入**计量，**不豁免**）
 
 `{ at, mode, sources, filesScanned, bytesScanned, durationMs, aborted?, breakpointSaved, unknownCount,
@@ -747,7 +756,7 @@ Residue.app（单进程，登录项 SMAppService.mainApp，菜单栏常驻）
 
 **两条禁止**：禁止「见 `.bak` 即删」（可能毁掉唯一备份）、禁止「见 `.bak` 即回滚」（会把已成功的迁移退回旧 schema）。
 
-：放在 `state/` 下、**不计入 M6 计量**（M6 只算 `records/*.jsonl`）；但它们含用户路径副本，故 **N7 的「一键清除」范围 = `records/*.jsonl` + `state/journal.jsonl` + `state/checkpoints.json` + `state/migrating.json` + `state/*.bak` + `state/*.corrupt` + `state/*.tmp`**，**不含 `state.residue` 本体**（S-10）。**`journal.jsonl` / `checkpoints.json` 含候选路径，漏清即等于「清除后仍留用户路径副本」**（质量 B-07）。迁移成功后 `.bak` 立即删除，正常态下不存在。
+：放在 `state/` 下、**不计入 M6 计量**（M6 只算 `records/*.jsonl`）；但它们含用户路径副本，故 **N7 的「一键清除」范围 = `records/*.jsonl` + `state/journal.jsonl` + `state/checkpoints.json` + `state/migrating.json` + `state/pending-execution.jsonl` + `state/*.bak` + `state/*.corrupt` + `state/*.tmp`**，**不含 `state.residue` 本体**（S-10）。**`journal.jsonl` / `checkpoints.json` 含候选路径，漏清即等于「清除后仍留用户路径副本」**（质量 B-07）。迁移成功后 `.bak` 立即删除，正常态下不存在。
 
 ---
 

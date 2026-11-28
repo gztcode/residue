@@ -30,10 +30,14 @@ final class ExecutionNoticeTests: XCTestCase {
 
     private func make(
         deleted: Int = 0, bytes: Int64 = 0,
+        unlogged: Int = 0, unloggedBytes: Int64 = 0,
+        lost: Int = 0, lostBytes: Int64 = 0,
         deferred: Int = 0, failed: Int = 0, blocked: Int = 0
     ) -> PageModel.ExecutionNotice {
         PageModel.ExecutionNotice(
             deletedCount: deleted, deletedBytes: bytes,
+            unloggedCount: unlogged, unloggedBytes: unloggedBytes,
+            lostCount: lost, lostBytes: lostBytes,
             deferredCount: deferred, failedCount: failed, blockedCount: blocked
         )
     }
@@ -112,5 +116,47 @@ final class ExecutionNoticeTests: XCTestCase {
         XCTAssertTrue(text.contains("1"))
         XCTAssertTrue(text.contains("4"))
         XCTAssertFalse(text.contains("顺延"), "英文环境不得残留中文：\(text)")
+    }
+
+    // MARK: - CR-045：记录没落盘的条目（恢复入口还不存在）
+
+    /// **「已清理 N 条」只算执行记录已落盘的**。
+    ///
+    /// 文件已经进了废纸篓，但记录没写进 `execution.jsonl` ⇒ 恢复入口还不存在
+    /// （`restorePath` 只有那条记录能提供）。混进「已清理」等于告诉用户「一切正常」，
+    /// 而实际上他删掉的东西恢复不了。
+    func testUnloggedRecordsAreNotCountedAsDeleted() {
+        let notice = make(unlogged: 2, unloggedBytes: 2048)
+        XCTAssertEqual(notice.deletedCount, 0, "没落盘的记录不许算「已清理」")
+        XCTAssertEqual(notice.deletedTotalCount, 2, "但它确实删了 —— 总数必须算上")
+
+        let text = notice.summary
+        XCTAssertFalse(
+            text.contains("已移入废纸篓 2 条"),
+            "「已移入废纸篓 N 条」只算已落盘的那些：\(text)"
+        )
+        XCTAssertTrue(text.contains("没写进磁盘"), "必须说清记录没落盘：\(text)")
+        XCTAssertTrue(text.contains("待补写队列"), "必须点明恢复信息已进待补写队列：\(text)")
+    }
+
+    /// 没落盘的条目**也删了** —— 说「本次没有删除任何条目」就是撒谎。
+    func testDidNothingCountsUnloggedRecords() {
+        XCTAssertFalse(make(unlogged: 1).didNothing, "记录没落盘 ≠ 没删")
+        XCTAssertFalse(make(lost: 1).didNothing, "恢复信息彻底丢失 ≠ 没删")
+    }
+
+    /// 彻底丢失（连队列都写不进去）必须单独成句，**不许与「待补写」混为一谈**。
+    func testLostRecordsAreCalledOutSeparately() {
+        let text = make(lost: 1, lostBytes: 1024).summary
+        XCTAssertTrue(text.contains("无法通过应用恢复"), "必须说明恢复入口没了：\(text)")
+        XCTAssertTrue(text.contains(MetricUnit.formatBytes(1024)), "字节走全站同一格式化：\(text)")
+    }
+
+    /// 英文环境同样要分档说清。
+    func testEnglishSummarySeparatesUnloggedFromDeleted() {
+        L.current = .en
+        let text = make(unlogged: 2, unloggedBytes: 2048).summary
+        XCTAssertTrue(text.contains("not written"), "英文也要说清记录没落盘：\(text)")
+        XCTAssertFalse(text.contains("没写进磁盘"), "英文环境不得残留中文：\(text)")
     }
 }

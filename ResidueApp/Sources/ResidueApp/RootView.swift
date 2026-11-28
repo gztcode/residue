@@ -52,6 +52,12 @@ struct RootView: View {
                     ErrorBanner(message: err)
                     DividerLine()
                 }
+                if let note = app.executionRecordNotice {
+                    // **中性提示**，不是错误（CR-045）：上次的执行记录这回补写上了 ——
+                    // 恢复入口恢复了，用中性色而不是危险色。
+                    WarningBanner(message: note)
+                    DividerLine()
+                }
 
                 header
                 DividerLine()

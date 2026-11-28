@@ -10,6 +10,7 @@ import Foundation
 //   + `state/journal.jsonl`
 //   + `state/checkpoints.json`
 //   + `state/migrating.json`
+//   + `state/pending-execution.jsonl`（待补写队列 · CR-045）
 //   + `*.bak` / `*.corrupt` / `*.tmp`（载体的备份 / 损坏留档 / 写中临时文件）
 //
 // ## **不含** `state.residue` 本体（不变量④ · S2）
@@ -47,6 +48,12 @@ public enum N7ClearScope {
             stateFile.journalURL,           // `state/journal.jsonl`
             checkpoints.fileURL,            // `state/checkpoints.json`
             stateFile.migrationProgressURL, // `state/migrating.json`
+            // `state/pending-execution.jsonl`（CR-045）：待补写队列里装的是
+            // **还没写进举证链的执行记录**（含 `restorePath`）⇒ 含用户路径副本，
+            // 漏清即等于「清除后仍留用户路径副本」（质量 B-07）。
+            stateFile.pendingExecutionURL,
+            // 它原子替换时的临时文件（崩在替换中间就会留下，内容同样是用户路径）。
+            JSONLStore.temporaryURL(for: stateFile.pendingExecutionURL),
             stateFile.backupURL,            // `*.bak`
             stateFile.tempURL               // `*.tmp`
         ]

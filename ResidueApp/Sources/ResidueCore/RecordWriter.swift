@@ -182,7 +182,8 @@ public struct RecordWriter: Sendable {
         public var fileName: String { rawValue }
     }
 
-    private func url(for kind: Kind) -> URL {
+    /// 某类记录的落点（`records/` 目录下的文件名由 `Kind` 决定）。
+    public func url(for kind: Kind) -> URL {
         directory.appendingPathComponent(kind.fileName)
     }
 
@@ -192,27 +193,12 @@ public struct RecordWriter: Sendable {
     ///
     /// **必须真落盘**：`upstreamCommands` / `diagnostics` 未落盘即「无法证明」。
     /// 故本方法在 `write` 后显式 `synchronize()`，不接受「攒内存最后统一写」。
+    ///
+    /// 落盘机制与编码策略**由 `JSONLStore` 统一实现**（唯一实现处）——
+    /// 待补写队列（`state/pending-execution.jsonl`）用的是同一套，
+    /// 两边格式分叉会导致补写时解不开 ⇒ 恢复路径丢失。
     public func append<T: Encodable>(_ value: T, kind: Kind, now: Date = Date()) throws {
-        let fm = FileManager.default
-        try fm.createDirectory(at: directory, withIntermediateDirectories: true)
-        let target = url(for: kind)
-
-        let encoder = JSONEncoder()
-        // **记录时刻只有一个来源 = 该行写入时刻**（M6 判据）。
-        encoder.dateEncodingStrategy = .iso8601
-        encoder.outputFormatting = [.sortedKeys]
-        var line = try encoder.encode(value)
-        line.append(0x0A)   // '\n' —— jsonl 一行一条
-
-        if !fm.fileExists(atPath: target.path) {
-            fm.createFile(atPath: target.path, contents: nil)
-        }
-        let handle = try FileHandle(forWritingTo: target)
-        defer { try? handle.close() }
-        try handle.seekToEnd()
-        try handle.write(contentsOf: line)
-        // 落盘（不是可选优化：未落盘 = 无法证明）
-        try handle.synchronize()
+        try JSONLStore(url: url(for: kind)).append(value)
     }
 
     /// 追加一条扫描日志。
@@ -238,6 +224,13 @@ public struct RecordWriter: Sendable {
             out.append(obj)
         }
         return out
+    }
+
+    /// 读回某类记录（**逐行解码**，坏行跳过 —— 一行坏不代表整份文件坏）。
+    ///
+    /// 与 `append` 的编码策略**成对**（同出 `JSONLStore`，不许各写一套）。
+    public func readRecords<T: Decodable>(_ type: T.Type, kind: Kind) throws -> [T] {
+        try JSONLStore(url: url(for: kind)).readAll(type)
     }
 
     /// 记录目录内全部 `.jsonl` 的字节合计（M6 的「可回收字节」的**被减项基础**）。
