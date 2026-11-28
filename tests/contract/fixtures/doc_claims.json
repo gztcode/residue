@@ -24,7 +24,7 @@
       "line_hint": 194,
       "pattern": "(\\d+) 个单测",
       "group": 1,
-      "declared": 599,
+      "declared": 605,
       "metric": "unit_tests",
       "tolerance": 0,
       "note": "开发命令清单里的单测数"
@@ -94,7 +94,7 @@
       "line_hint": 190,
       "pattern": "(\\d+) unit tests",
       "group": 1,
-      "declared": 599,
+      "declared": 605,
       "metric": "unit_tests",
       "tolerance": 0,
       "note": "英文版的单测数"
@@ -164,7 +164,7 @@
       "line_hint": 34,
       "pattern": "(\\d+) 个单测",
       "group": 1,
-      "declared": 599,
+      "declared": 605,
       "metric": "unit_tests",
       "tolerance": 0,
       "note": "目录树里的单测数"
@@ -174,7 +174,7 @@
       "line_hint": 122,
       "pattern": "编译 \\+ (\\d+) 单测",
       "group": 1,
-      "declared": 599,
+      "declared": 605,
       "metric": "unit_tests",
       "tolerance": 0,
       "note": "自跑一遍的命令清单里的单测数"
@@ -314,7 +314,7 @@
       "line_hint": 20,
       "pattern": "全部单测（当前 (\\d+) 个）",
       "group": 1,
-      "declared": 599,
+      "declared": 605,
       "metric": "unit_tests",
       "tolerance": 0,
       "note": "常用命令里的单测数"

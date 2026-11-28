@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 // ============================================================
 // Residue · 上游只读命令（AC-19 / R2 §5.4 / N6）
@@ -172,21 +173,57 @@ public struct UpstreamRunner: Sendable {
     /// 本次 runner 已消耗的时间（用于总预算判定）。
     private let consumed: TimeInterval
 
-    public init(perProbeTimeout: TimeInterval = 2.0, totalBudget: TimeInterval = 10.0, consumed: TimeInterval = 0) {
+    public init(
+        perProbeTimeout: TimeInterval = 2.0,
+        totalBudget: TimeInterval = 10.0,
+        consumed: TimeInterval = 0,
+        maxOutputBytes: Int = 8 * 1024 * 1024
+    ) {
         self.perProbeTimeout = perProbeTimeout
         self.totalBudget = totalBudget
         self.consumed = consumed
+        self.maxOutputBytes = maxOutputBytes
     }
 
     /// 一次调用的结果：记录 + 标准输出（若有）。
     public struct RunOutcome: Sendable {
         public var record: UpstreamCommand
-        /// 标准输出（被截断到 `maxOutputBytes`）；拒绝 / 失败时为 `nil`。
+        /// 标准输出（保留 `maxOutputBytes` 内的前缀）。
+        ///
+        /// - 未执行（白名单拒绝 / 预算耗尽 / 可执行文件不存在 / 启动失败）时为 `nil`；
+        /// - **超时时为「已经收到的部分」** —— 超时不等于没读到，丢掉已收输出就是丢证据。
+        ///
+        /// ⚠ 调用方若把 stdout 当**路径**用（如 `SourceRoots.resolve`），
+        /// 应先看 `stdoutTruncated` —— 截断掉的路径前缀可能落到别处。
         public var stdout: String?
+        /// 标准输出是否**不完整**：超过 `maxOutputBytes` 被截断，或没来得及抽完。
+        ///
+        /// ★ 与 `stdout` 分开表达：**不往 stdout 里塞标记串** ——
+        /// stdout 会被喂给 `SourceRoots.resolve` 当路径用，掺标记串会污染路径。
+        public var stdoutTruncated: Bool
+
+        public init(record: UpstreamCommand, stdout: String?, stdoutTruncated: Bool = false) {
+            self.record = record
+            self.stdout = stdout
+            self.stdoutTruncated = stdoutTruncated
+        }
     }
 
-    /// 读上游命令输出时最多保留的字节数（防止超大输出占内存）。
-    public let maxOutputBytes = 64 * 1024
+    /// 读上游命令输出时最多**保留**的字节数（防止超大输出占内存）。
+    ///
+    /// 取 8 MiB 的理由：实测最大的真实输出是 `npm cache ls` 的 352101 B / 3498 行，
+    /// 8 MiB ≈ 23 倍余量 ⇒ 真实命令**不会被截断**；又远小于「无上限」，
+    /// 单次探测的内存上界可控。
+    ///
+    /// ★ 这是**保留**上限，不是**停止读**的上限：超过后仍继续抽干管道
+    /// （否则子进程会重新堵死在 `write` 上 —— 见 `UpstreamPipeDrainer`）。
+    public let maxOutputBytes: Int
+
+    /// SIGTERM 之后给子进程的收尾宽限（秒）；超过就 SIGKILL，避免 `waitUntilExit` 永久阻塞。
+    private static let terminateGraceSeconds: TimeInterval = 0.5
+
+    /// 抽干线程等 EOF 的宽限（秒）：子进程已死 ⇒ 写端关闭 ⇒ EOF 应当立刻到。
+    private static let drainJoinSeconds: TimeInterval = 1.0
 
     /// 执行一条上游只读命令。
     ///
@@ -249,9 +286,27 @@ public struct UpstreamRunner: Sendable {
             )
         }
 
-        // ④ 执行
+        // ④ 执行（边等边抽干输出 —— 见 `execute`）
+        return execute(cmd: executable, path: resolved, args: args, started: started, now: now)
+    }
+
+    /// 执行一条**已解析绝对路径**的命令：跑起来 + **边等边抽干输出** + 计时。
+    ///
+    /// ## 为什么必须边等边抽干
+    ///
+    /// macOS 的管道缓冲只有 64 KB 量级。子进程写满缓冲后阻塞在 `write`、永不退出；
+    /// 父进程若「等退出才读」，父子互等 ⇒ 必然拖到超时（**P-012**），
+    /// 还会把这次调用判成失败。实测 `npm cache ls` 输出 352101 B / 3498 行
+    /// ⇒ 这条**白名单内**的路径必然踩中。
+    ///
+    /// ## 白名单边界
+    ///
+    /// 白名单判定在 `run()` 里**先判、再执行**；本方法只管「跑 + 抽干 + 计时」。
+    /// 单独拆出来是为了让**测试**能注入任意可执行文件造大输出
+    /// （`/bin/sh -c 'seq 1 200000'`）—— **不构成白名单绕过**，生产调用点只有 `run()`。
+    func execute(cmd: String, path: String, args: [String], started: Date, now: Date) -> RunOutcome {
         let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: resolved)
+        proc.executableURL = URL(fileURLWithPath: path)
         proc.arguments = args
         let outPipe = Pipe()
         let errPipe = Pipe()
@@ -262,6 +317,22 @@ public struct UpstreamRunner: Sendable {
         var exitCode: Int32?
         do {
             try proc.run()
+        } catch {
+            failure = "启动失败：\(error.localizedDescription)"
+        }
+
+        var stdout: String?
+        var stdoutTruncated = false
+
+        if failure == nil {
+            // ★ 抽干：不等退出就开始读。
+            //   stderr 同样必须抽干 —— 只读 stdout 的话，子进程往 stderr 写满缓冲一样堵死。
+            //   stderr 不进载体（§5.4 无该字段）⇒ 只抽干、不保留。
+            let outDrainer = UpstreamPipeDrainer(handle: outPipe.fileHandleForReading, cap: maxOutputBytes)
+            let errDrainer = UpstreamPipeDrainer(handle: errPipe.fileHandleForReading, cap: 0)
+            outDrainer.start()
+            errDrainer.start()
+
             // 超时保护：不阻塞主线程，轮询等待
             let deadline = started.addingTimeInterval(perProbeTimeout)
             while proc.isRunning && Date() < deadline {
@@ -269,33 +340,55 @@ public struct UpstreamRunner: Sendable {
             }
             if proc.isRunning {
                 proc.terminate()
+                // SIGTERM 之后给一点宽限；仍不退就 SIGKILL ——
+                // 否则 `waitUntilExit()` 可能永久阻塞（子进程忽略 SIGTERM 时）。
+                if !stoppedWithin(proc, seconds: UpstreamRunner.terminateGraceSeconds) {
+                    // ★ pid 复用风险：子进程尚未被回收前 pid 不会被复用 ⇒ 这里安全。
+                    kill(proc.processIdentifier, SIGKILL)
+                }
                 failure = "超时（>\(perProbeTimeout) s，N6 单探测预算）"
             } else {
                 exitCode = proc.terminationStatus
             }
-        } catch {
-            failure = "启动失败：\(error.localizedDescription)"
+
+            // 收尸：确保不留僵尸进程。
+            proc.waitUntilExit()
+
+            // 等抽干读到 EOF（子进程已死 ⇒ 管道写端关闭 ⇒ EOF）。
+            let outDone = outDrainer.waitForCompletion(timeout: UpstreamRunner.drainJoinSeconds)
+            let errDone = errDrainer.waitForCompletion(timeout: UpstreamRunner.drainJoinSeconds)
+            if !outDone { outDrainer.stop() }
+            if !errDone { errDrainer.stop() }
+
+            let out = outDrainer.currentOutput
+            // 没抽完 ⇒ 输出不完整（与「超上限截断」同义：拿到的都不是全部）。
+            stdoutTruncated = out.truncated || !outDone
+            stdout = String(decoding: out.retained, as: UTF8.self)
         }
 
         let elapsedMs = Int(Date().timeIntervalSince(started) * 1000)
-        var stdout: String?
-        if failure == nil {
-            let data = outPipe.fileHandleForReading.readDataToEndOfFile()
-            let clipped = data.prefix(maxOutputBytes)
-            stdout = String(decoding: clipped, as: UTF8.self)
-        }
-
         return RunOutcome(
             record: UpstreamCommand(
-                cmd: executable, args: args,
+                cmd: cmd, args: args,
                 exitCode: exitCode,
                 durationMs: elapsedMs,
                 invokedAt: now,
                 rejectedByWhitelist: false,
                 failure: failure
             ),
-            stdout: stdout
+            stdout: stdout,
+            stdoutTruncated: stdoutTruncated
         )
+    }
+
+    /// 轮询等待进程停下（最多 `seconds` 秒）。
+    private func stoppedWithin(_ proc: Process, seconds: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline {
+            if !proc.isRunning { return true }
+            usleep(5_000)   // 5 ms
+        }
+        return !proc.isRunning
     }
 
     /// 在 `searchPath`（或环境 `PATH`）里找可执行文件。
