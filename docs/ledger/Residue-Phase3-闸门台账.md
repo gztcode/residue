@@ -566,6 +566,48 @@ check_all ✅ / verify_r2 ✅（PRD v5.6 / R2 v1.10）
 
 ---
 
+## 四之六、2026-11-28 · 删除前二次检查 fail-closed（CR-045 · P-027 + P-028）
+
+### 缺陷（同一道闸的两面）
+
+| 编号 | 现象 | 后果 |
+|---|---|---|
+| **P-027** | 删除前 L0 复核时 `lstat` 失败 ⇒ `identity` 为 `nil` ⇒ 整条 `if let` 为假 ⇒ **当成「没有活引用」继续删** | **fail-open**：可能删掉正在被使用的文件 |
+| **P-028** | 二次检查读属性失败（`try?`）⇒ 判 `.vanished` ⇒ 原因串写「二次检查：文件已不存在（已自行删除）」 | **假事实**：权限不足被写成「用户已自行删除」，举证链（AC-18）失真 |
+
+根因是同一个：`nil` 把「**确定不存在**」与「**读不到**」压成同一个值 —— 调用方只能在「当它没了」与「当它安全」之间二选一，两个都不对。同函数里「拿不到允许根 ⇒ 拒绝执行」已经是 fail-closed，只有这两处是 fail-open。
+
+### 修法（三态 + 总闸）
+
+- `L0Probe.identityState(atPath:)` ⇒ **三态**：`resolved(身份)` / `absent`（`ENOENT`·`ENOTDIR`）/ `unreadable(errno)`（其余一切）；
+- `SecondCheck.IdentityStatus` 加 `.unreadable(errno:)`；`checkIdentity` 的 `try?` 换 `do/catch`，按 `PathAccess.classify(error:)` 分流；
+- 新增 `SecondCheckGate.decide(...)` —— **判定只有一处实现**，只有「确定可删」才 `.proceed`；读不到 ⇒ `blockedSecondCheck` + 原因串「二次检查：无法读取文件属性（EACCES），为安全未删除」（**写实情**，不写「已不存在」）；
+- `AppModel` 只做接线（`SecondCheck.checkIdentity` 与 `SecondCheck.isLiveHeld` 两个调用点保留，`verify_a9.sh` 第九节 grep 守）；
+- **不新造错误码**（沿用 E-206）、**不改契约条文**、**不动界面**（`SemanticSlot` / `UICopy` 一行未动）。
+
+### 现状口径（必须原样理解）
+
+| 问题 | 现状 |
+|---|---|
+| 读不到属性时会不会删 | **不会**。走 `blockedSecondCheck`，条目留在原位，下次扫描重新判定 |
+| 举证链怎么写 | 写「无法读取文件属性（EACCES），为安全未删除」—— **不写「已不存在」** |
+| 用哪个错误码 | E-206（删除前二次检查阻断，AC-17）—— 与「活引用被拦」同一码，**未新增码** |
+| 界面状态词表动了吗 | **没有**。P4 六词与 DAC-71 的三串封闭词表一行未动（新增串只落在执行记录里） |
+| 扫描期判定动了吗 | **没有**。`L0Judge` 本来就 fail-closed，本单只把它的探针换成三态，语义不变 |
+
+### 状态（2026-11-28）
+
+```
+swift test       623 全绿（基线 599 + CR-045 本单 24）
+verify_codes     11/11
+verify_a9        80/80
+check_all ✅ / verify_r2 ✅（PRD v5.6 / R2 v1.10）
+```
+
+**一句话**：删除前二次检查**从 fail-open 改成 fail-closed** —— 「读不到」不再等于「可以删」，也不再等于「已经没了」。
+
+---
+
 ## 五、下一步建议（**只报选项，不做决定**）
 
 | 选项 | 内容 | 代价 | 收益 |

@@ -1,4 +1,5 @@
 import XCTest
+import Darwin
 @testable import ResidueCore
 
 /// L0 逐候选判定层（CR-031 §3.4 的 `a` 写入路径的上游）。
@@ -47,7 +48,7 @@ final class L0JudgeTests: XCTestCase {
         let verdicts = L0Judge.judge(
             candidates: [candidate("/cache/a")],
             snapshot: snapshot,
-            identityOf: { _ in self.identity }
+            identityOf: { _ in .resolved(self.identity) }
         )
         XCTAssertEqual(verdicts[id("/cache/a")], .hasLiveReference)
     }
@@ -57,18 +58,32 @@ final class L0JudgeTests: XCTestCase {
         let verdicts = L0Judge.judge(
             candidates: [candidate("/cache/a")],
             snapshot: snapshot,
-            identityOf: { _ in FileIdentity(dev: 99, ino: 99) }
+            identityOf: { _ in .resolved(FileIdentity(dev: 99, ino: 99)) }
         )
         XCTAssertEqual(verdicts[id("/cache/a")], .noLiveReference)
     }
 
-    /// `lstat` 失败 ⇒ **不判定**（不许说「安全」）。
+    /// `lstat` **读不到** ⇒ **不判定**（不许说「安全」）。
     func testUnreadablePathIsJudgedUndetermined() {
         let snapshot = L0Snapshot()
         let verdicts = L0Judge.judge(
             candidates: [candidate("/cache/gone")],
             snapshot: snapshot,
-            identityOf: { _ in nil }
+            identityOf: { _ in .unreadable(errno: EACCES) }
+        )
+        XCTAssertEqual(verdicts[id("/cache/gone")], .undetermined)
+    }
+
+    /// 路径**确定不存在** ⇒ 同样**不判定**。
+    ///
+    /// 「确实没了」也不是「没有活引用」的证据：扫描到判定之间它才消失，
+    /// 对没看过的对象说它安全 = 伪造证据（不变量③）。
+    func testAbsentPathIsJudgedUndetermined() {
+        let snapshot = L0Snapshot()
+        let verdicts = L0Judge.judge(
+            candidates: [candidate("/cache/gone")],
+            snapshot: snapshot,
+            identityOf: { _ in .absent }
         )
         XCTAssertEqual(verdicts[id("/cache/gone")], .undetermined)
     }
@@ -79,7 +94,7 @@ final class L0JudgeTests: XCTestCase {
         let verdicts = L0Judge.judge(
             candidates: [candidate("/cache/a", isDirectory: true)],
             snapshot: snapshot,
-            identityOf: { _ in self.identity }
+            identityOf: { _ in .resolved(self.identity) }
         )
         XCTAssertEqual(verdicts[id("/cache/a")], .hasLiveReference)
     }
@@ -93,7 +108,7 @@ final class L0JudgeTests: XCTestCase {
         let verdicts = L0Judge.judge(
             candidates: [candidate("/cache/a", isDirectory: true)],
             snapshot: snapshot,
-            identityOf: { _ in self.identity }
+            identityOf: { _ in .resolved(self.identity) }
         )
         XCTAssertEqual(verdicts[id("/cache/a")], .noLiveReference)
     }
@@ -104,7 +119,7 @@ final class L0JudgeTests: XCTestCase {
         let verdicts = L0Judge.judge(
             candidates: [candidate("/cache/a", isDirectory: false)],
             snapshot: snapshot,
-            identityOf: { _ in self.identity }
+            identityOf: { _ in .resolved(self.identity) }
         )
         XCTAssertEqual(verdicts[id("/cache/a")], .noLiveReference)
     }
@@ -115,7 +130,7 @@ final class L0JudgeTests: XCTestCase {
         let verdicts = L0Judge.judge(
             candidates: [candidate("/cache/a")],
             snapshot: snapshot,
-            identityOf: { _ in self.identity }
+            identityOf: { _ in .resolved(self.identity) }
         )
         XCTAssertEqual(verdicts[id("/cache/a")], .undetermined)
     }
@@ -129,7 +144,7 @@ final class L0JudgeTests: XCTestCase {
         let verdicts = L0Judge.judge(
             candidates: paths.map { candidate($0) },
             snapshot: snapshot,
-            identityOf: { _ in self.identity }
+            identityOf: { _ in .resolved(self.identity) }
         )
         XCTAssertEqual(verdicts.count, paths.count)
         for path in paths {

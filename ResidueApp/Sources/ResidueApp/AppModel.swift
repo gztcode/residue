@@ -1151,48 +1151,35 @@ final class AppModel {
                     continue
                 }
 
-                // ① 身份复核
-                switch SecondCheck.checkIdentity(path: cand.path, recordedBirthtime: cand.birthtime) {
-                case .vanished:
-                    // 文件已不存在 → 没东西可删，记一行如实留痕（不是失败）
-                    newRecords.append(
-                        ExecutionRecord(
-                            id: id, source: source, action: .blockedSecondCheck,
-                            originalPath: cand.path, restorePath: nil, executedAt: now,
-                            bytes: cand.bytes, bytesKind: cand.isDirectory ? .dirRecursive : .file,
-                            blockedReason: "二次检查：文件已不存在（已自行删除）",
-                            bytesPreview: cand.bytes, bytesMeasuredAt: now
+                // ① 身份复核 + ② L0 复核 → **删除前总闸**（Core 唯一实现处，fail-closed）
+                //
+                // 判定与「读不到 / 不存在」的区分全在 `SecondCheckGate`：
+                // **读不到 ⇒ 无法判定 ⇒ 不删**（P-027 / P-028）。
+                // 这里只做接线：把结论落成执行记录。
+                let secondCheckDecision = SecondCheckGate.decide(
+                    identityStatus: SecondCheck.checkIdentity(
+                        path: cand.path, recordedBirthtime: cand.birthtime
+                    ),
+                    identityState: L0Probe.identityState(atPath: cand.path),
+                    isLiveHeld: { identity in
+                        SecondCheck.isLiveHeld(
+                            identity: identity, isDirectory: cand.isDirectory,
+                            path: cand.path, by: secondCheckSnapshot
                         )
-                    )
-                    continue
-                case .rebuilt:
-                    // **同名重建** → 现在那个文件不是当初判定的那个 → 放弃（误删防线）
-                    newRecords.append(
-                        ExecutionRecord(
-                            id: id, source: source, action: .blockedSecondCheck,
-                            originalPath: cand.path, restorePath: nil, executedAt: now,
-                            bytes: cand.bytes, bytesKind: cand.isDirectory ? .dirRecursive : .file,
-                            blockedReason: "二次检查：路径已被同名重建（birthtime 不一致），不是当初判定的文件",
-                            bytesPreview: cand.bytes, bytesMeasuredAt: now
-                        )
-                    )
-                    continue
-                case .unchanged:
+                    }
+                )
+                switch secondCheckDecision {
+                case .proceed:
                     break
-                }
-
-                // ② L0 复核（用执行时刻新取的快照）
-                if let identity = L0Probe.identity(atPath: cand.path),
-                   SecondCheck.isLiveHeld(
-                       identity: identity, isDirectory: cand.isDirectory,
-                       path: cand.path, by: secondCheckSnapshot
-                   ) {
+                case .blocked(let reason):
+                    // 被阻断 ⇒ 如实留痕（**写实情**：读不到就写读不到，
+                    // 不写「文件已不存在」—— 那是假事实）。
                     newRecords.append(
                         ExecutionRecord(
                             id: id, source: source, action: .blockedSecondCheck,
                             originalPath: cand.path, restorePath: nil, executedAt: now,
                             bytes: cand.bytes, bytesKind: cand.isDirectory ? .dirRecursive : .file,
-                            blockedReason: "二次检查：删除前发现活引用（进程正在使用）",
+                            blockedReason: reason.blockedReason,
                             bytesPreview: cand.bytes, bytesMeasuredAt: now
                         )
                     )

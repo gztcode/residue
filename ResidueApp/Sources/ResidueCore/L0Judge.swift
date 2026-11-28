@@ -29,13 +29,15 @@ public enum L0Judge {
     /// - Parameters:
     ///   - candidates: 本轮候选（**逐个**判定，不按来源聚合）。
     ///   - snapshot: 一次 L0 快照（判定域 = 同 uid 进程）。
-    ///   - identityOf: 路径 → 文件身份 `(dev, ino)` 的探针；
-    ///     默认走真文件系统 `lstat`（**不跟随 symlink**），返回 `nil` = 取不到身份。
+    ///   - identityOf: 路径 → 文件身份的三态探针；
+    ///     默认走真文件系统 `lstat`（**不跟随 symlink**）。
+    ///     只有 `.resolved` 能支持「无活引用」的结论 —— `.absent`（确定不存在）
+    ///     与 `.unreadable`（读不到）都不够格（不变量③）。
     /// - Returns: 身份键 → 判定结果（**每个候选一项**）。
     public static func judge(
         candidates: [ScanEngine.Candidate],
         snapshot: L0Snapshot,
-        identityOf: (String) -> FileIdentity? = { L0Probe.identity(atPath: $0) }
+        identityOf: (String) -> L0Probe.IdentityState = { L0Probe.identityState(atPath: $0) }
     ) -> [CandidateID: L0Verdict] {
         var verdicts: [CandidateID: L0Verdict] = [:]
         verdicts.reserveCapacity(candidates.count)
@@ -50,7 +52,8 @@ public enum L0Judge {
             }
 
             // 取不到身份 ⇒ 不判定（不许说「安全」）
-            guard let identity = identityOf(candidate.path) else {
+            // **「确定不存在」与「读不到」都不构成「无活引用」的证据** ⇒ 都是 `.undetermined`
+            guard case .resolved(let identity) = identityOf(candidate.path) else {
                 verdicts[key] = .undetermined
                 continue
             }

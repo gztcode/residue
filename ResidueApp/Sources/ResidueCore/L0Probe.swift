@@ -198,7 +198,20 @@ public enum L0Probe {
         return FDList(fds: out, errno: 0)
     }
 
-    /// 把候选**路径**转成它的文件身份 `(dev, ino)`。
+    /// 文件身份探测的三态结果（**「读不到」与「不存在」不可混同**）。
+    ///
+    /// 与 `SecondCheck.IdentityStatus` 的分工：那个判的是「还是不是当初那个」
+    /// （属性 / birthtime 口径），这个判的是「**能不能拿到身份**」（inode 口径）。
+    public enum IdentityState: Equatable, Sendable {
+        /// 拿到了身份 `(dev, ino)`。
+        case resolved(FileIdentity)
+        /// **确定不存在**（`ENOENT` / `ENOTDIR`）。
+        case absent
+        /// **读不到**（权限、I/O 错误等）⇒ 无法判定。
+        case unreadable(errno: Int32)
+    }
+
+    /// 把候选**路径**转成它的文件身份 `(dev, ino)`（**三态**）。
     ///
     /// ## 为什么必须是 `lstat` 而不是 `stat`
     ///
@@ -214,12 +227,27 @@ public enum L0Probe {
     /// 这与「递归字节统计不跟随 symlink」（S-03）是同一纪律的两面：
     /// **凡涉及「这条路径本身是什么」，一律不跟随 symlink。**
     ///
+    /// ## 为什么返回三态而不是 `FileIdentity?`
+    ///
+    /// `nil` 把「**确定不存在**」与「**读不到**」压成同一个值，调用方只能
+    /// 二选一：当成「没了」（写下假事实，P-028），或当成「拿不到就算了」
+    /// （fail-open，P-027）。三态把两种事实分开，
+    /// **读不到 ⇒ 无法判定 ⇒ 不得据此删除**。
+    ///
     /// - Parameter path: 候选路径。
-    /// - Returns: 文件身份；路径不存在或 `lstat` 失败 → `nil`。
-    public static func identity(atPath path: String) -> FileIdentity? {
+    /// - Returns: 三态身份结论。
+    public static func identityState(atPath path: String) -> IdentityState {
         var st = stat()
-        guard lstat(path, &st) == 0 else { return nil }
-        return FileIdentity(st: st)
+        guard lstat(path, &st) == 0 else {
+            // `errno` 必须在 `lstat` 失败后**立刻**读（下一次系统调用会覆盖它）。
+            switch PathAccess.classify(errno: errno) {
+            case .absent:
+                return .absent
+            case .unreadable(let code):
+                return .unreadable(errno: code)
+            }
+        }
+        return .resolved(FileIdentity(st: st))
     }
 
 

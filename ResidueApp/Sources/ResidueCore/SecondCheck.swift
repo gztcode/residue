@@ -37,8 +37,11 @@ public enum SecondCheck {
         case unchanged
         /// 路径存在但 birthtime 变了 → **同名重建**，不是当初判定的文件。
         case rebuilt
-        /// 路径已不存在 → 用户已自行删除，无东西可删。
+        /// 路径**确定不存在** → 用户已自行删除，无东西可删。
         case vanished
+        /// 路径**读不到**（权限、I/O 错误）→ **无法判定**，
+        /// **不是**「已不存在」⇒ 不得据此删除（fail-closed，见 P-028）。
+        case unreadable(errno: Int32)
     }
 
     /// 执行前身份复核：路径下的文件**还是不是当初判定的那一个**。
@@ -56,14 +59,25 @@ public enum SecondCheck {
     /// - Parameters:
     ///   - path: 候选路径。
     ///   - recordedBirthtime: 扫描期记录的 birthtime。
-    ///   - fileManager: 可注入（单测用临时目录）。
+    ///   - attributesOf: 属性读取器（**可注入**，单测用；默认走真文件系统）。
     public static func checkIdentity(
         path: String,
         recordedBirthtime: Date,
-        fileManager: FileManager = .default
+        attributesOf: (String) throws -> [FileAttributeKey: Any] = { try FileManager.default.attributesOfItem(atPath: $0) }
     ) -> IdentityStatus {
-        guard let attrs = try? fileManager.attributesOfItem(atPath: path) else {
-            return .vanished
+        let attrs: [FileAttributeKey: Any]
+        do {
+            attrs = try attributesOf(path)
+        } catch {
+            // 「读不到」≠「已不存在」：只有 `ENOENT` / `ENOTDIR` 才算**确定不存在**，
+            // 其余（权限、I/O 错误）都是**无法判定** ⇒ 交总闸按 fail-closed 处置。
+            // 旧写法把两者都判成 `.vanished` ⇒ 举证链写下假事实（P-028）。
+            switch PathAccess.classify(error: error) {
+            case .absent:
+                return .vanished
+            case .unreadable(let errno):
+                return .unreadable(errno: errno)
+            }
         }
         let current = (attrs[.creationDate] as? Date) ?? Date(timeIntervalSince1970: 0)
         // **精确相等**，不加容差。理由：同一未变文件的 `.creationDate`

@@ -1,4 +1,6 @@
 import XCTest
+import Foundation
+import Darwin
 @testable import ResidueCore
 
 // ============================================================
@@ -94,6 +96,9 @@ final class SecondCheckTests: XCTestCase {
     // MARK: - vanished
 
     /// 文件已被删 → 判 vanished（没东西可删）。
+    ///
+    /// 注意 `.vanished` 的语义**已收窄**：现在只表示「**确定**不存在」
+    /// （`ENOENT` / `ENOTDIR`），「读不到属性」另有 `.unreadable` —— 见下方一节。
     func testVanishedFileDetected() throws {
         let url = try makeFile("gone")
         let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
@@ -116,6 +121,41 @@ final class SecondCheckTests: XCTestCase {
             ),
             .vanished
         )
+    }
+
+    // MARK: - unreadable（P-028：读不到 ≠ 已不存在）
+
+    /// **读不到属性** ⇒ 判 `.unreadable`，**不得**判 `.vanished`。
+    ///
+    /// 旧实现把 `try?` 的失败一律当 `.vanished`，于是「权限不足」被写进
+    /// 举证链成「文件已自行删除」—— 假事实（AC-18 举证链失真）。
+    /// 注入抛错闭包，把「读不到」这一情形单独钉住。
+    func testUnreadableAttributesAreNotVanished() {
+        let status = SecondCheck.checkIdentity(
+            path: "/some/path",
+            recordedBirthtime: Date(timeIntervalSince1970: 0)
+        ) { _ in
+            throw NSError(
+                domain: NSCocoaErrorDomain,
+                code: NSFileReadNoPermissionError,
+                userInfo: [NSUnderlyingErrorKey: NSError(domain: NSPOSIXErrorDomain, code: Int(EACCES))]
+            )
+        }
+        XCTAssertEqual(status, .unreadable(errno: EACCES))
+    }
+
+    /// 真文件系统：父目录不可进入 ⇒ 读不到属性 ⇒ `.unreadable`（真 FS 用例）。
+    func testPermissionDeniedPathIsUnreadableNotVanished() throws {
+        try XCTSkipIf(geteuid() == 0, "root 绕过权限位，造不出 EACCES")
+        let url = try makeFile("denied")
+        chmod(dir.path, 0)
+        defer { chmod(dir.path, 0o755) }
+
+        let status = SecondCheck.checkIdentity(
+            path: url.path,
+            recordedBirthtime: Date(timeIntervalSince1970: 0)
+        )
+        XCTAssertEqual(status, .unreadable(errno: EACCES), "权限不足必须判「读不到」，不是「已不存在」")
     }
 
     // MARK: - isLiveHeld（L0 二次检查复用）
