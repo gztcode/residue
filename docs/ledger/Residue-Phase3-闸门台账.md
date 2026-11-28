@@ -555,7 +555,7 @@ R2 v1.10 §6.3.5 第 2 条（`docs/contract/Residue-R2-技术方案-v1.10.md:524
 ### 状态（2026-11-21）
 
 ```
-swift test       599 全绿（基线 584 + CR-042 本单 15）
+swift test       605 全绿（基线 584 + CR-042 本单 15；P-012 本单 6 见「四之九」）
 verify_codes     11/11
 verify_a9        80/80
 --verify-wiring  117/117
@@ -563,6 +563,71 @@ check_all ✅ / verify_r2 ✅（PRD v5.6 / R2 v1.10）
 ```
 
 **一句话**：回收站占用**已度量，判据未改** —— 不记「已解决」。
+
+---
+
+## 四之九、2026-11-28（上游命令**边等边抽干**输出 · P-012）
+
+### 背景
+
+`Core/UpstreamCommand.swift` 的 `run()` 原实现是「**先等退出、后一次性读**」：
+
+```swift
+while proc.isRunning && Date() < deadline { usleep(10_000) }   // 等待期间一次都不读
+…
+let data = outPipe.fileHandleForReading.readDataToEndOfFile()  // 退出之后才读
+```
+
+macOS 的管道缓冲只有 64 KB 量级。子进程写满缓冲后阻塞在 `write`、**永不退出**；
+父进程在等它退出 ⇒ **父子互等** ⇒ 必然拖到 `perProbeTimeout`（2 s），
+然后只读到半截输出，还把这次调用判成失败/超时。
+
+实测 `npm cache ls` 输出 **352101 B / 3498 行** —— 这条命令**在白名单里**
+（`UpstreamWhitelist`），随时会被调用 ⇒ 这是一条**真实会踩**的路径，不是理论问题。
+
+另有一处同源缺陷：`errPipe` 建了却**从头到尾没读过** ⇒ 子进程往 stderr 写满缓冲
+一样堵死（「只抽 stdout 而 stderr 照样能堵死」）。
+
+### 本轮做了什么
+
+- 新增 `Core/UpstreamPipeDrainer.swift`：**后台线程持续读**管道，
+  读满 `cap` 之后**只停止保留、继续抽干**（停了子进程照样堵死 ⇒ 问题原样复现）；
+- `run()` 改为「**边等边抽干**」：stdout 与 stderr **各一条**抽干线程，
+  主循环只负责等退出与判超时；`perProbeTimeout` / `totalBudget` 判定口径不变；
+- 保留上限 `maxOutputBytes`：64 KB → **8 MiB**（`npm cache ls` 实测 352 KB ⇒ 8 MiB ≈ 23 倍余量，
+  真实命令不会被截断；又远小于「无上限」，单次探测内存上界可控）；
+- 截断用 **`RunOutcome.stdoutTruncated`** 这个独立事实位表达 ——
+  **不往 stdout 里塞标记串**（stdout 会被喂给 `SourceRoots.resolve` 当路径用，掺标记会污染路径）；
+- 超时时**已经收到的输出要保留**（原实现直接丢成 `nil` ⇒ 丢证据）；
+- 收尾：`terminate()` 后给 0.5 s 宽限，仍不退则 `SIGKILL`，随后 `waitUntilExit()` **收尸**
+  （原实现超时时 `terminate()` 之后**不收尸** ⇒ 子进程可能留成僵尸）；stderr 只抽干、不保留（§5.4 载体无该字段）；
+- 兜底（子进程已死却等不到 EOF）**只「请求停止」抽干、绝不关读端** ——
+  `FileHandle` 抛的是 ObjC 异常（`NSFileHandleOperationException`），Swift 的 `catch` 接不住
+  ⇒ 关一个正被阻塞读取的读端，可能让**下一次** `read` 直接崩。代价是「最多多挂一条线程」，比崩好。
+
+### 现状口径（必须原样理解）
+
+| 问题 | 现状 |
+|---|---|
+| 管道会不会再互等 | **不会**。等待期间 stdout / stderr 都在被读 |
+| 保留上限 | 8 MiB（**保留**上限，不是**停止读**上限）；超过后仍继续抽干 |
+| 截断怎么表达 | `RunOutcome.stdoutTruncated = true`；stdout 仍是前缀本身，不掺标记 |
+| 超时后已收输出 | **保留**（`stdout` = 已收到的部分），不再丢弃 |
+| §5.4 载体 | `UpstreamCommand` 字段**一个没动** ⇒ `scan.jsonl.upstreamCommands` 格式不变 |
+| 兜底（等不到 EOF） | **只请求停止抽干**，不关读端（关读端 ⇒ ObjC 异常崩，Swift 接不住） |
+| 代价 | 每次探测多两条后台线程（探测串行 ⇒ 峰值 2 条），读端各留一份 ≤ 8 MiB 缓冲 |
+
+### 状态（2026-11-28）
+
+```
+swift test       605 全绿（基线 584 + CR-042 本单 15 + P-012 本单 6）
+verify_codes     11/11
+verify_a9        80/80
+--verify-wiring  117/117
+check_all ✅ / verify_r2 ✅（PRD v5.6 / R2 v1.10）
+```
+
+**一句话**：管道**边等边抽干** —— 大输出不再必然超时；截断如实标记，不猜。
 
 ---
 
