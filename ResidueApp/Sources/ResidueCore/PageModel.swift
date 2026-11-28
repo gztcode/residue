@@ -117,10 +117,25 @@ public struct PageModel: Sendable {
 
     /// 一次清理的结果摘要（纯数据，文案在 Core 拼好 —— 界面不做算术）。
     public struct ExecutionNotice: Equatable, Sendable {
-        /// 实际移入废纸篓的条目数。
+        /// 已移入废纸篓**且执行记录已落盘**的条目数。
+        ///
+        /// ⚠️ **只算「记录已落盘」的那部分**（CR-045）：文件已经进了废纸篓，
+        /// 但执行记录没写进 `execution.jsonl` 时，那条记录**没法在重启后**提供
+        /// 恢复入口（`restorePath` 只有那条记录能提供）—— 那种条目单独记在
+        /// `unloggedCount` / `lostCount` 里，不许混进「已清理 N 条」。
         public let deletedCount: Int
-        /// 实际腾出的字节数。
+        /// 上述条数的字节数。
         public let deletedBytes: Int64
+        /// 已移入废纸篓、但**执行记录没写进磁盘**的条目数（**恢复信息已进待补写队列**，
+        /// 下次启动补写；本会话内 ⑦ 页仍可恢复，重启后靠补写保住）。
+        public let unloggedCount: Int
+        /// 上述条数的字节数。
+        public let unloggedBytes: Int64
+        /// 已移入废纸篓、**执行记录既没写进磁盘也没能进队列**的条目数
+        /// （**恢复信息彻底丢失** —— 只能用户自己去废纸篓取回）。
+        public let lostCount: Int
+        /// 上述条数的字节数。
+        public let lostBytes: Int64
         /// 因上限顺延的条目数。
         public let deferredCount: Int
         /// 失败条目数（执行期错误）。
@@ -131,19 +146,33 @@ public struct PageModel: Sendable {
         public init(
             deletedCount: Int,
             deletedBytes: Int64,
+            unloggedCount: Int = 0,
+            unloggedBytes: Int64 = 0,
+            lostCount: Int = 0,
+            lostBytes: Int64 = 0,
             deferredCount: Int,
             failedCount: Int,
             blockedCount: Int
         ) {
             self.deletedCount = deletedCount
             self.deletedBytes = deletedBytes
+            self.unloggedCount = unloggedCount
+            self.unloggedBytes = unloggedBytes
+            self.lostCount = lostCount
+            self.lostBytes = lostBytes
             self.deferredCount = deferredCount
             self.failedCount = failedCount
             self.blockedCount = blockedCount
         }
 
+        /// 本次移入废纸篓的**全部**条目数（含记录没落盘的那些）。
+        public var deletedTotalCount: Int { deletedCount + unloggedCount + lostCount }
+
         /// 是否什么都没做（用户最需要知道的那种「没反应」）。
-        public var didNothing: Bool { deletedCount == 0 }
+        ///
+        /// ⚠️ **必须把没落盘的条目算进来**（CR-045）：文件已经进了废纸篓，
+        /// 说「本次没有删除任何条目」就是**撒谎**。
+        public var didNothing: Bool { deletedTotalCount == 0 }
 
         /// 摘要文案（**唯一实现处**）。
         public var summary: String {
@@ -161,12 +190,28 @@ public struct PageModel: Sendable {
             }
             // CR-042：本产品只 rename 到废纸篓，**磁盘并没有腾出来** ——
             // 摘要必须把「已移入废纸篓」与「已释放」分开，否则用户以为清理完就好了。
-            var parts = [
-                L.pick(
+            //
+            // CR-045：**记录没落盘的条目不许混进「已清理 N 条」** ——
+            // 那一条的恢复入口还不存在，混进去等于告诉用户「一切正常」。
+            var parts: [String] = []
+            if deletedCount > 0 {
+                parts.append(L.pick(
                     "已移入废纸篓 \(deletedCount) 条，共 \(MetricUnit.formatBytes(Int(deletedBytes)))（回收站仍占用，尚未释放磁盘空间）",
                     "Moved \(deletedCount) item(s) to Trash, \(MetricUnit.formatBytes(Int(deletedBytes))) total (still in Trash — disk space not freed yet)"
-                )
-            ]
+                ))
+            }
+            if unloggedCount > 0 {
+                parts.append(L.pick(
+                    "另有 \(unloggedCount) 条已移入废纸篓（共 \(MetricUnit.formatBytes(Int(unloggedBytes)))），但执行记录没写进磁盘（恢复信息已存进待补写队列，将在下次启动时补写）",
+                    "Another \(unloggedCount) item(s) moved to Trash (\(MetricUnit.formatBytes(Int(unloggedBytes)))), but the execution record was not written to disk (restore details are queued and will be written on next launch)"
+                ))
+            }
+            if lostCount > 0 {
+                parts.append(L.pick(
+                    "另有 \(lostCount) 条已移入废纸篓（共 \(MetricUnit.formatBytes(Int(lostBytes)))），但执行记录没写进磁盘且无法补写（无法通过应用恢复，请自行到废纸篓取回）",
+                    "Another \(lostCount) item(s) moved to Trash (\(MetricUnit.formatBytes(Int(lostBytes)))), but the execution record was neither written nor queued (cannot be restored from the app — please take them back from Trash yourself)"
+                ))
+            }
             if deferredCount > 0 {
                 parts.append(L.pick("顺延 \(deferredCount) 条", "\(deferredCount) deferred"))
             }

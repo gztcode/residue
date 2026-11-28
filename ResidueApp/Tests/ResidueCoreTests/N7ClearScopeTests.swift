@@ -67,6 +67,12 @@ final class N7ClearScopeTests: XCTestCase {
             made.append(url)
         }
 
+        // CR-045：待补写队列（**含用户路径副本** ⇒ 必须在清除范围内）
+        try Data("{}".utf8).write(to: stateFile.pendingExecutionURL)
+        made.append(stateFile.pendingExecutionURL)
+        try Data("x".utf8).write(to: JSONLStore.temporaryURL(for: stateFile.pendingExecutionURL))
+        made.append(JSONLStore.temporaryURL(for: stateFile.pendingExecutionURL))
+
         // 主载体（`a` 的载体）—— **不在**清除范围内
         try Data("carrier".utf8).write(to: stateFile.fileURL)
         made.append(stateFile.fileURL)
@@ -90,7 +96,9 @@ final class N7ClearScopeTests: XCTestCase {
             stateFile.migrationProgressURL,
             stateFile.backupURL,
             stateFile.tempURL,
-            stateFile.corruptURL
+            stateFile.corruptURL,
+            stateFile.pendingExecutionURL,
+            JSONLStore.temporaryURL(for: stateFile.pendingExecutionURL)
         ]
         for expected in expected {
             XCTAssertTrue(
@@ -98,6 +106,24 @@ final class N7ClearScopeTests: XCTestCase {
                 "清除范围漏了 \(expected.lastPathComponent)"
             )
         }
+    }
+
+    /// CR-045：待补写队列（`state/pending-execution.jsonl`）**含用户路径副本**
+    /// ⇒ 必须进清除范围（漏清即等于「清除后仍留用户路径副本」—— 质量 B-07）。
+    func testScopeContainsPendingExecutionQueue() {
+        let scope = N7ClearScope.paths(
+            stateFile: stateFile,
+            checkpoints: checkpoints,
+            recordsDirectory: recordsDirectory
+        )
+        XCTAssertTrue(
+            scope.contains(stateFile.pendingExecutionURL),
+            "待补写队列漏清 ⇒ 清除后仍留用户路径副本"
+        )
+        XCTAssertTrue(
+            scope.contains(JSONLStore.temporaryURL(for: stateFile.pendingExecutionURL)),
+            "待补写队列的临时文件也漏清了"
+        )
     }
 
     /// **主载体不在范围内**（不变量④ · S2 · PRD 偏差 3）。
@@ -135,7 +161,9 @@ final class N7ClearScopeTests: XCTestCase {
             stateFile.migrationProgressURL,
             stateFile.backupURL,
             stateFile.tempURL,
-            stateFile.corruptURL
+            stateFile.corruptURL,
+            stateFile.pendingExecutionURL,
+            JSONLStore.temporaryURL(for: stateFile.pendingExecutionURL)
         ] {
             XCTAssertFalse(fm.fileExists(atPath: url.path), "\(url.lastPathComponent) 没清掉")
         }

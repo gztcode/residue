@@ -410,7 +410,10 @@ struct ExecutionNoticeCard: View {
 
     private var accent: SwiftUI.Color {
         guard usesSignalAccent else { return Tokens.Color.textSecondary }
+        // ⚠️ **记录没落盘也算「需注意」**（CR-045）：那几条的**恢复入口还不存在** ——
+        // 用信号色（= 干净成功的表情）会告诉用户「一切正常」。
         return notice.didNothing || notice.failedCount > 0
+            || notice.unloggedCount > 0 || notice.lostCount > 0
             ? Tokens.Color.textSecondary
             : Tokens.Color.signal
     }

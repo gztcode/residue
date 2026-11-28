@@ -53,6 +53,15 @@ public struct StateFile: Sendable {
     /// R2 v1.10 §10.3 —— N7「一键清除」范围里点名了它（含候选路径）。
     /// **当前实现无人写入**（契约点名在先，实现待补），但清除范围仍按契约列。
     public let journalURL: URL
+    /// 待补写队列（`<stateDir>/state/pending-execution.jsonl`）。
+    ///
+    /// `execution.jsonl` 写盘失败时，**还没写进举证链的执行记录**（含 `restorePath`
+    /// —— 那是恢复入口的唯一依据）先落在这里，下次启动补写回去。
+    ///
+    /// - **不计入 M6 计量**（M6 只算 `records/*.jsonl`）—— 它不是举证链；
+    /// - **计入 N7「一键清除」范围**（含用户路径副本，漏清即等于「清除后仍留副本」，
+    ///   质量 B-07）。
+    public let pendingExecutionURL: URL
     /// 可用字节查询的**注入点**（`nil` = 用卷的真实剩余容量）。
     ///
     /// 空间预检必须能被测：没有注入点，`E-305` 那条分支就只能靠
@@ -75,7 +84,15 @@ public struct StateFile: Sendable {
         self.journalURL = dir
             .appendingPathComponent("state", isDirectory: true)
             .appendingPathComponent("journal.jsonl")
+        self.pendingExecutionURL = StateFile.pendingExecutionURL(in: dir)
         self.availableBytesProvider = availableBytesProvider
+    }
+
+    /// 待补写队列的路径（**唯一实现处** —— `StateFile` 与 `ExecutionRecordStore` 共用）。
+    public static func pendingExecutionURL(in directory: URL) -> URL {
+        directory
+            .appendingPathComponent("state", isDirectory: true)
+            .appendingPathComponent("pending-execution.jsonl")
     }
 
     /// 默认状态目录：`~/Library/Application Support/Residue`
